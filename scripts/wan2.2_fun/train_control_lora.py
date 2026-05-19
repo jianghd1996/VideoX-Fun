@@ -170,15 +170,21 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     transformer3d_1 = accelerator.unwrap_model(transformer3d) if type(transformer3d).__name__ == 'DistributedDataParallel' else transformer3d
                     
                     sub_path = config['transformer_additional_kwargs'].get('transformer_high_noise_model_subpath', 'transformer')
+                    tpath = os.path.join(args.pretrained_model_name_or_path, sub_path) if sub_path else args.pretrained_model_name_or_path
+                    if not os.path.isdir(tpath):
+                        tpath = args.pretrained_model_name_or_path
                     transformer3d_2 = Wan2_2Transformer3DModel.from_pretrained(
-                        os.path.join(args.pretrained_model_name_or_path, sub_path),
+                        tpath,
                         transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs']),
                     ).to(weight_dtype)
                     
                 else:
                     sub_path = config['transformer_additional_kwargs'].get('transformer_low_noise_model_subpath', 'transformer')
+                    tpath = os.path.join(args.pretrained_model_name_or_path, sub_path) if sub_path else args.pretrained_model_name_or_path
+                    if not os.path.isdir(tpath):
+                        tpath = args.pretrained_model_name_or_path
                     transformer3d_1 = Wan2_2Transformer3DModel.from_pretrained(
-                        os.path.join(args.pretrained_model_name_or_path, sub_path),
+                        tpath,
                         transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs']),
                     ).to(weight_dtype)
 
@@ -203,15 +209,25 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
 
             for i in range(len(args.validation_prompts)):
                 import cv2
+                from PIL import Image
                 cap = cv2.VideoCapture(args.validation_paths[i])
                 width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                # 提取首帧作为 start_image
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                ret_first, first_frame = cap.read()
+                # 提取尾帧作为 end_image
+                cap.set(cv2.CAP_PROP_POS_FRAMES, total_frames - 1)
+                ret_last, last_frame = cap.read()
                 cap.release()
+                start_image = Image.fromarray(cv2.cvtColor(first_frame, cv2.COLOR_BGR2RGB)) if ret_first else None
+                end_image = Image.fromarray(cv2.cvtColor(last_frame, cv2.COLOR_BGR2RGB)) if ret_last else None
 
                 width, height = calculate_dimensions(args.image_sample_size * args.image_sample_size,  width / height)
                 video_length = int((args.video_sample_n_frames - 1) // vae.config.temporal_compression_ratio * vae.config.temporal_compression_ratio) + 1 if args.video_sample_n_frames != 1 else 1
                 
-                inpaint_video, inpaint_video_mask, clip_image = get_image_to_video_latent(None, None, video_length=video_length, sample_size=[height, width])
+                inpaint_video, inpaint_video_mask, clip_image = get_image_to_video_latent(start_image, end_image, video_length=video_length, sample_size=[height, width])
                 input_video, input_video_mask, ref_image, clip_image = get_video_to_video_latent(args.validation_paths[i], video_length=video_length, sample_size=[height, width])
                 sample = pipeline(
                     args.validation_prompts[i], 
@@ -229,8 +245,22 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     boundary            = config['transformer_additional_kwargs'].get('boundary', 0.900)
                 ).videos
                 os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
+
+                # 拼接 GT (input_video) + Sample 水平并排
+                gt_np = input_video[0].cpu().float().numpy()   # [C, T, H, W]
+                sp_np = sample[0].cpu().float().numpy()         # [C, T, H, W]
+                # 对齐帧数（取 min）
+                min_t = min(gt_np.shape[1], sp_np.shape[1])
+                gt_np = gt_np[:, :min_t]
+                sp_np = sp_np[:, :min_t]
+                # 转 [T, H, W, C] uint8
+                gt_frames = (gt_np.transpose(1, 2, 3, 0).clip(0, 1) * 255).astype(np.uint8)
+                sp_frames = (sp_np.transpose(1, 2, 3, 0).clip(0, 1) * 255).astype(np.uint8)
+                concat = np.concatenate([gt_frames, sp_frames], axis=2)  # [T, H, W*2, C]
+                concat_sample = torch.from_numpy(concat.transpose(3, 0, 1, 2) / 255.0).unsqueeze(0).float()
+
                 save_videos_grid(
-                    sample, 
+                    concat_sample, 
                     os.path.join(
                         args.output_dir, 
                         f"sample/sample-{global_step}-rank{accelerator.process_index}-image-{i}.mp4"
@@ -870,7 +900,7 @@ def main():
 
     # Get Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(
-        os.path.join(args.pretrained_model_name_or_path, config['text_encoder_kwargs'].get('tokenizer_subpath', 'tokenizer')),
+        os.path.join(args.pretrained_model_name_or_path, config['text_encoder_kwargs'].get('tokenizer_subpath', 'google/umt5-xxl')),
     )
 
     def deepspeed_zero_init_disabled_context_manager():
@@ -895,7 +925,7 @@ def main():
     with ContextManagers(deepspeed_zero_init_disabled_context_manager()):
         # Get Text encoder
         text_encoder = WanT5EncoderModel.from_pretrained(
-            os.path.join(args.pretrained_model_name_or_path, config['text_encoder_kwargs'].get('text_encoder_subpath', 'text_encoder')),
+            os.path.join(args.pretrained_model_name_or_path, config['text_encoder_kwargs'].get('text_encoder_subpath', '')),
             additional_kwargs=OmegaConf.to_container(config['text_encoder_kwargs']),
             low_cpu_mem_usage=True,
             torch_dtype=weight_dtype,
@@ -907,7 +937,7 @@ def main():
             "AutoencoderKLWan3_8": AutoencoderKLWan3_8
         }[config['vae_kwargs'].get('vae_type', 'AutoencoderKLWan')]
         vae = Chosen_AutoencoderKL.from_pretrained(
-            os.path.join(args.pretrained_model_name_or_path, config['vae_kwargs'].get('vae_subpath', 'vae')),
+            os.path.join(args.pretrained_model_name_or_path, config['vae_kwargs'].get('vae_subpath', '')),
             additional_kwargs=OmegaConf.to_container(config['vae_kwargs']),
         )
         vae.eval()
@@ -921,8 +951,12 @@ def main():
         sub_path = config['transformer_additional_kwargs'].get('transformer_low_noise_model_subpath', 'transformer')
     else:
         sub_path = config['transformer_additional_kwargs'].get('transformer_high_noise_model_subpath', 'transformer')
+    tpath = os.path.join(args.pretrained_model_name_or_path, sub_path) if sub_path else args.pretrained_model_name_or_path
+    if not os.path.isdir(tpath):
+        logger.info(f"Transformer subpath '{tpath}' not found, falling back to root: {args.pretrained_model_name_or_path}")
+        tpath = args.pretrained_model_name_or_path
     transformer3d = Wan2_2Transformer3DModel.from_pretrained(
-        os.path.join(args.pretrained_model_name_or_path, sub_path),
+        tpath,
         transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs']),
     ).to(weight_dtype)
 
