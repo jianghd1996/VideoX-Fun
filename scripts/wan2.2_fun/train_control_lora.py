@@ -1126,7 +1126,8 @@ def main():
             meta_json = json.load(f)
         sampled = random.sample(meta_json, min(args.validation_samples, len(meta_json)))
         args.validation_prompts = [item['text'] for item in sampled]
-        args.validation_paths = [os.path.join(args.train_data_dir, item['file_path']) for item in sampled]
+        # control_file_path is already absolute; prefer it for control training
+        args.validation_paths = [item.get('control_file_path', item['file_path']) for item in sampled]
         logger.info(f"Auto-sampled {len(sampled)} validation entries from training JSON.")
 
     def worker_init_fn(_seed):
@@ -1673,6 +1674,24 @@ def main():
         start_num_idx = 0
         train_sampling_steps = args.train_sampling_steps
     idx_sampling = DiscreteSampling(train_sampling_steps, start_num_idx=start_num_idx, uniform_sampling=args.uniform_sampling)
+
+    # Run validation once at start to verify pipeline works
+    if args.validation_prompts is not None and accelerator.is_main_process:
+        logger.info("Running initial validation at training start...")
+        log_validation(
+            vae,
+            text_encoder,
+            tokenizer,
+            transformer3d,
+            network,
+            args,
+            config,
+            accelerator,
+            weight_dtype,
+            global_step=0,
+        )
+        gc.collect()
+        torch.cuda.empty_cache()
 
     for epoch in range(first_epoch, args.num_train_epochs):
         train_loss = 0.0
