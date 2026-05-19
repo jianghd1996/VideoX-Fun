@@ -209,7 +209,7 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
 
             for i in range(len(args.validation_prompts)):
                 import cv2
-                from PIL import Image
+                import tempfile
                 cap = cv2.VideoCapture(args.validation_paths[i])
                 width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -221,13 +221,27 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 cap.set(cv2.CAP_PROP_POS_FRAMES, total_frames - 1)
                 ret_last, last_frame = cap.read()
                 cap.release()
-                start_image = Image.fromarray(cv2.cvtColor(first_frame, cv2.COLOR_BGR2RGB)) if ret_first else None
-                end_image = Image.fromarray(cv2.cvtColor(last_frame, cv2.COLOR_BGR2RGB)) if ret_last else None
+                # 保存为临时文件，get_image_to_video_latent 需要文件路径
+                start_image_path = None
+                end_image_path = None
+                if ret_first:
+                    tmp_start = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+                    cv2.imwrite(tmp_start.name, first_frame)
+                    start_image_path = tmp_start.name
+                if ret_last:
+                    tmp_end = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+                    cv2.imwrite(tmp_end.name, last_frame)
+                    end_image_path = tmp_end.name
 
                 width, height = calculate_dimensions(args.image_sample_size * args.image_sample_size,  width / height)
                 video_length = int((args.video_sample_n_frames - 1) // vae.config.temporal_compression_ratio * vae.config.temporal_compression_ratio) + 1 if args.video_sample_n_frames != 1 else 1
                 
-                inpaint_video, inpaint_video_mask, clip_image = get_image_to_video_latent(start_image, end_image, video_length=video_length, sample_size=[height, width])
+                inpaint_video, inpaint_video_mask, clip_image = get_image_to_video_latent(start_image_path, end_image_path, video_length=video_length, sample_size=[height, width])
+                # 清理临时帧文件
+                if start_image_path:
+                    os.unlink(start_image_path)
+                if end_image_path:
+                    os.unlink(end_image_path)
                 input_video, input_video_mask, ref_image, clip_image = get_video_to_video_latent(args.validation_paths[i], video_length=video_length, sample_size=[height, width])
                 sample = pipeline(
                     args.validation_prompts[i], 
