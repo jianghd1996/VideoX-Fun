@@ -1,13 +1,17 @@
-export MODEL_NAME="models/Diffusion_Transformer/Wan2.2-Fun-A14B-Control"
+export MODEL_NAME="/mnt/DataPart/jianghongda/VideoX-Fun/models/Diffusion_Transformer/Wan2.2-Fun-5B-Control"
 export DATASET_NAME="datasets/internal_datasets/"
-export DATASET_META_NAME="datasets/internal_datasets/metadata.json"
+export DATASET_META_NAME="/mnt/DataPart/jianghongda/dataset/merge_all.json"
+
+# Use 7 GPUs (GPU 0-6), GPU 7 is not available
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6
+
 # NCCL_IB_DISABLE=1 and NCCL_P2P_DISABLE=1 are used in multi nodes without RDMA. 
 # export NCCL_IB_DISABLE=1
 # export NCCL_P2P_DISABLE=1
 NCCL_DEBUG=INFO
 
 accelerate launch --mixed_precision="bf16" scripts/wan2.2_fun/train_control_lora.py \
-  --config_path="config/wan2.2/wan_civitai_i2v.yaml" \
+  --config_path="config/wan2.2/wan_civitai_5b.yaml" \
   --pretrained_model_name_or_path=$MODEL_NAME \
   --train_data_dir=$DATASET_NAME \
   --train_data_meta=$DATASET_META_NAME \
@@ -24,7 +28,7 @@ accelerate launch --mixed_precision="bf16" scripts/wan2.2_fun/train_control_lora
   --checkpointing_steps=50 \
   --learning_rate=1e-04 \
   --seed=42 \
-  --output_dir="output_dir_wan2.2_fun_control_lora" \
+  --output_dir="output_dir_wan2.2_5b_control_lora" \
   --gradient_checkpointing \
   --mixed_precision="bf16" \
   --adam_weight_decay=3e-2 \
@@ -39,9 +43,8 @@ accelerate launch --mixed_precision="bf16" scripts/wan2.2_fun/train_control_lora
   --control_ref_image="random" \
   --add_inpaint_info \
   --add_full_ref_image_in_self_attention \
-  --boundary_type="low" \
   --rank=64 \
   --network_alpha=32 \
   --target_name="q,k,v,ffn.0,ffn.2" \
   --use_peft_lora \
-  --low_vram 
+  --low_vram
