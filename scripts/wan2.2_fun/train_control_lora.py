@@ -260,17 +260,31 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 ).videos
                 os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
 
-                # 拼接 GT (input_video) + Sample 水平并排
-                gt_np = input_video[0].cpu().float().numpy()   # [C, T, H, W]
-                sp_np = sample[0].cpu().float().numpy()         # [C, T, H, W]
+                # 加载 GT 视频帧用于对比（来自 file_path，不是 control_file_path）
+                gt_path = getattr(args, 'validation_gt_paths', args.validation_paths)[i]
+                gt_cap = cv2.VideoCapture(gt_path)
+                gt_frames_list = []
+                while True:
+                    ret, frame = gt_cap.read()
+                    if not ret:
+                        break
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    frame = cv2.resize(frame, (width, height))
+                    gt_frames_list.append(frame)
+                gt_cap.release()
+                gt_np = np.stack(gt_frames_list)  # [T, H, W, C]
+
+                # Sample 帧
+                sp_np = sample[0].cpu().float().numpy()  # [C, T, H, W]
+                sp_frames = (sp_np.transpose(1, 2, 3, 0).clip(0, 1) * 255).astype(np.uint8)  # [T, H, W, C]
+
                 # 对齐帧数（取 min）
-                min_t = min(gt_np.shape[1], sp_np.shape[1])
-                gt_np = gt_np[:, :min_t]
-                sp_np = sp_np[:, :min_t]
-                # 转 [T, H, W, C] uint8
-                gt_frames = (gt_np.transpose(1, 2, 3, 0).clip(0, 1) * 255).astype(np.uint8)
-                sp_frames = (sp_np.transpose(1, 2, 3, 0).clip(0, 1) * 255).astype(np.uint8)
-                concat = np.concatenate([gt_frames, sp_frames], axis=2)  # [T, H, W*2, C]
+                min_t = min(gt_np.shape[0], sp_frames.shape[0])
+                gt_np = gt_np[:min_t]
+                sp_frames = sp_frames[:min_t]
+
+                # 水平拼接: GT 左 | Sample 右
+                concat = np.concatenate([gt_np, sp_frames], axis=2)  # [T, H, W*2, C]
                 concat_sample = torch.from_numpy(concat.transpose(3, 0, 1, 2) / 255.0).unsqueeze(0).float()
 
                 save_videos_grid(
@@ -1184,6 +1198,8 @@ def main():
         args.validation_prompts = [item['text'] for item in sampled]
         # control_file_path is already absolute; prefer it for control training
         args.validation_paths = [item.get('control_file_path', item['file_path']) for item in sampled]
+        # file_path is the original GT video for comparison
+        args.validation_gt_paths = [item['file_path'] for item in sampled]
         logger.info(f"Auto-sampled {len(sampled)} validation entries from training JSON.")
 
     def worker_init_fn(_seed):
