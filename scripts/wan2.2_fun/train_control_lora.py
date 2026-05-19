@@ -161,6 +161,10 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
             if args.boundary_type == "full":
                 transformer3d_1 = accelerator.unwrap_model(transformer3d) if type(transformer3d).__name__ == 'DistributedDataParallel' else transformer3d
                 transformer3d_2 = None
+            elif config['transformer_additional_kwargs'].get('transformer_combination_type', 'moe') == 'single':
+                # Single dense model: use the trained transformer directly, no second model
+                transformer3d_1 = accelerator.unwrap_model(transformer3d) if type(transformer3d).__name__ == 'DistributedDataParallel' else transformer3d
+                transformer3d_2 = None
             else:
                 if args.boundary_type == "low":
                     transformer3d_1 = accelerator.unwrap_model(transformer3d) if type(transformer3d).__name__ == 'DistributedDataParallel' else transformer3d
@@ -909,7 +913,11 @@ def main():
         vae.eval()
             
     # Get Transformer
-    if args.boundary_type == "low" or args.boundary_type == "full":
+    transformer_combination_type = config['transformer_additional_kwargs'].get('transformer_combination_type', 'moe')
+    if transformer_combination_type == 'single':
+        # Single dense model: load from root (or configured subpath)
+        sub_path = config['transformer_additional_kwargs'].get('transformer_low_noise_model_subpath', '.')
+    elif args.boundary_type == "low" or args.boundary_type == "full":
         sub_path = config['transformer_additional_kwargs'].get('transformer_low_noise_model_subpath', 'transformer')
     else:
         sub_path = config['transformer_additional_kwargs'].get('transformer_high_noise_model_subpath', 'transformer')
