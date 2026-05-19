@@ -318,6 +318,12 @@ def parse_args():
         help=("A set of control videos evaluated every `--validation_epochs` and logged to `--report_to`."),
     )
     parser.add_argument(
+        "--validation_samples",
+        type=int,
+        default=0,
+        help=("If >0, randomly sample this many entries from training JSON for validation (overrides --validation_prompts/--validation_paths)."),
+    )
+    parser.add_argument(
         "--output_dir",
         type=str,
         default="sd-model-finetuned",
@@ -1112,6 +1118,16 @@ def main():
         enable_bucket=args.enable_bucket, 
         enable_camera_info=args.train_mode == "control_camera_ref"
     )
+
+    # Auto-populate validation prompts/paths from training data if validation_samples is set
+    if args.validation_samples > 0 and args.validation_prompts is None:
+        import json
+        with open(args.train_data_meta, 'r') as f:
+            meta_json = json.load(f)
+        sampled = random.sample(meta_json, min(args.validation_samples, len(meta_json)))
+        args.validation_prompts = [item['text'] for item in sampled]
+        args.validation_paths = [os.path.join(args.train_data_dir, item['file_path']) for item in sampled]
+        logger.info(f"Auto-sampled {len(sampled)} validation entries from training JSON.")
 
     def worker_init_fn(_seed):
         _seed = _seed * 256

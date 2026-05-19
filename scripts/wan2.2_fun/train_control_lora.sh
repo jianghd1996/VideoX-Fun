@@ -1,9 +1,9 @@
 export MODEL_NAME="/mnt/DataPart/jianghongda/VideoX-Fun/models/Diffusion_Transformer/Wan2.2-Fun-5B-Control"
 export DATASET_NAME="datasets/internal_datasets/"
-export DATASET_META_NAME="/mnt/DataPart/jianghongda/dataset/merge_all.json"
+export DATASET_META_NAME="/mnt/DataPart/jianghongda/dataset/Wildrgb/metadata.json"
 
-# Use 7 GPUs (GPU 0-6), GPU 7 is not available
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6
+# Only GPU 7 is available
+export CUDA_VISIBLE_DEVICES=7
 
 # NCCL_IB_DISABLE=1 and NCCL_P2P_DISABLE=1 are used in multi nodes without RDMA. 
 # export NCCL_IB_DISABLE=1
@@ -47,4 +47,5 @@ accelerate launch --mixed_precision="bf16" scripts/wan2.2_fun/train_control_lora
   --network_alpha=32 \
   --target_name="q,k,v,ffn.0,ffn.2" \
   --use_peft_lora \
-  --low_vram
+  --low_vram \
+  --validation_samples=4
