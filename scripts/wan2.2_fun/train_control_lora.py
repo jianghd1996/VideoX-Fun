@@ -22,6 +22,7 @@ import math
 import os
 import pickle
 import random
+import json
 import shutil
 import sys
 
@@ -296,8 +297,22 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 gt_np = gt_np[:min_t]
                 sp_frames = sp_frames[:min_t]
 
-                # 水平拼接: GT 左 | Sample 右
-                concat = np.concatenate([gt_np, sp_frames], axis=2)  # [T, H, W*2, C]
+                # 加载 control 视频帧用于拼接
+                control_cap = cv2.VideoCapture(args.validation_paths[i])
+                control_frames_list = []
+                while True:
+                    ret, frame = control_cap.read()
+                    if not ret:
+                        break
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    frame = cv2.resize(frame, (width, height))
+                    control_frames_list.append(frame)
+                control_cap.release()
+                control_np = np.stack(control_frames_list)
+                control_np = control_np[:min_t]
+
+                # 水平拼接: GT 左 | Control 中 | 生成结果 右
+                concat = np.concatenate([gt_np, control_np, sp_frames], axis=2)  # [T, H, W*3, C]
                 concat_sample = torch.from_numpy(concat.transpose(3, 0, 1, 2) / 255.0).unsqueeze(0).float()
 
                 save_videos_grid(
@@ -1778,6 +1793,9 @@ def main():
         gc.collect()
         torch.cuda.empty_cache()
 
+    # Initialize loss log for later analysis
+    loss_log_path = os.path.join(args.output_dir, "training_loss.jsonl")
+
     for epoch in range(first_epoch, args.num_train_epochs):
         train_loss = 0.0
         batch_sampler.sampler.generator = torch.Generator().manual_seed(args.seed + epoch)
@@ -2173,6 +2191,14 @@ def main():
                 progress_bar.update(1)
                 global_step += 1
                 accelerator.log({"train_loss": train_loss}, step=global_step)
+                # Save loss to file for later analysis (main process only)
+                if accelerator.is_main_process:
+                    with open(loss_log_path, "a") as f:
+                        f.write(json.dumps({
+                            "global_step": global_step,
+                            "loss": train_loss,
+                            "lr": lr_scheduler.get_last_lr()[0]
+                        }) + "\n")
                 train_loss = 0.0
 
                 if global_step % args.checkpointing_steps == 0:
