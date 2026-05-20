@@ -218,28 +218,38 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 control_total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
                 cap.release()
 
-                # 从 GT video 提取首帧和尾帧（用真实原始帧做 image-to-video 条件，而非 control 帧）
-                gt_path = getattr(args, 'validation_gt_paths', args.validation_paths)[i]
-                gt_cap = cv2.VideoCapture(gt_path)
-                gt_total_frames = int(gt_cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                # 提取 GT 首帧作为 start_image
-                gt_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                ret_first, first_frame = gt_cap.read()
-                # 提取 GT 尾帧作为 end_image
-                gt_cap.set(cv2.CAP_PROP_POS_FRAMES, gt_total_frames - 1)
-                ret_last, last_frame = gt_cap.read()
-                gt_cap.release()
-                # 保存为临时文件，get_image_to_video_latent 需要文件路径
+                # 获取 I2V 首尾帧
                 start_image_path = None
                 end_image_path = None
-                if ret_first:
-                    tmp_start = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
-                    cv2.imwrite(tmp_start.name, first_frame)
-                    start_image_path = tmp_start.name
-                if ret_last:
-                    tmp_end = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
-                    cv2.imwrite(tmp_end.name, last_frame)
-                    end_image_path = tmp_end.name
+                is_temp_start = False
+                is_temp_end = False
+
+                # 优先使用 validation_start_images / validation_end_images（来自 validation_data_dir）
+                start_images = getattr(args, 'validation_start_images', None)
+                end_images = getattr(args, 'validation_end_images', None)
+                if start_images is not None and end_images is not None and start_images[i] is not None and end_images[i] is not None:
+                    start_image_path = start_images[i]
+                    end_image_path = end_images[i]
+                else:
+                    # 兜底：从 GT video 提取首帧和尾帧
+                    gt_path = getattr(args, 'validation_gt_paths', args.validation_paths)[i]
+                    gt_cap = cv2.VideoCapture(gt_path)
+                    gt_total_frames = int(gt_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    gt_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    ret_first, first_frame = gt_cap.read()
+                    gt_cap.set(cv2.CAP_PROP_POS_FRAMES, gt_total_frames - 1)
+                    ret_last, last_frame = gt_cap.read()
+                    gt_cap.release()
+                    if ret_first:
+                        tmp_start = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+                        cv2.imwrite(tmp_start.name, first_frame)
+                        start_image_path = tmp_start.name
+                        is_temp_start = True
+                    if ret_last:
+                        tmp_end = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+                        cv2.imwrite(tmp_end.name, last_frame)
+                        end_image_path = tmp_end.name
+                        is_temp_end = True
 
                 width, height = calculate_dimensions(args.image_sample_size * args.image_sample_size,  width / height)
                 temporal_ratio = vae.config.temporal_compression_ratio
@@ -251,10 +261,10 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 video_length = max(video_length, 1)
                 
                 inpaint_video, inpaint_video_mask, clip_image = get_image_to_video_latent(start_image_path, end_image_path, video_length=video_length, sample_size=[height, width])
-                # 清理临时帧文件
-                if start_image_path:
+                # 清理临时帧文件（直接路径的文件不删）
+                if is_temp_start and start_image_path:
                     os.unlink(start_image_path)
-                if end_image_path:
+                if is_temp_end and end_image_path:
                     os.unlink(end_image_path)
                 input_video, input_video_mask, ref_image, clip_image = get_video_to_video_latent(args.validation_paths[i], video_length=video_length, sample_size=[height, width])
                 sample = pipeline(
@@ -274,28 +284,25 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 ).videos
                 os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
 
-                # 加载 GT 视频帧用于对比（来自 file_path，不是 control_file_path）
-                gt_path = getattr(args, 'validation_gt_paths', args.validation_paths)[i]
-                gt_cap = cv2.VideoCapture(gt_path)
-                gt_frames_list = []
-                while True:
-                    ret, frame = gt_cap.read()
-                    if not ret:
-                        break
-                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    frame = cv2.resize(frame, (width, height))
-                    gt_frames_list.append(frame)
-                gt_cap.release()
-                gt_np = np.stack(gt_frames_list)  # [T, H, W, C]
+                # 加载 GT 视频帧用于对比（如果有的话）
+                has_gt = getattr(args, 'validation_gt_paths', None) is not None
+                if has_gt:
+                    gt_path = args.validation_gt_paths[i]
+                    gt_cap = cv2.VideoCapture(gt_path)
+                    gt_frames_list = []
+                    while True:
+                        ret, frame = gt_cap.read()
+                        if not ret:
+                            break
+                        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        frame = cv2.resize(frame, (width, height))
+                        gt_frames_list.append(frame)
+                    gt_cap.release()
+                    gt_np = np.stack(gt_frames_list)  # [T, H, W, C]
 
                 # Sample 帧
                 sp_np = sample[0].cpu().float().numpy()  # [C, T, H, W]
                 sp_frames = (sp_np.transpose(1, 2, 3, 0).clip(0, 1) * 255).astype(np.uint8)  # [T, H, W, C]
-
-                # 对齐帧数（取 min）
-                min_t = min(gt_np.shape[0], sp_frames.shape[0])
-                gt_np = gt_np[:min_t]
-                sp_frames = sp_frames[:min_t]
 
                 # 加载 control 视频帧用于拼接
                 control_cap = cv2.VideoCapture(args.validation_paths[i])
@@ -309,10 +316,20 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     control_frames_list.append(frame)
                 control_cap.release()
                 control_np = np.stack(control_frames_list)
-                control_np = control_np[:min_t]
 
-                # 水平拼接: GT 左 | Control 中 | 生成结果 右
-                concat = np.concatenate([gt_np, control_np, sp_frames], axis=2)  # [T, H, W*3, C]
+                # 对齐帧数（取 min）
+                sp_frames = sp_frames[:control_np.shape[0]]
+                control_np = control_np[:sp_frames.shape[0]]
+                if has_gt:
+                    gt_np = gt_np[:sp_frames.shape[0]]
+
+                # 水平拼接
+                if has_gt:
+                    # GT 左 | Control 中 | 生成结果 右
+                    concat = np.concatenate([gt_np, control_np, sp_frames], axis=2)  # [T, H, W*3, C]
+                else:
+                    # Control 左 | 生成结果 右（无 GT）
+                    concat = np.concatenate([control_np, sp_frames], axis=2)  # [T, H, W*2, C]
                 concat_sample = torch.from_numpy(concat.transpose(3, 0, 1, 2) / 255.0).unsqueeze(0).float()
 
                 save_videos_grid(
@@ -412,6 +429,12 @@ def parse_args():
         type=int,
         default=0,
         help=("If >0, randomly sample this many entries from training JSON for validation (overrides --validation_prompts/--validation_paths)."),
+    )
+    parser.add_argument(
+        "--validation_data_dir",
+        type=str,
+        default=None,
+        help=("Directory of test cases for validation. Each subfolder should contain first.jpg, last.jpg, cond_full.mp4, prompt.txt."),
     )
     parser.add_argument(
         "--output_dir",
@@ -1229,6 +1252,32 @@ def main():
         # file_path is the original GT video for comparison
         args.validation_gt_paths = [item['file_path'] for item in sampled]
         logger.info(f"Auto-sampled {len(sampled)} validation entries from training JSON.")
+
+    # Build validation data from dedicated test directory (overrides other validation sources)
+    if args.validation_data_dir is not None:
+        test_dirs = sorted([
+            d for d in os.listdir(args.validation_data_dir)
+            if os.path.isdir(os.path.join(args.validation_data_dir, d))
+        ])
+        prompts, control_paths, start_images, end_images = [], [], [], []
+        for d in test_dirs:
+            case_dir = os.path.join(args.validation_data_dir, d)
+            prompt_file = os.path.join(case_dir, "prompt.txt")
+            cond_file = os.path.join(case_dir, "cond_full.mp4")
+            first_img = os.path.join(case_dir, "first.jpg")
+            last_img = os.path.join(case_dir, "last.jpg")
+            if os.path.exists(prompt_file) and os.path.exists(cond_file):
+                with open(prompt_file, 'r') as pf:
+                    prompts.append(pf.read().strip())
+                control_paths.append(cond_file)
+                start_images.append(first_img if os.path.exists(first_img) else None)
+                end_images.append(last_img if os.path.exists(last_img) else None)
+        args.validation_prompts = prompts
+        args.validation_paths = control_paths
+        args.validation_start_images = start_images
+        args.validation_end_images = end_images
+        args.validation_gt_paths = None  # no GT video in test set
+        logger.info(f"Loaded {len(prompts)} validation cases from {args.validation_data_dir}")
 
     def worker_init_fn(_seed):
         _seed = _seed * 256

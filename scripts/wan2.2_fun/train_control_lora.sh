@@ -48,4 +48,4 @@ accelerate launch --mixed_precision="bf16" scripts/wan2.2_fun/train_control_lora
   --target_name="q,k,v,ffn.0,ffn.2" \
   --use_peft_lora \
   --low_vram \
-  --validation_samples=4
+  --validation_data_dir="/cache/00_data/test_data_zhuan/"
