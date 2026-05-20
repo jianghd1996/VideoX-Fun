@@ -1,0 +1,7 @@
+diffusers==0.35.1
+transformers==4.56.2
+datasets
+decord
+func_timeout
+librosa
+cffi==2.0.0
