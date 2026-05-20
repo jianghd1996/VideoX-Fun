@@ -210,10 +210,11 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
             for i in range(len(args.validation_prompts)):
                 import cv2
                 import tempfile
-                # 用 control video 获取尺寸信息
+                # 用 control video 获取尺寸信息 + 实际帧数（用于对齐 4N+1）
                 cap = cv2.VideoCapture(args.validation_paths[i])
                 width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                control_total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
                 cap.release()
 
                 # 从 GT video 提取首帧和尾帧（用真实原始帧做 image-to-video 条件，而非 control 帧）
@@ -240,7 +241,13 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     end_image_path = tmp_end.name
 
                 width, height = calculate_dimensions(args.image_sample_size * args.image_sample_size,  width / height)
-                video_length = int((args.video_sample_n_frames - 1) // vae.config.temporal_compression_ratio * vae.config.temporal_compression_ratio) + 1 if args.video_sample_n_frames != 1 else 1
+                temporal_ratio = vae.config.temporal_compression_ratio
+                # 计算 pipeline 期望的 video_length (4N+1)，但 clamp 到 control video 的实际帧数
+                max_video_length = int((args.video_sample_n_frames - 1) // temporal_ratio * temporal_ratio) + 1 if args.video_sample_n_frames != 1 else 1
+                video_length = min(max_video_length, control_total_frames)
+                # 确保仍是 4N+1 格式
+                video_length = (video_length - 1) // temporal_ratio * temporal_ratio + 1
+                video_length = max(video_length, 1)
                 
                 inpaint_video, inpaint_video_mask, clip_image = get_image_to_video_latent(start_image_path, end_image_path, video_length=video_length, sample_size=[height, width])
                 # 清理临时帧文件
