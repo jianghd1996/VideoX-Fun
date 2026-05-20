@@ -1242,7 +1242,6 @@ def main():
 
     # Auto-populate validation prompts/paths from training data if validation_samples is set
     if args.validation_samples > 0 and args.validation_prompts is None:
-        import json
         with open(args.train_data_meta, 'r') as f:
             meta_json = json.load(f)
         sampled = random.sample(meta_json, min(args.validation_samples, len(meta_json)))
