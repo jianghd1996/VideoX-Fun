@@ -210,17 +210,23 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
             for i in range(len(args.validation_prompts)):
                 import cv2
                 import tempfile
+                # 用 control video 获取尺寸信息
                 cap = cv2.VideoCapture(args.validation_paths[i])
                 width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                # 提取首帧作为 start_image
-                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                ret_first, first_frame = cap.read()
-                # 提取尾帧作为 end_image
-                cap.set(cv2.CAP_PROP_POS_FRAMES, total_frames - 1)
-                ret_last, last_frame = cap.read()
                 cap.release()
+
+                # 从 GT video 提取首帧和尾帧（用真实原始帧做 image-to-video 条件，而非 control 帧）
+                gt_path = getattr(args, 'validation_gt_paths', args.validation_paths)[i]
+                gt_cap = cv2.VideoCapture(gt_path)
+                gt_total_frames = int(gt_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                # 提取 GT 首帧作为 start_image
+                gt_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                ret_first, first_frame = gt_cap.read()
+                # 提取 GT 尾帧作为 end_image
+                gt_cap.set(cv2.CAP_PROP_POS_FRAMES, gt_total_frames - 1)
+                ret_last, last_frame = gt_cap.read()
+                gt_cap.release()
                 # 保存为临时文件，get_image_to_video_latent 需要文件路径
                 start_image_path = None
                 end_image_path = None
@@ -2205,7 +2211,7 @@ def main():
                             accelerator.save_state(accelerator_save_path)
                             logger.info(f"Saved state to {accelerator_save_path}")
 
-                if args.validation_prompts is not None and global_step % args.validation_steps == 0:
+                if args.validation_prompts is not None and (global_step % args.validation_steps == 0 or global_step % args.checkpointing_steps == 0):
                     log_validation(
                         vae,
                         text_encoder,
