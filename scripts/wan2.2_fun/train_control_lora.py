@@ -1714,7 +1714,11 @@ def main():
                 accelerator.print(f"Resuming from direct safetensors: {safetensors_path}, global_step={global_step}, first_epoch={first_epoch}")
                 from safetensors.torch import load_file
                 state_dict = load_file(safetensors_path, device=str(accelerator.device))
-                m, u = accelerator.unwrap_model(network).load_state_dict(state_dict, strict=False)
+                if network is not None:
+                    m, u = accelerator.unwrap_model(network).load_state_dict(state_dict, strict=False)
+                else:
+                    # peft_lora: adapters are injected directly into transformer3d
+                    m, u = accelerator.unwrap_model(transformer3d).load_state_dict(state_dict, strict=False)
                 accelerator.print(f"Loaded LoRA weights. missing keys: {len(m)}, unexpected keys: {len(u)}")
                 accelerator.print("No optimizer/scheduler state (direct safetensors resume), starting fresh.")
         elif args.resume_from_checkpoint != "latest":
@@ -1750,7 +1754,10 @@ def main():
                 if zero_stage != 3 and not args.use_fsdp:
                     from safetensors.torch import load_file
                     state_dict = load_file(os.path.join(checkpoint_folder_path, "lora_diffusion_pytorch_model.safetensors"), device=str(accelerator.device))
-                    m, u = accelerator.unwrap_model(network).load_state_dict(state_dict, strict=False)
+                    if network is not None:
+                        m, u = accelerator.unwrap_model(network).load_state_dict(state_dict, strict=False)
+                    else:
+                        m, u = accelerator.unwrap_model(transformer3d).load_state_dict(state_dict, strict=False)
                     print(f"missing keys: {len(m)}, unexpected keys: {len(u)}")
 
                     optimizer_file_pt = os.path.join(checkpoint_folder_path, "optimizer.pt")
