@@ -1991,19 +1991,21 @@ def main():
                             logger.info(f"Saved state to {accelerator_save_path}")
 
                 if args.validation_prompts is not None and global_step % args.validation_steps == 0:
-                    log_validation(
-                        vae,
-                        text_encoder,
-                        tokenizer,
-                        audio_encoder,
-                        transformer3d,
-                        network,
-                        args,
-                        config,
-                        accelerator,
-                        weight_dtype,
-                        global_step,
-                    )
+                    if accelerator.is_main_process:
+                        log_validation(
+                            vae,
+                            text_encoder,
+                            tokenizer,
+                            audio_encoder,
+                            transformer3d,
+                            network,
+                            args,
+                            config,
+                            accelerator,
+                            weight_dtype,
+                            global_step,
+                        )
+                    accelerator.wait_for_everyone()
 
             logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
@@ -2012,19 +2014,21 @@ def main():
                 break
 
         if args.validation_prompts is not None and epoch % args.validation_epochs == 0:
-            log_validation(
-                vae,
-                text_encoder,
-                tokenizer,
-                audio_encoder,
-                transformer3d,
-                network,
-                args,
-                config,
-                accelerator,
-                weight_dtype,
-                global_step,
-            )
+            if accelerator.is_main_process:
+                log_validation(
+                    vae,
+                    text_encoder,
+                    tokenizer,
+                    audio_encoder,
+                    transformer3d,
+                    network,
+                    args,
+                    config,
+                    accelerator,
+                    weight_dtype,
+                    global_step,
+                )
+            accelerator.wait_for_everyone()
 
     # Create the pipeline using the trained modules and save it.
     accelerator.wait_for_everyone()

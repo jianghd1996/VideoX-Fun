@@ -1693,7 +1693,31 @@ def main():
 
     # Potentially load in the weights and states from a previous save
     if args.resume_from_checkpoint:
-        if args.resume_from_checkpoint != "latest":
+        # Support direct safetensors file path (e.g. /cache/checkpoint-1950.safetensors)
+        direct_safetensors = args.resume_from_checkpoint.endswith(".safetensors")
+        if direct_safetensors:
+            safetensors_path = args.resume_from_checkpoint
+            if not os.path.isfile(safetensors_path):
+                accelerator.print(
+                    f"Safetensors file '{safetensors_path}' does not exist. Starting a new training run."
+                )
+                args.resume_from_checkpoint = None
+                initial_global_step = 0
+            else:
+                basename = os.path.splitext(os.path.basename(safetensors_path))[0]
+                try:
+                    global_step = int(basename.split("-")[-1])
+                except ValueError:
+                    global_step = 0
+                initial_global_step = global_step
+                first_epoch = global_step // num_update_steps_per_epoch
+                accelerator.print(f"Resuming from direct safetensors: {safetensors_path}, global_step={global_step}, first_epoch={first_epoch}")
+                from safetensors.torch import load_file
+                state_dict = load_file(safetensors_path, device=str(accelerator.device))
+                m, u = accelerator.unwrap_model(network).load_state_dict(state_dict, strict=False)
+                accelerator.print(f"Loaded LoRA weights. missing keys: {len(m)}, unexpected keys: {len(u)}")
+                accelerator.print("No optimizer/scheduler state (direct safetensors resume), starting fresh.")
+        elif args.resume_from_checkpoint != "latest":
             path = os.path.basename(args.resume_from_checkpoint)
         else:
             # Get the most recent checkpoint
@@ -1702,82 +1726,83 @@ def main():
             dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
             path = dirs[-1] if len(dirs) > 0 else None
 
-        if path is None:
-            accelerator.print(
-                f"Checkpoint '{args.resume_from_checkpoint}' does not exist. Starting a new training run."
-            )
-            args.resume_from_checkpoint = None
-            initial_global_step = 0
-        else:
-            global_step = int(path.split("-")[1])
-
-            initial_global_step = global_step
-
-            checkpoint_folder_path = os.path.join(args.output_dir, path)
-            pkl_path = os.path.join(checkpoint_folder_path, "sampler_pos_start.pkl")
-            if os.path.exists(pkl_path):
-                with open(pkl_path, 'rb') as file:
-                    _, first_epoch = pickle.load(file)
+        if not direct_safetensors:
+            if path is None:
+                accelerator.print(
+                    f"Checkpoint '{args.resume_from_checkpoint}' does not exist. Starting a new training run."
+                )
+                args.resume_from_checkpoint = None
+                initial_global_step = 0
             else:
-                first_epoch = global_step // num_update_steps_per_epoch
-            print(f"Load pkl from {pkl_path}. Get first_epoch = {first_epoch}.")
+                global_step = int(path.split("-")[1])
 
-            if zero_stage != 3 and not args.use_fsdp:
-                from safetensors.torch import load_file
-                state_dict = load_file(os.path.join(checkpoint_folder_path, "lora_diffusion_pytorch_model.safetensors"), device=str(accelerator.device))
-                m, u = accelerator.unwrap_model(network).load_state_dict(state_dict, strict=False)
-                print(f"missing keys: {len(m)}, unexpected keys: {len(u)}")
+                initial_global_step = global_step
 
-                optimizer_file_pt = os.path.join(checkpoint_folder_path, "optimizer.pt")
-                optimizer_file_bin = os.path.join(checkpoint_folder_path, "optimizer.bin")
-                optimizer_file_to_load = None
+                checkpoint_folder_path = os.path.join(args.output_dir, path)
+                pkl_path = os.path.join(checkpoint_folder_path, "sampler_pos_start.pkl")
+                if os.path.exists(pkl_path):
+                    with open(pkl_path, 'rb') as file:
+                        _, first_epoch = pickle.load(file)
+                else:
+                    first_epoch = global_step // num_update_steps_per_epoch
+                print(f"Load pkl from {pkl_path}. Get first_epoch = {first_epoch}.")
 
-                if os.path.exists(optimizer_file_pt):
-                    optimizer_file_to_load = optimizer_file_pt
-                elif os.path.exists(optimizer_file_bin):
-                    optimizer_file_to_load = optimizer_file_bin
+                if zero_stage != 3 and not args.use_fsdp:
+                    from safetensors.torch import load_file
+                    state_dict = load_file(os.path.join(checkpoint_folder_path, "lora_diffusion_pytorch_model.safetensors"), device=str(accelerator.device))
+                    m, u = accelerator.unwrap_model(network).load_state_dict(state_dict, strict=False)
+                    print(f"missing keys: {len(m)}, unexpected keys: {len(u)}")
 
-                if optimizer_file_to_load:
-                    try:
-                        accelerator.print(f"Loading optimizer state from {optimizer_file_to_load}")
-                        optimizer_state = torch.load(optimizer_file_to_load, map_location=accelerator.device)
-                        optimizer.load_state_dict(optimizer_state)
-                        accelerator.print("Optimizer state loaded successfully.")
-                    except Exception as e:
-                        accelerator.print(f"Failed to load optimizer state from {optimizer_file_to_load}: {e}")
+                    optimizer_file_pt = os.path.join(checkpoint_folder_path, "optimizer.pt")
+                    optimizer_file_bin = os.path.join(checkpoint_folder_path, "optimizer.bin")
+                    optimizer_file_to_load = None
 
-                scheduler_file_pt = os.path.join(checkpoint_folder_path, "scheduler.pt")
-                scheduler_file_bin = os.path.join(checkpoint_folder_path, "scheduler.bin")
-                scheduler_file_to_load = None
+                    if os.path.exists(optimizer_file_pt):
+                        optimizer_file_to_load = optimizer_file_pt
+                    elif os.path.exists(optimizer_file_bin):
+                        optimizer_file_to_load = optimizer_file_bin
 
-                if os.path.exists(scheduler_file_pt):
-                    scheduler_file_to_load = scheduler_file_pt
-                elif os.path.exists(scheduler_file_bin):
-                    scheduler_file_to_load = scheduler_file_bin
-
-                if scheduler_file_to_load:
-                    try:
-                        accelerator.print(f"Loading scheduler state from {scheduler_file_to_load}")
-                        scheduler_state = torch.load(scheduler_file_to_load, map_location=accelerator.device)
-                        lr_scheduler.load_state_dict(scheduler_state)
-                        accelerator.print("Scheduler state loaded successfully.")
-                    except Exception as e:
-                        accelerator.print(f"Failed to load scheduler state from {scheduler_file_to_load}: {e}")
-
-                if hasattr(accelerator, 'scaler') and accelerator.scaler is not None:
-                    scaler_file = os.path.join(checkpoint_folder_path, "scaler.pt")
-                    if os.path.exists(scaler_file):
+                    if optimizer_file_to_load:
                         try:
-                            accelerator.print(f"Loading GradScaler state from {scaler_file}")
-                            scaler_state = torch.load(scaler_file, map_location=accelerator.device)
-                            accelerator.scaler.load_state_dict(scaler_state)
-                            accelerator.print("GradScaler state loaded successfully.")
+                            accelerator.print(f"Loading optimizer state from {optimizer_file_to_load}")
+                            optimizer_state = torch.load(optimizer_file_to_load, map_location=accelerator.device)
+                            optimizer.load_state_dict(optimizer_state)
+                            accelerator.print("Optimizer state loaded successfully.")
                         except Exception as e:
-                            accelerator.print(f"Failed to load GradScaler state: {e}")
+                            accelerator.print(f"Failed to load optimizer state from {optimizer_file_to_load}: {e}")
 
-            else:
-                accelerator.load_state(checkpoint_folder_path)
-                accelerator.print("accelerator.load_state() completed for zero_stage 3.")
+                    scheduler_file_pt = os.path.join(checkpoint_folder_path, "scheduler.pt")
+                    scheduler_file_bin = os.path.join(checkpoint_folder_path, "scheduler.bin")
+                    scheduler_file_to_load = None
+
+                    if os.path.exists(scheduler_file_pt):
+                        scheduler_file_to_load = scheduler_file_pt
+                    elif os.path.exists(scheduler_file_bin):
+                        scheduler_file_to_load = scheduler_file_bin
+
+                    if scheduler_file_to_load:
+                        try:
+                            accelerator.print(f"Loading scheduler state from {scheduler_file_to_load}")
+                            scheduler_state = torch.load(scheduler_file_to_load, map_location=accelerator.device)
+                            lr_scheduler.load_state_dict(scheduler_state)
+                            accelerator.print("Scheduler state loaded successfully.")
+                        except Exception as e:
+                            accelerator.print(f"Failed to load scheduler state from {scheduler_file_to_load}: {e}")
+
+                    if hasattr(accelerator, 'scaler') and accelerator.scaler is not None:
+                        scaler_file = os.path.join(checkpoint_folder_path, "scaler.pt")
+                        if os.path.exists(scaler_file):
+                            try:
+                                accelerator.print(f"Loading GradScaler state from {scaler_file}")
+                                scaler_state = torch.load(scaler_file, map_location=accelerator.device)
+                                accelerator.scaler.load_state_dict(scaler_state)
+                                accelerator.print("GradScaler state loaded successfully.")
+                            except Exception as e:
+                                accelerator.print(f"Failed to load GradScaler state: {e}")
+
+                else:
+                    accelerator.load_state(checkpoint_folder_path)
+                    accelerator.print("accelerator.load_state() completed for zero_stage 3.")
 
     else:
         initial_global_step = 0
@@ -2292,19 +2317,21 @@ def main():
                             accelerator.save_state(accelerator_save_path)
                             logger.info(f"Saved state to {accelerator_save_path}")
 
-                if args.validation_prompts is not None and (global_step % args.validation_steps == 0 or global_step % args.checkpointing_steps == 0):
-                    log_validation(
-                        vae,
-                        text_encoder,
-                        tokenizer,
-                        transformer3d,
-                        network,
-                        args,
-                        config,
-                        accelerator,
-                        weight_dtype,
-                        global_step,
-                    )
+                if args.validation_prompts is not None and global_step % args.validation_steps == 0:
+                    if accelerator.is_main_process:
+                        log_validation(
+                            vae,
+                            text_encoder,
+                            tokenizer,
+                            transformer3d,
+                            network,
+                            args,
+                            config,
+                            accelerator,
+                            weight_dtype,
+                            global_step,
+                        )
+                    accelerator.wait_for_everyone()
 
             logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
@@ -2313,18 +2340,20 @@ def main():
                 break
 
         if args.validation_prompts is not None and epoch % args.validation_epochs == 0:
-            log_validation(
-                vae,
-                text_encoder,
-                tokenizer,
-                transformer3d,
-                network,
-                config,
-                args,
-                accelerator,
-                weight_dtype,
-                global_step,
-            )
+            if accelerator.is_main_process:
+                log_validation(
+                    vae,
+                    text_encoder,
+                    tokenizer,
+                    transformer3d,
+                    network,
+                    args,
+                    config,
+                    accelerator,
+                    weight_dtype,
+                    global_step,
+                )
+            accelerator.wait_for_everyone()
 
     # Create the pipeline using the trained modules and save it.
     accelerator.wait_for_everyone()

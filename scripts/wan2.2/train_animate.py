@@ -1958,21 +1958,23 @@ def main():
                         # Store the UNet parameters temporarily and load the EMA parameters to perform inference.
                         ema_transformer3d.store(transformer3d.parameters())
                         ema_transformer3d.copy_to(transformer3d.parameters())
-                    log_validation(
-                        vae,
-                        text_encoder,
-                        tokenizer,
-                        clip_image_encoder,
-                        transformer3d,
-                        args,
-                        config,
-                        accelerator,
-                        weight_dtype,
-                        global_step,
-                    )
+                    if accelerator.is_main_process:
+                        log_validation(
+                            vae,
+                            text_encoder,
+                            tokenizer,
+                            clip_image_encoder,
+                            transformer3d,
+                            args,
+                            config,
+                            accelerator,
+                            weight_dtype,
+                            global_step,
+                        )
                     if args.use_ema:
                         # Switch back to the original transformer3d parameters.
                         ema_transformer3d.restore(transformer3d.parameters())
+                    accelerator.wait_for_everyone()
 
             logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
@@ -1985,21 +1987,23 @@ def main():
                 # Store the UNet parameters temporarily and load the EMA parameters to perform inference.
                 ema_transformer3d.store(transformer3d.parameters())
                 ema_transformer3d.copy_to(transformer3d.parameters())
-            log_validation(
-                vae,
-                text_encoder,
-                tokenizer,
-                clip_image_encoder,
-                transformer3d,
-                args,
-                config,
-                accelerator,
-                weight_dtype,
-                global_step,
-            )
+            if accelerator.is_main_process:
+                log_validation(
+                    vae,
+                    text_encoder,
+                    tokenizer,
+                    clip_image_encoder,
+                    transformer3d,
+                    args,
+                    config,
+                    accelerator,
+                    weight_dtype,
+                    global_step,
+                )
             if args.use_ema:
                 # Switch back to the original transformer3d parameters.
                 ema_transformer3d.restore(transformer3d.parameters())
+            accelerator.wait_for_everyone()
 
     # Create the pipeline using the trained modules and save it.
     accelerator.wait_for_everyone()
