@@ -210,8 +210,12 @@ def log_validation(vae, text_encoder, tokenizer, clip_image_encoder, transformer
                 generator = torch.Generator(device=accelerator.device).manual_seed(rank_seed)
                 logger.info(f"Rank {accelerator.process_index} using seed: {rank_seed}")
 
+            # Randomly sample 1 validation case to avoid NCCL timeout on multi-GPU
+            import random
+            val_idx = random.randint(0, len(args.validation_prompts) - 1)
+            logger.info(f"Validation: randomly selected sample {val_idx}/{len(args.validation_prompts)-1}")
             images = []
-            for i in range(len(args.validation_prompts)):
+            for i in [val_idx]:
                 src_root_path           = args.validation_paths[i]
                 src_pose_path           = os.path.join(src_root_path, "src_pose.mp4")
                 src_face_path           = os.path.join(src_root_path, "src_face.mp4")
