@@ -208,7 +208,11 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 generator = torch.Generator(device=accelerator.device).manual_seed(rank_seed)
                 logger.info(f"Rank {accelerator.process_index} using seed: {rank_seed}")
 
-            for i in range(len(args.validation_prompts)):
+            # Randomly sample 1 validation case to avoid NCCL timeout on multi-GPU
+            import random
+            val_idx = random.randint(0, len(args.validation_prompts) - 1)
+            logger.info(f"Validation: randomly selected sample {val_idx}/{len(args.validation_prompts)-1}")
+            for i in [val_idx]:
                 import cv2
                 import tempfile
                 # 用 control video 获取尺寸信息 + 实际帧数（用于对齐 4N+1）
@@ -279,7 +283,7 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     video           = inpaint_video,
                     mask_video      = inpaint_video_mask,
                     num_inference_steps = args.num_inference_steps,
-                    guidance_scale      = 4.5,
+                    guidance_scale      = args.guidance_scale,
                     boundary            = config['transformer_additional_kwargs'].get('boundary', 0.900)
                 ).videos
                 os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
@@ -343,7 +347,6 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
             del pipeline
             gc.collect()
             torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
             vae.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
             transformer3d.to(accelerator.device, dtype=weight_dtype)
             if not args.enable_text_encoder_in_dataloader:
@@ -351,10 +354,12 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
         if is_deepspeed:
             transformer3d.config = origin_config
     except Exception as e:
+        import traceback
         gc.collect()
         torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()
-        print(f"Eval error on rank {accelerator.process_index} with info {e}")
+        error_msg = f"[VALIDATION ERROR] rank={accelerator.process_index} step={global_step}\n{traceback.format_exc()}"
+        print(error_msg, flush=True)
+        logger.error(error_msg)
         vae.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
         transformer3d.to(accelerator.device, dtype=weight_dtype)
         if not args.enable_text_encoder_in_dataloader:
@@ -631,8 +636,14 @@ def parse_args():
     parser.add_argument(
         "--num_inference_steps",
         type=int,
-        default=50,
+        default=8,
         help="Number of inference steps for validation sampling.",
+    )
+    parser.add_argument(
+        "--guidance_scale",
+        type=float,
+        default=4.5,
+        help="Guidance scale for validation.",
     )
     parser.add_argument(
         "--tracker_project_name",
