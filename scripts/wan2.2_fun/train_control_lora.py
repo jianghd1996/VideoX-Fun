@@ -278,7 +278,7 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     control_video   = input_video,
                     video           = inpaint_video,
                     mask_video      = inpaint_video_mask,
-                    num_inference_steps = 25,
+                    num_inference_steps = args.num_inference_steps,
                     guidance_scale      = 4.5,
                     boundary            = config['transformer_additional_kwargs'].get('boundary', 0.900)
                 ).videos
@@ -627,6 +627,12 @@ def parse_args():
         type=int,
         default=2000,
         help="Run validation every X steps.",
+    )
+    parser.add_argument(
+        "--num_inference_steps",
+        type=int,
+        default=50,
+        help="Number of inference steps for validation sampling.",
     )
     parser.add_argument(
         "--tracker_project_name",

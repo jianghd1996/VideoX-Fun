@@ -15,9 +15,9 @@ accelerate launch --mixed_precision="bf16" scripts/wan2.2_fun/train_control_lora
   --pretrained_model_name_or_path=$MODEL_NAME \
   --train_data_dir=$DATASET_NAME \
   --train_data_meta=$DATASET_META_NAME \
-  --image_sample_size=640 \
-  --video_sample_size=640 \
-  --token_sample_size=640 \
+  --image_sample_size=1440 \
+  --video_sample_size=1440 \
+  --token_sample_size=1440 \
   --video_sample_stride=2 \
   --video_sample_n_frames=81 \
   --train_batch_size=1 \
@@ -26,6 +26,7 @@ accelerate launch --mixed_precision="bf16" scripts/wan2.2_fun/train_control_lora
   --dataloader_num_workers=8 \
   --num_train_epochs=100 \
   --checkpointing_steps=50 \
+  --validation_steps=200 \
   --learning_rate=1e-04 \
   --seed=42 \
   --output_dir="output_dir_wan2.2_5b_control_lora" \
@@ -48,4 +49,5 @@ accelerate launch --mixed_precision="bf16" scripts/wan2.2_fun/train_control_lora
   --target_name="q,k,v,ffn.0,ffn.2" \
   --use_peft_lora \
   --low_vram \
-  --validation_data_dir="/cache/00_data/test_data_zhuan/"
+  --validation_data_dir="/cache/00_data/test_data_zhuan/" \
+  --num_inference_steps=50
