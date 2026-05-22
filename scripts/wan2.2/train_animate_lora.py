@@ -250,8 +250,8 @@ def log_validation(vae, text_encoder, tokenizer, clip_image_encoder, transformer
                     height      = height,
                     width       = width,
                     generator   = generator, 
-                    guidance_scale      = 4.5,
-                    num_inference_steps = 25,
+                    guidance_scale      = args.guidance_scale,
+                    num_inference_steps = args.num_inference_steps,
 
                     pose_video      = pose_video,
                     face_video      = face_video,
@@ -280,10 +280,13 @@ def log_validation(vae, text_encoder, tokenizer, clip_image_encoder, transformer
         if is_deepspeed:
             transformer3d.config = origin_config
     except Exception as e:
+        import traceback
         gc.collect()
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
-        print(f"Eval error on rank {accelerator.process_index} with info {e}")
+        error_msg = f"[VALIDATION ERROR] rank={accelerator.process_index} step={global_step}\n{traceback.format_exc()}"
+        print(error_msg, flush=True)
+        logger.error(error_msg)
         vae.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
         transformer3d.to(accelerator.device, dtype=weight_dtype)
         if not args.enable_text_encoder_in_dataloader:
@@ -544,6 +547,18 @@ def parse_args():
         type=int,
         default=2000,
         help="Run validation every X steps.",
+    )
+    parser.add_argument(
+        "--num_inference_steps",
+        type=int,
+        default=25,
+        help="Number of inference steps for validation.",
+    )
+    parser.add_argument(
+        "--guidance_scale",
+        type=float,
+        default=4.5,
+        help="Guidance scale for validation.",
     )
     parser.add_argument(
         "--tracker_project_name",
