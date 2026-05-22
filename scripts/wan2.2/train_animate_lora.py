@@ -272,7 +272,6 @@ def log_validation(vae, text_encoder, tokenizer, clip_image_encoder, transformer
             del pipeline
             gc.collect()
             torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
             vae.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
             transformer3d.to(accelerator.device, dtype=weight_dtype)
             if not args.enable_text_encoder_in_dataloader:
@@ -283,7 +282,6 @@ def log_validation(vae, text_encoder, tokenizer, clip_image_encoder, transformer
         import traceback
         gc.collect()
         torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()
         error_msg = f"[VALIDATION ERROR] rank={accelerator.process_index} step={global_step}\n{traceback.format_exc()}"
         print(error_msg, flush=True)
         logger.error(error_msg)
