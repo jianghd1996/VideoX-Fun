@@ -512,6 +512,7 @@ class Wan2_2FunControlPipeline(DiffusionPipeline):
         mask_video: Union[torch.FloatTensor] = None,
         control_video: Union[torch.FloatTensor] = None,
         control_camera_video: Union[torch.FloatTensor] = None,
+        adapter_mask: Union[torch.FloatTensor] = None,
         start_image: Union[torch.FloatTensor] = None,
         ref_image: Union[torch.FloatTensor] = None,
         num_frames: int = 49,
@@ -780,6 +781,19 @@ class Wan2_2FunControlPipeline(DiffusionPipeline):
 
         target_shape = (self.vae.latent_channels, (num_frames - 1) // self.vae.temporal_compression_ratio + 1, width // self.vae.spatial_compression_ratio, height // self.vae.spatial_compression_ratio)
         seq_len = math.ceil((target_shape[2] * target_shape[3]) / (self.transformer.config.patch_size[1] * self.transformer.config.patch_size[2]) * target_shape[1]) 
+
+        # Process adapter_mask for mask adapter (background-aware control)
+        mask_for_adapter = None
+        if adapter_mask is not None and hasattr(self.transformer, 'mask_conv') and self.transformer.mask_conv is not None:
+            # adapter_mask: [B, 1, F_video, H_video, W_video] binary 0/1
+            # Resize to latent resolution: [B, 1, F_latent, h_latent, w_latent]
+            adapter_mask = adapter_mask.to(device=device, dtype=weight_dtype)
+            mask_for_adapter = F.interpolate(
+                adapter_mask,
+                size=(target_shape[1], target_shape[3], target_shape[2]),
+                mode='trilinear', align_corners=True
+            )
+
         # 7. Denoising loop
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
         self.transformer.num_inference_steps = num_inference_steps
@@ -858,6 +872,7 @@ class Wan2_2FunControlPipeline(DiffusionPipeline):
                         y=control_latents_input,
                         y_camera=control_camera_latents_input, 
                         full_ref=full_ref,
+                        mask=torch.cat([mask_for_adapter] * 2) if mask_for_adapter is not None and do_classifier_free_guidance else mask_for_adapter,
                     )
 
                 # perform guidance

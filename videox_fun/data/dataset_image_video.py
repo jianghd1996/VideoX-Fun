@@ -294,6 +294,7 @@ class ImageVideoControlDataset(Dataset):
         enable_subject_info=False,
         padding_subject_info=True,
         return_file_name=False,
+        enable_mask_adapter=False,
     ):
         # Loading annotations from files
         print(f"loading annotations from {ann_path} ...")
@@ -331,6 +332,7 @@ class ImageVideoControlDataset(Dataset):
         self.enable_subject_info = enable_subject_info
         self.padding_subject_info = padding_subject_info
         self.return_file_name = return_file_name
+        self.enable_mask_adapter = enable_mask_adapter
 
         self.video_length_drop_start = video_length_drop_start
         self.video_length_drop_end = video_length_drop_end
@@ -510,7 +512,41 @@ class ImageVideoControlDataset(Dataset):
             else:
                 subject_image = None
 
-            return pixel_values, control_pixel_values, subject_image, control_camera_values, text, "video"
+            # Load mask adapter video (white=known region, black=unknown region)
+            if self.enable_mask_adapter:
+                mask_path = data_info.get('mask_path', None)
+                if mask_path is not None:
+                    mask_full_path = mask_path if self.data_root is None else os.path.join(self.data_root, mask_path)
+                    with VideoReader_contextmanager(mask_full_path, num_threads=2) as mask_video_reader:
+                        try:
+                            sample_args = (mask_video_reader, batch_index)
+                            mask_raw_frames = func_timeout(
+                                VIDEO_READER_TIMEOUT, get_video_reader_batch, args=sample_args
+                            )
+                            resized_frames = []
+                            for i in range(len(mask_raw_frames)):
+                                resized_frames.append(resize_frame(mask_raw_frames[i], self.larger_side_of_image_and_video))
+                            del mask_raw_frames
+                            mask_adapter_values = np.stack(resized_frames)
+                            del resized_frames
+                        except FunctionTimedOut:
+                            raise ValueError(f"Read mask {idx} timeout.")
+                        except Exception as e:
+                            raise ValueError(f"Failed to extract mask frames from video. Error is {e}.")
+                    del mask_video_reader
+                    if not self.enable_bucket:
+                        mask_adapter_values = torch.from_numpy(mask_adapter_values).permute(0, 3, 1, 2).contiguous()
+                        mask_adapter_values = mask_adapter_values / 255.
+                        mask_adapter_values = transforms.Compose([
+                            transforms.Resize(min(self.video_sample_size)),
+                            transforms.CenterCrop(self.video_sample_size),
+                        ])(mask_adapter_values)
+                else:
+                    mask_adapter_values = torch.ones_like(pixel_values)[:, :1] if not self.enable_bucket else np.ones_like(pixel_values)[:, :1]
+            else:
+                mask_adapter_values = None
+
+            return pixel_values, control_pixel_values, subject_image, control_camera_values, text, "video", mask_adapter_values
         else:
             # Load and preprocess image
             image_path, text = data_info['file_path'], data_info['text']
@@ -563,7 +599,7 @@ class ImageVideoControlDataset(Dataset):
             else:
                 subject_image = None
 
-            return image, control_image, subject_image, None, text, 'image'
+            return image, control_image, subject_image, None, text, 'image', None
 
     def __len__(self):
         return self.length
@@ -580,7 +616,15 @@ class ImageVideoControlDataset(Dataset):
                 if data_type_local != data_type:
                     raise ValueError("data_type_local != data_type")
 
-                pixel_values, control_pixel_values, subject_image, control_camera_values, name, data_type = self.get_batch(idx)
+                result = self.get_batch(idx)
+                if len(result) == 7:
+                    pixel_values, control_pixel_values, subject_image, control_camera_values, name, data_type, mask_adapter_values = result
+                    if mask_adapter_values is not None:
+                        sample["mask_adapter_values"] = mask_adapter_values
+                elif len(result) == 6:
+                    pixel_values, control_pixel_values, subject_image, control_camera_values, name, data_type = result
+                else:
+                    raise ValueError(f"Unexpected result length from get_batch: {len(result)}")
 
                 sample["pixel_values"] = pixel_values
                 sample["control_pixel_values"] = control_pixel_values

@@ -271,6 +271,30 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 if is_temp_end and end_image_path:
                     os.unlink(end_image_path)
                 input_video, input_video_mask, ref_image, clip_image = get_video_to_video_latent(args.validation_paths[i], video_length=video_length, sample_size=[height, width])
+
+                # Load mask video for mask adapter inference
+                validation_mask_paths = getattr(args, 'validation_mask_paths', None)
+                adapter_mask = None
+                if validation_mask_paths and validation_mask_paths[i] is not None:
+                    mask_cap = cv2.VideoCapture(validation_mask_paths[i])
+                    mask_frames = []
+                    total_frames = int(mask_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    frame_step = max(1, total_frames // video_length)
+                    for j in range(video_length):
+                        frame_idx = min(j * frame_step, total_frames - 1)
+                        mask_cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                        ret, frame = mask_cap.read()
+                        if not ret:
+                            break
+                        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)  # [H, W]
+                        frame = cv2.resize(frame, (width, height))
+                        mask_frames.append(frame)
+                    mask_cap.release()
+                    if mask_frames:
+                        mask_np = np.stack(mask_frames)  # [F, H, W]
+                        mask_np = mask_np.astype(np.float32) / 255.  # [0, 1], 1=known/white
+                        adapter_mask = torch.from_numpy(mask_np).unsqueeze(0).unsqueeze(0)  # [1, 1, F, H, W]
+
                 sample = pipeline(
                     args.validation_prompts[i], 
                     num_frames = video_length,
@@ -282,6 +306,7 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     control_video   = input_video,
                     video           = inpaint_video,
                     mask_video      = inpaint_video_mask,
+                    adapter_mask    = adapter_mask,
                     num_inference_steps = args.num_inference_steps,
                     guidance_scale      = args.guidance_scale,
                     boundary            = config['transformer_additional_kwargs'].get('boundary', 0.900)
@@ -838,6 +863,14 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--add_mask_adapter",
+        action="store_true",
+        help=(
+            'Whether enable mask adapter for background-aware control. '
+            'Requires mask_path in dataset JSON or mask.mp4 in validation dirs.'
+        ),
+    )
+    parser.add_argument(
         "--weighting_scheme",
         type=str,
         default="none",
@@ -1040,6 +1073,12 @@ def main():
             
     # Get Transformer
     transformer_combination_type = config['transformer_additional_kwargs'].get('transformer_combination_type', 'moe')
+
+    # Inject mask adapter config before model loading
+    if args.add_mask_adapter:
+        config['transformer_additional_kwargs']['add_mask_adapter'] = True
+        logger.info("Enabling mask adapter for background-aware control")
+
     if transformer_combination_type == 'single':
         # Single dense model: load from root (or configured subpath)
         sub_path = config['transformer_additional_kwargs'].get('transformer_low_noise_model_subpath', '.')
@@ -1254,7 +1293,8 @@ def main():
         video_repeat=args.video_repeat, 
         image_sample_size=args.image_sample_size,
         enable_bucket=args.enable_bucket, 
-        enable_camera_info=args.train_mode == "control_camera_ref"
+        enable_camera_info=args.train_mode == "control_camera_ref",
+        enable_mask_adapter=args.add_mask_adapter,
     )
 
     # Auto-populate validation prompts/paths from training data if validation_samples is set
@@ -1276,23 +1316,27 @@ def main():
             if os.path.isdir(os.path.join(args.validation_data_dir, d))
         ])
         prompts, control_paths, start_images, end_images = [], [], [], []
+        validation_mask_paths = []
         for d in test_dirs:
             case_dir = os.path.join(args.validation_data_dir, d)
             prompt_file = os.path.join(case_dir, "prompt.txt")
             cond_file = os.path.join(case_dir, "cond_full.mp4")
             first_img = os.path.join(case_dir, "first.jpg")
             last_img = os.path.join(case_dir, "last.jpg")
+            mask_file = os.path.join(case_dir, "mask.mp4")
             if os.path.exists(prompt_file) and os.path.exists(cond_file):
                 with open(prompt_file, 'r') as pf:
                     prompts.append(pf.read().strip())
                 control_paths.append(cond_file)
                 start_images.append(first_img if os.path.exists(first_img) else None)
                 end_images.append(last_img if os.path.exists(last_img) else None)
+                validation_mask_paths.append(mask_file if os.path.exists(mask_file) else None)
         args.validation_prompts = prompts
         args.validation_paths = control_paths
         args.validation_start_images = start_images
         args.validation_end_images = end_images
         args.validation_gt_paths = None  # no GT video in test set
+        args.validation_mask_paths = validation_mask_paths
         logger.info(f"Loaded {len(prompts)} validation cases from {args.validation_data_dir}")
 
     def worker_init_fn(_seed):
@@ -1386,7 +1430,11 @@ def main():
                 new_examples["mask"] = []
                 new_examples["clip_pixel_values"] = []
 
-            # Get downsample ratio in image and videos
+            # Used for Mask Adapter mode
+            if args.add_mask_adapter:
+                new_examples["mask_adapter_values"] = []
+
+            # Get downsample ratio in image and videos<br>
             pixel_value     = examples[0]["pixel_values"]
             data_type       = examples[0]["data_type"]
             f, h, w, c      = np.shape(pixel_value)
@@ -1531,6 +1579,20 @@ def main():
 
                 new_examples["pixel_values"].append(transform(pixel_values)[:batch_video_length])
                 new_examples["control_pixel_values"].append(transform(control_pixel_values))
+
+                # Process mask_adapter_values (binary mask: 1=known, 0=unknown)
+                if args.add_mask_adapter:
+                    local_mask = example.get("mask_adapter_values", None)
+                    if local_mask is not None and not isinstance(local_mask, np.ndarray):
+                        local_mask = local_mask.numpy()
+                    if local_mask is not None and local_mask.ndim == 4:
+                        local_mask = torch.from_numpy(local_mask).permute(0, 3, 1, 2).contiguous()
+                        local_mask = local_mask / 255. if local_mask.max() > 1.0 else local_mask.to(torch.float32)
+                        local_mask = transform_no_normalize(local_mask)[:batch_video_length]
+                    else:
+                        # Fallback: all-ones (all regions known)
+                        local_mask = torch.ones_like(new_examples["pixel_values"][-1])[:, :1]
+                    new_examples["mask_adapter_values"].append(local_mask)
             
                 if args.train_mode == "control_camera_ref":
                     control_camera_values = example.get("control_camera_values", None)
@@ -1593,6 +1655,8 @@ def main():
             if args.add_inpaint_info:
                 new_examples["mask_pixel_values"] = torch.stack([example for example in new_examples["mask_pixel_values"]])
                 new_examples["mask"] = torch.stack([example for example in new_examples["mask"]])
+            if args.add_mask_adapter:
+                new_examples["mask_adapter_values"] = torch.stack([example for example in new_examples["mask_adapter_values"]])
 
             # Encode prompts when enable_text_encoder_in_dataloader=True
             if args.enable_text_encoder_in_dataloader:
@@ -2136,6 +2200,26 @@ def main():
                     else:
                         inpaint_latents = None
 
+                    # Prepare mask for mask adapter (background-aware control)
+                    if args.add_mask_adapter:
+                        mask_adapter_val = batch.get('mask_adapter_values', None)
+                        if mask_adapter_val is not None:
+                            # mask_adapter_val: [B, F_video, 1, H_video, W_video], binary 0/1
+                            # Resize to latent resolution: [B, 1, F_latent, h_latent, w_latent]
+                            mask_for_adapter = F.interpolate(
+                                mask_adapter_val.permute(0, 2, 1, 3, 4).to(accelerator.device, dtype=weight_dtype),
+                                size=latents.size()[-3:],
+                                mode='trilinear', align_corners=True
+                            )
+                            # mask_for_adapter: [B, 1, F_latent, h_latent, w_latent], 1=known, 0=unknown
+                            loss_mask = mask_for_adapter.detach().to(weight_dtype)
+                        else:
+                            mask_for_adapter = None
+                            loss_mask = None
+                    else:
+                        mask_for_adapter = None
+                        loss_mask = None
+
                     if control_latents is None:
                         if inpaint_latents is None:
                             control_latents = ref_latents_conv_in
@@ -2247,6 +2331,7 @@ def main():
                         y=control_latents,
                         y_camera=control_camera_latents if args.train_mode == "control_camera_ref" else None,
                         full_ref=full_ref if args.add_full_ref_image_in_self_attention else None,
+                        mask=mask_for_adapter,
                     )
                 
                 def custom_mse_loss(noise_pred, target, weighting=None, threshold=50):
@@ -2262,7 +2347,19 @@ def main():
                     return final_loss
                 
                 weighting = compute_loss_weighting_for_sd3(weighting_scheme=args.weighting_scheme, sigmas=sigmas)
-                loss = custom_mse_loss(noise_pred.float(), target.float(), weighting.float())
+
+                if loss_mask is not None:
+                    # loss_mask: [B, 1, F_latent, h_latent, w_latent], 1=known, 0=unknown
+                    # Compute per-element MSE then weight by mask
+                    noise_pred_f = noise_pred.float()
+                    target_f = target.float()
+                    per_element_loss = F.mse_loss(noise_pred_f, target_f, reduction='none')
+                    loss_weight = (0.1 + 0.9 * loss_mask.expand_as(target_f))
+                    if weighting is not None:
+                        per_element_loss = per_element_loss * weighting
+                    loss = (per_element_loss * loss_weight).mean()
+                else:
+                    loss = custom_mse_loss(noise_pred.float(), target.float(), weighting.float())
                 loss = loss.mean()
 
                 if args.motion_sub_loss and noise_pred.size()[2] > 2:
