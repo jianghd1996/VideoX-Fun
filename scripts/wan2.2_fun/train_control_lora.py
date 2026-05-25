@@ -1586,6 +1586,9 @@ def main():
                     if local_mask is not None and not isinstance(local_mask, np.ndarray):
                         local_mask = local_mask.numpy()
                     if local_mask is not None and local_mask.ndim == 4:
+                        # Convert RGB mask to grayscale if 3-channel
+                        if local_mask.shape[-1] == 3:
+                            local_mask = local_mask.mean(axis=-1, keepdims=True)  # [F, H, W, 1]
                         local_mask = torch.from_numpy(local_mask).permute(0, 3, 1, 2).contiguous()
                         local_mask = local_mask / 255. if local_mask.max() > 1.0 else local_mask.to(torch.float32)
                         local_mask = transform_no_normalize(local_mask)[:batch_video_length]

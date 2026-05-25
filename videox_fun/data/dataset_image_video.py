@@ -528,6 +528,9 @@ class ImageVideoControlDataset(Dataset):
                                 resized_frames.append(resize_frame(mask_raw_frames[i], self.larger_side_of_image_and_video))
                             del mask_raw_frames
                             mask_adapter_values = np.stack(resized_frames)
+                            # Convert RGB→grayscale (mean over channels) → [F, H, W, 1]
+                            if mask_adapter_values.shape[-1] == 3:
+                                mask_adapter_values = np.mean(mask_adapter_values, axis=-1, keepdims=True)
                             del resized_frames
                         except FunctionTimedOut:
                             raise ValueError(f"Read mask {idx} timeout.")
