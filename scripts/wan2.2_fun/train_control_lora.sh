@@ -43,6 +43,7 @@ accelerate launch --mixed_precision="bf16" scripts/wan2.2_fun/train_control_lora
   --train_mode="control_ref" \
   --control_ref_image="random" \
   --add_inpaint_info \
+  --add_mask_adapter \
   --add_full_ref_image_in_self_attention \
   --rank=64 \
   --network_alpha=32 \
