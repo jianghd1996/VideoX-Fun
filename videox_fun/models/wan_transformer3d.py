@@ -937,8 +937,8 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             mask_feat = self.mask_conv(mask)  # [B, dim, F, h, w]
             # Downsample spatially to match patch embedding resolution (2x)
             mask_feat = F.avg_pool3d(mask_feat, kernel_size=(1, 2, 2), stride=(1, 2, 2))
-            mask_feat = [m.unsqueeze(0).flatten(2).transpose(1, 2) for m in mask_feat]
-            # mask_feat[i]: [1, N, dim], add to each x[i]
+            # Keep 5D format to match x[i] shape [1, dim, F, H/2, W/2]; both flattened later
+            mask_feat = [m.unsqueeze(0) for m in mask_feat]
             x = [u + m.to(u.dtype) for u, m in zip(x, mask_feat)]
         
         # Add control adapter features (for camera control)
