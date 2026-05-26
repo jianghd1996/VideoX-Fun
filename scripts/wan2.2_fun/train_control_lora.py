@@ -2204,8 +2204,9 @@ def main():
                                 if do_mask:
                                     f, c, h, w = control_pixel_values[bs_index].size()
                                     control_mask = get_control_mask((f, c, h, w), rng=rng)
+                                    # mask shape [F, 1, H, W] broadcasts to [F, C, H, W] via channel dim
                                     control_pixel_values[bs_index] = control_pixel_values[bs_index] * (
-                                        1 - control_mask.float().to(control_pixel_values.device).unsqueeze(1)
+                                        1 - control_mask.float().to(control_pixel_values.device)
                                     )
 
                         control_latents = _batch_encode_vae(control_pixel_values)
