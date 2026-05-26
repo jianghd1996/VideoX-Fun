@@ -143,6 +143,66 @@ def resize_mask(mask, latent, process_first_frame_only=True):
         )
     return resized_mask
 
+def get_control_mask(shape, rng=None):
+    """
+    Create random spatial masks for control signal (point cloud projection).
+    Simulates the sparse/empty regions that occur in point clouds estimated from sparse images.
+    
+    Args:
+        shape: (f, c, h, w) - frames, channels, height, width (pixel space)
+        rng: numpy random generator
+    
+    Returns:
+        mask: tensor of shape (f, 1, h, w), dtype uint8, 1=mask_out, 0=keep
+    """
+    f, c, h, w = shape
+    mask = torch.zeros((f, 1, h, w), dtype=torch.uint8)
+    fn = np.random if rng is None else rng
+    
+    # 40% chance: no mask at all (keep clean control)
+    if fn.random() < 0.40:
+        return mask
+    
+    # Choose mask type
+    mask_type = fn.choice([0, 1, 2, 3], p=[0.35, 0.25, 0.15, 0.25])
+    
+    if mask_type == 0:
+        # Large spatial block: simulates missing building/wall region in point cloud
+        center_x = torch.randint(0, w, (1,)).item()
+        center_y = torch.randint(0, h, (1,)).item()
+        block_size_x = torch.randint(w // 6, w // 3, (1,)).item()
+        block_size_y = torch.randint(h // 6, h // 3, (1,)).item()
+        start_x = max(center_x - block_size_x // 2, 0)
+        end_x = min(center_x + block_size_x // 2, w)
+        start_y = max(center_y - block_size_y // 2, 0)
+        end_y = min(center_y + block_size_y // 2, h)
+        mask[:, :, start_y:end_y, start_x:end_x] = 1
+    elif mask_type == 1:
+        # Random per-pixel dropout: simulates noisy/sparse point cloud
+        dropout_mask = fn.random((f, 1, h, w)) < 0.25
+        mask = torch.from_numpy(dropout_mask.astype(np.uint8))
+    elif mask_type == 2:
+        # Mask random individual frames entirely: simulates frames with bad reconstruction
+        num_frames_to_mask = max(1, f // 5)
+        frames_to_mask = fn.choice(f, num_frames_to_mask, replace=False)
+        for frame_idx in frames_to_mask:
+            mask[frame_idx, :, :, :] = 1
+    elif mask_type == 3:
+        # Per-frame random blocks: simulates inconsistent per-frame point cloud quality
+        for frame_idx in range(f):
+            if fn.random() < 0.45:
+                center_x = torch.randint(0, w, (1,)).item()
+                center_y = torch.randint(0, h, (1,)).item()
+                block_size_x = torch.randint(w // 8, w // 4, (1,)).item()
+                block_size_y = torch.randint(h // 8, h // 4, (1,)).item()
+                start_x = max(center_x - block_size_x // 2, 0)
+                end_x = min(center_x + block_size_x // 2, w)
+                start_y = max(center_y - block_size_y // 2, 0)
+                end_y = min(center_y + block_size_y // 2, h)
+                mask[frame_idx, :, start_y:end_y, start_x:end_x] = 1
+    
+    return mask.to(torch.uint8)
+
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.18.0.dev0")
 
@@ -868,6 +928,16 @@ def parse_args():
         help=(
             'Whether enable mask adapter for background-aware control. '
             'Requires mask_path in dataset JSON or mask.mp4 in validation dirs.'
+        ),
+    )
+    parser.add_argument(
+        "--control_mask_ratio",
+        type=float,
+        default=0.0,
+        help=(
+            'Ratio of samples to apply random spatial masking to control signal. '
+            '0.0 = no masking (default), 0.3 = 30% of samples get masked control. '
+            'Simulates sparse/incomplete point clouds for robustness.'
         ),
     )
     parser.add_argument(
@@ -2124,6 +2194,20 @@ def main():
                         latents = _batch_encode_vae(pixel_values)
 
                     if args.train_mode != "control_camera_ref":
+                        # Random spatial masking on control signal to simulate sparse/incomplete point clouds
+                        if args.control_mask_ratio > 0:
+                            for bs_index in range(control_pixel_values.size()[0]):
+                                if rng is None:
+                                    do_mask = np.random.random() < args.control_mask_ratio
+                                else:
+                                    do_mask = rng.random() < args.control_mask_ratio
+                                if do_mask:
+                                    f, c, h, w = control_pixel_values[bs_index].size()
+                                    control_mask = get_control_mask((f, c, h, w), rng=rng)
+                                    control_pixel_values[bs_index] = control_pixel_values[bs_index] * (
+                                        1 - control_mask.float().to(control_pixel_values.device).unsqueeze(1)
+                                    )
+
                         control_latents = _batch_encode_vae(control_pixel_values)
                         # Make control latents to zero
                         for bs_index in range(control_latents.size()[0]):
