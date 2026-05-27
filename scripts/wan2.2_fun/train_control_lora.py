@@ -1175,13 +1175,6 @@ def main():
     text_encoder.requires_grad_(False)
     transformer3d.requires_grad_(False)
 
-    # Unfreeze mask_conv (not covered by LoRA target_modules)
-    if hasattr(transformer3d, 'mask_conv') and transformer3d.mask_conv is not None:
-        for i, (name, param) in enumerate(transformer3d.mask_conv.named_parameters()):
-            param.requires_grad_(True)
-            assert param.requires_grad, f"BUG: mask_conv.{name} still frozen after requires_grad_(True)"
-        logging.info(f"Unfroze {i+1} mask_conv parameters")
-
     # Lora will work with this...
     if args.use_peft_lora:
         from peft import (LoraConfig, get_peft_model_state_dict,
@@ -1203,6 +1196,12 @@ def main():
         )
         network = network.to(weight_dtype)
         network.apply_to(text_encoder, transformer3d, args.train_text_encoder and not args.training_with_video_token_length, True)
+
+    # Unfreeze mask_conv AFTER LoRA injection (peft re-freezes non-target params)
+    if hasattr(transformer3d, 'mask_conv') and transformer3d.mask_conv is not None:
+        for i, (name, param) in enumerate(transformer3d.mask_conv.named_parameters()):
+            param.requires_grad_(True)
+        logging.info(f"Unfroze {i+1} mask_conv parameters")
 
     if args.transformer_path is not None:
         print(f"From checkpoint: {args.transformer_path}")
@@ -1335,13 +1334,14 @@ def main():
     # Collect mask_conv params (not covered by LoRA target_modules)
     mask_conv_params = []
     if hasattr(transformer3d, 'mask_conv') and transformer3d.mask_conv is not None:
+        # Re-enable gradients (peft/network.apply_to may re-freeze non-target params)
+        for name, param in transformer3d.mask_conv.named_parameters():
+            param.requires_grad_(True)
         mask_conv_params = list(filter(lambda p: p.requires_grad, transformer3d.mask_conv.parameters()))
         if mask_conv_params:
             logging.info(f"Added {len(mask_conv_params)} mask_conv param groups")
         else:
-            # All mask_conv params have requires_grad=False → bug or already handled
-            for name, param in transformer3d.mask_conv.named_parameters():
-                assert param.requires_grad, f"BUG: mask_conv.{name} not trainable at optimizer creation"
+            raise RuntimeError(f"BUG: mask_conv has {sum(1 for _ in transformer3d.mask_conv.parameters())} params but 0 require grad after unfreeze")
 
     if args.use_peft_lora:
         logging.info("Add peft parameters")
