@@ -1325,14 +1325,26 @@ def main():
     else:
         optimizer_cls = torch.optim.AdamW
 
+    # Collect mask_conv params (not covered by LoRA target_modules)
+    mask_conv_params = []
+    if hasattr(transformer3d, 'mask_conv') and transformer3d.mask_conv is not None:
+        mask_conv_params = list(filter(lambda p: p.requires_grad, transformer3d.mask_conv.parameters()))
+        if mask_conv_params:
+            logging.info(f"Added {len(mask_conv_params)} mask_conv param groups")
+
     if args.use_peft_lora:
         logging.info("Add peft parameters")
         trainable_params = list(filter(lambda p: p.requires_grad, transformer3d.parameters()))
         trainable_params_optim = list(filter(lambda p: p.requires_grad, transformer3d.parameters()))
     else:
         logging.info("Add network parameters")
-        trainable_params = list(filter(lambda p: p.requires_grad, network.parameters()))
+        trainable_params = list(filter(lambda p: p.requires_grad, network.parameters())) + mask_conv_params
         trainable_params_optim = network.prepare_optimizer_params(args.learning_rate / 2, args.learning_rate, args.learning_rate)
+        if mask_conv_params:
+            if isinstance(trainable_params_optim, list):
+                trainable_params_optim = trainable_params_optim + [{'params': mask_conv_params, 'lr': args.learning_rate}]
+            else:
+                trainable_params_optim = list(trainable_params_optim) + [{'params': mask_conv_params, 'lr': args.learning_rate}]
 
     if args.use_came:
         optimizer = optimizer_cls(
