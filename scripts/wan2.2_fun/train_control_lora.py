@@ -354,6 +354,11 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                         mask_np = np.stack(mask_frames)  # [F, H, W]
                         mask_np = mask_np.astype(np.float32) / 255.  # [0, 1], 1=known/white
                         adapter_mask = torch.from_numpy(mask_np).unsqueeze(0).unsqueeze(0)  # [1, 1, F, H, W]
+                        assert adapter_mask.ndim == 5, f"val adapter_mask ndim={adapter_mask.ndim}, expected 5"
+                        assert adapter_mask.shape[0] == 1 and adapter_mask.shape[1] == 1, \
+                            f"val adapter_mask shape={adapter_mask.shape}, expected [1,1,F,H,W]"
+                        logger.info(f"Validation: loaded mask adapter video, shape={adapter_mask.shape}, "
+                                   f"known_ratio={(adapter_mask > 0.5).float().mean():.2%}")
 
                 sample = pipeline(
                     args.validation_prompts[i], 
@@ -1172,8 +1177,10 @@ def main():
 
     # Unfreeze mask_conv (not covered by LoRA target_modules)
     if hasattr(transformer3d, 'mask_conv') and transformer3d.mask_conv is not None:
-        for param in transformer3d.mask_conv.parameters():
+        for i, (name, param) in enumerate(transformer3d.mask_conv.named_parameters()):
             param.requires_grad_(True)
+            assert param.requires_grad, f"BUG: mask_conv.{name} still frozen after requires_grad_(True)"
+        logging.info(f"Unfroze {i+1} mask_conv parameters")
 
     # Lora will work with this...
     if args.use_peft_lora:
@@ -1331,6 +1338,10 @@ def main():
         mask_conv_params = list(filter(lambda p: p.requires_grad, transformer3d.mask_conv.parameters()))
         if mask_conv_params:
             logging.info(f"Added {len(mask_conv_params)} mask_conv param groups")
+        else:
+            # All mask_conv params have requires_grad=False → bug or already handled
+            for name, param in transformer3d.mask_conv.named_parameters():
+                assert param.requires_grad, f"BUG: mask_conv.{name} not trainable at optimizer creation"
 
     if args.use_peft_lora:
         logging.info("Add peft parameters")
@@ -1671,7 +1682,8 @@ def main():
                 if args.add_mask_adapter:
                     local_mask = example.get("mask_adapter_values", None)
                     if local_mask is not None and not isinstance(local_mask, np.ndarray):
-                        local_mask = local_mask.numpy()
+                        # Torch tensor [F, C, H, W] → numpy [F, H, W, C]
+                        local_mask = local_mask.permute(0, 2, 3, 1).contiguous().numpy()
                     if local_mask is not None and local_mask.ndim == 4:
                         # Convert RGB mask to grayscale if 3-channel
                         if local_mask.shape[-1] == 3:
@@ -1679,6 +1691,10 @@ def main():
                         local_mask = torch.from_numpy(local_mask).permute(0, 3, 1, 2).contiguous()
                         local_mask = local_mask / 255. if local_mask.max() > 1.0 else local_mask.to(torch.float32)
                         local_mask = transform_no_normalize(local_mask)[:batch_video_length]
+                        # Assert valid mask after transform
+                        assert local_mask.ndim == 4, f"mask_adapter ndim={local_mask.ndim}, expected 4 [F,1,H,W], got shape {local_mask.shape}"
+                        assert local_mask.shape[1] == 1, f"mask_adapter channel={local_mask.shape[1]}, expected 1"
+                        assert local_mask.min() >= 0 and local_mask.max() <= 1, f"mask_adapter value range [{local_mask.min():.3f}, {local_mask.max():.3f}], expected [0,1]"
                     else:
                         # Fallback: all-ones (all regions known)
                         local_mask = torch.ones_like(new_examples["pixel_values"][-1])[:, :1]
@@ -1747,6 +1763,11 @@ def main():
                 new_examples["mask"] = torch.stack([example for example in new_examples["mask"]])
             if args.add_mask_adapter:
                 new_examples["mask_adapter_values"] = torch.stack([example for example in new_examples["mask_adapter_values"]])
+                # Collate-time sanity: mask should be [B, F, 1, H, W], 0/1
+                m = new_examples["mask_adapter_values"]
+                assert m.ndim == 5, f"stacked mask_adapter ndim={m.ndim}, expected 5 [B,F,1,H,W], got {m.shape}"
+                assert m.shape[2] == 1, f"stacked mask_adapter channel={m.shape[2]}, expected 1"
+                assert m.min() >= 0 and m.max() <= 1, f"stacked mask_adapter range [{m.min():.3f},{m.max():.3f}]"
 
             # Encode prompts when enable_text_encoder_in_dataloader=True
             if args.enable_text_encoder_in_dataloader:
@@ -2311,12 +2332,22 @@ def main():
                         if mask_adapter_val is not None:
                             # mask_adapter_val: [B, F_video, 1, H_video, W_video], binary 0/1
                             # Resize to latent resolution: [B, 1, F_latent, h_latent, w_latent]
+                            assert mask_adapter_val.ndim == 5, f"mask_adapter_val ndim={mask_adapter_val.ndim}, expected 5 [B,F,1,H,W], shape={mask_adapter_val.shape}"
+                            assert mask_adapter_val.shape[2] == 1, f"mask_adapter_val channel={mask_adapter_val.shape[2]}, expected 1"
+                            
                             mask_for_adapter = F.interpolate(
                                 mask_adapter_val.permute(0, 2, 1, 3, 4).to(accelerator.device, dtype=weight_dtype),
                                 size=latents.size()[-3:],
                                 mode='trilinear', align_corners=True
                             )
                             # mask_for_adapter: [B, 1, F_latent, h_latent, w_latent], 1=known, 0=unknown
+                            assert mask_for_adapter.shape[0] == latents.shape[0], \
+                                f"mask_for_adapter batch={mask_for_adapter.shape[0]} vs latents batch={latents.shape[0]}"
+                            assert mask_for_adapter.shape[-3:] == latents.shape[-3:], \
+                                f"mask_for_adapter spatial={mask_for_adapter.shape[-3:]} vs latents={latents.shape[-3:]}"
+                            assert mask_for_adapter.device == latents.device, \
+                                f"mask_for_adapter device={mask_for_adapter.device} vs latents={latents.device}"
+                            
                             loss_mask = mask_for_adapter.detach().to(weight_dtype)
                         else:
                             mask_for_adapter = None

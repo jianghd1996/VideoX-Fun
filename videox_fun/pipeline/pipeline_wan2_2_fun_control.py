@@ -787,12 +787,17 @@ class Wan2_2FunControlPipeline(DiffusionPipeline):
         if adapter_mask is not None and hasattr(self.transformer, 'mask_conv') and self.transformer.mask_conv is not None:
             # adapter_mask: [B, 1, F_video, H_video, W_video] binary 0/1
             # Resize to latent resolution: [B, 1, F_latent, h_latent, w_latent]
+            assert adapter_mask.ndim == 5, f"pipeline adapter_mask ndim={adapter_mask.ndim}, expected 5"
+            assert adapter_mask.shape[1] == 1, f"pipeline adapter_mask channel={adapter_mask.shape[1]}, expected 1"
+            
             adapter_mask = adapter_mask.to(device=device, dtype=weight_dtype)
             mask_for_adapter = F.interpolate(
                 adapter_mask,
                 size=(target_shape[1], target_shape[3], target_shape[2]),
                 mode='trilinear', align_corners=True
             )
+            assert mask_for_adapter.shape[-3:] == (target_shape[1], target_shape[3], target_shape[2]), \
+                f"mask_for_adapter spatial={mask_for_adapter.shape[-3:]} vs target={target_shape}"
 
         # 7. Denoising loop
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)

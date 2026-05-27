@@ -545,7 +545,13 @@ class ImageVideoControlDataset(Dataset):
                             transforms.CenterCrop(self.video_sample_size),
                         ])(mask_adapter_values)
                 else:
-                    mask_adapter_values = torch.ones_like(pixel_values)[:, :1] if not self.enable_bucket else np.ones_like(pixel_values)[:, :1]
+                    # Fallback: all-ones mask (all regions known)
+                    if not self.enable_bucket:
+                        # pixel_values: [F, C, H, W] → mask [F, 1, H, W]
+                        mask_adapter_values = torch.ones_like(pixel_values)[:, :1]
+                    else:
+                        # pixel_values: numpy [F, H, W, C] → mask [F, H, W, 1]
+                        mask_adapter_values = np.ones((*pixel_values.shape[:3], 1), dtype=np.float32)
             else:
                 mask_adapter_values = None
 

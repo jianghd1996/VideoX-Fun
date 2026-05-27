@@ -934,11 +934,18 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
 
         # Add mask adapter features (for background-aware control)
         if self.mask_conv is not None and mask is not None:
+            assert mask.ndim == 5, f"mask ndim={mask.ndim}, expected 5 [B,1,F,h,w], shape={mask.shape}"
+            assert mask.shape[1] == 1, f"mask channel={mask.shape[1]}, expected 1"
+            assert mask.shape[0] == len(x), f"mask batch={mask.shape[0]} != x batch={len(x)}"
+            
             mask_feat = self.mask_conv(mask)  # [B, dim, F, h, w]
             # Downsample spatially to match patch embedding resolution (2x)
             mask_feat = F.avg_pool3d(mask_feat, kernel_size=(1, 2, 2), stride=(1, 2, 2))
             # Keep 5D format to match x[i] shape [1, dim, F, H/2, W/2]; both flattened later
             mask_feat = [m.unsqueeze(0) for m in mask_feat]
+            assert len(mask_feat) == len(x), f"mask_feat len={len(mask_feat)} != x len={len(x)}"
+            for i, (u, m) in enumerate(zip(x, mask_feat)):
+                assert u.shape == m.shape, f"x[{i}] shape={u.shape} != mask_feat[{i}] shape={m.shape}"
             x = [u + m.to(u.dtype) for u, m in zip(x, mask_feat)]
         
         # Add control adapter features (for camera control)
