@@ -5,6 +5,9 @@ export DATASET_META_NAME="/cache/00_data/metadata.json"
 # 4 GPUs available
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 
+# Reduce CUDA memory fragmentation (prevents OOM during validation decode)
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 # NCCL_IB_DISABLE=1 and NCCL_P2P_DISABLE=1 are used in multi nodes without RDMA. 
 # export NCCL_IB_DISABLE=1
 # export NCCL_P2P_DISABLE=1

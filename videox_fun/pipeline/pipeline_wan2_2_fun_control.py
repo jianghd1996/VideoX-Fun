@@ -408,6 +408,8 @@ class Wan2_2FunControlPipeline(DiffusionPipeline):
         return control, control_image_latents
 
     def decode_latents(self, latents: torch.Tensor) -> torch.Tensor:
+        # Defragment before large VAE decode allocation
+        torch.cuda.empty_cache()
         frames = self.vae.decode(latents.to(self.vae.dtype)).sample
         frames = (frames / 2 + 0.5).clamp(0, 1)
         # we always cast to float32 as this does not cause significant overhead and is compatible with bfloa16
