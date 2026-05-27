@@ -1170,6 +1170,11 @@ def main():
     text_encoder.requires_grad_(False)
     transformer3d.requires_grad_(False)
 
+    # Unfreeze mask_conv (not covered by LoRA target_modules)
+    if hasattr(transformer3d, 'mask_conv') and transformer3d.mask_conv is not None:
+        for param in transformer3d.mask_conv.parameters():
+            param.requires_grad_(True)
+
     # Lora will work with this...
     if args.use_peft_lora:
         from peft import (LoraConfig, get_peft_model_state_dict,
