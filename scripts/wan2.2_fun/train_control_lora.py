@@ -1691,10 +1691,12 @@ def main():
                         local_mask = torch.from_numpy(local_mask).permute(0, 3, 1, 2).contiguous()
                         local_mask = local_mask / 255. if local_mask.max() > 1.0 else local_mask.to(torch.float32)
                         local_mask = transform_no_normalize(local_mask)[:batch_video_length]
-                        # Assert valid mask after transform
+                        # Assert valid mask after transform (allow fp epsilon)
                         assert local_mask.ndim == 4, f"mask_adapter ndim={local_mask.ndim}, expected 4 [F,1,H,W], got shape {local_mask.shape}"
                         assert local_mask.shape[1] == 1, f"mask_adapter channel={local_mask.shape[1]}, expected 1"
-                        assert local_mask.min() >= 0 and local_mask.max() <= 1, f"mask_adapter value range [{local_mask.min():.3f}, {local_mask.max():.3f}], expected [0,1]"
+                        m_min, m_max = local_mask.min().item(), local_mask.max().item()
+                        assert m_min >= -1e-4 and m_max <= 1.0 + 1e-4, \
+                            f"mask_adapter value range [{m_min:.6f}, {m_max:.6f}], expected [0,1]"
                     else:
                         # Fallback: all-ones (all regions known)
                         local_mask = torch.ones_like(new_examples["pixel_values"][-1])[:, :1]
@@ -1767,7 +1769,9 @@ def main():
                 m = new_examples["mask_adapter_values"]
                 assert m.ndim == 5, f"stacked mask_adapter ndim={m.ndim}, expected 5 [B,F,1,H,W], got {m.shape}"
                 assert m.shape[2] == 1, f"stacked mask_adapter channel={m.shape[2]}, expected 1"
-                assert m.min() >= 0 and m.max() <= 1, f"stacked mask_adapter range [{m.min():.3f},{m.max():.3f}]"
+                m_smin, m_smax = m.min().item(), m.max().item()
+                assert m_smin >= -1e-4 and m_smax <= 1.0 + 1e-4, \
+                    f"stacked mask_adapter range [{m_smin:.6f},{m_smax:.6f}]"
 
             # Encode prompts when enable_text_encoder_in_dataloader=True
             if args.enable_text_encoder_in_dataloader:
