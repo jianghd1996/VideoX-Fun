@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 轻量同步脚本：监控 VideoX-Fun 训练输出目录，将新权重和 validation 样本
 增量拷贝到安全存储路径。
