@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-轻量同步脚本：监控 VideoX-Fun 训练输出目录，将新权重和 validation 样本
-增量拷贝到安全存储路径。
+Lightweight sync daemon for VideoX-Fun training outputs.
+Monitors checkpoint weights and validation samples, incrementally
+copies new/changed files to a safe backup location.
 
-设计原则：
-- 轮询 + sleep，不占用 inotify fd，CPU 几乎为零
-- 仅对比 size + mtime，不计算 hash（节省 IO）
-- 检测文件是否还在写入中（两次采样 size 不变才算稳定）
-- 支持 nohup 后台运行，所有输出走 log 文件
+Design:
+- Poll + sleep, no inotify fd usage, near-zero CPU
+- Compare size + mtime only, no hashing (save IO)
+- File stability check before copy (waits for writes to finish)
+- Supports nohup background execution with file logging
 
-用法：
+Usage:
     python sync_weights.py [--interval 60]
+    python sync_weights.py --once
     nohup python sync_weights.py --interval 120 > /dev/null 2>&1 &
 
-配置：修改下方 CONFIG 字典即可（或通过环境变量覆盖）。
+Config: modify the CONFIG dict below, or override via environment variables.
 """
 
 import os
@@ -24,9 +26,9 @@ import shutil
 import logging
 import argparse
 from pathlib import Path
-from typing import Dict, Optional, Set, Tuple
+from typing import Dict, Set, Tuple
 
-# ── 配置 ──────────────────────────────────────────────────────────────
+# ── CONFIG ────────────────────────────────────────────────────────────
 CONFIG = {
     "src_root": os.environ.get(
         "SYNC_SRC",
@@ -40,19 +42,19 @@ CONFIG = {
         "SYNC_LOG_DIR",
         "/cache/01_code/VideoX-Fun/logs",
     ),
-    # 轮询间隔（秒），权重通常几百步才存一次，120s 足够
+    # Poll interval in seconds (weights save every many steps, 120s is plenty)
     "poll_interval": int(os.environ.get("SYNC_INTERVAL", "120")),
-    # 文件稳定检测：两次采样间隔 + 最大重试次数
-    "stable_wait": 2.0,       # 等 2 秒再检查一次
-    "stable_retries": 3,      # 连续 3 次 size 不变才算稳定
-    # 需要监控的子目录（相对于 src_root）
+    # File stability: wait between samples + max retries
+    "stable_wait": 2.0,
+    "stable_retries": 3,
+    # Subdirs to monitor (relative to src_root)
     "watch_dirs": [
-        "",                     # 根目录下的权重文件/checkpoint 目录
+        "",          # root-level weights / checkpoint dirs
         "sample",
         "samples",
         "validation",
     ],
-    # 需要同步的文件扩展名
+    # File extensions to sync
     "sync_extensions": {
         ".safetensors", ".bin", ".pt", ".pth", ".ckpt", ".onnx",
         ".json", ".yaml", ".yml", ".toml", ".txt", ".md",
@@ -61,20 +63,20 @@ CONFIG = {
     },
 }
 
-# ── 日志 ──────────────────────────────────────────────────────────────
+# ── LOGGING ───────────────────────────────────────────────────────────
 def setup_logging(log_dir: str) -> logging.Logger:
     Path(log_dir).mkdir(parents=True, exist_ok=True)
     log_file = os.path.join(log_dir, "sync_weights.log")
     logger = logging.getLogger("sync")
     logger.setLevel(logging.DEBUG)
-    # 文件 handler：完整日志
+    # File handler: full logs
     fh = logging.FileHandler(log_file, encoding="utf-8")
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(logging.Formatter(
         "%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     ))
-    # 控制台 handler：仅 INFO+
+    # Console handler: INFO+ only
     ch = logging.StreamHandler(sys.stdout)
     ch.setLevel(logging.INFO)
     ch.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
@@ -82,11 +84,11 @@ def setup_logging(log_dir: str) -> logging.Logger:
     logger.addHandler(ch)
     return logger
 
-# ── 文件索引 ──────────────────────────────────────────────────────────
+# ── FILE INDEXING ─────────────────────────────────────────────────────
 def scan_tree(root: str, extensions: Set[str], logger: logging.Logger) -> Dict[str, Tuple[int, float]]:
     """
-    递归扫描目录，返回 {相对路径: (size, mtime)} 的字典。
-    只收集匹配扩展名的文件。
+    Recursively scan a directory, return {relpath: (size, mtime)}.
+    Only collects files matching the given extensions.
     """
     index: Dict[str, Tuple[int, float]] = {}
     if not os.path.isdir(root):
@@ -105,10 +107,12 @@ def scan_tree(root: str, extensions: Set[str], logger: logging.Logger) -> Dict[s
                 logger.warning("stat failed: %s (%s)", full, e)
     return index
 
+
 def wait_stable(filepath: str, wait: float, retries: int, logger: logging.Logger) -> bool:
     """
-    等待文件写入完成：连续 retries 次采样 size 不变则返回 True。
-    超时或文件消失返回 False。
+    Wait for a file to stabilize (no longer being written).
+    Returns True if size stays unchanged for `retries` consecutive checks,
+    False if the file disappears or never stabilizes.
     """
     prev_size = -1
     for i in range(retries):
@@ -119,30 +123,30 @@ def wait_stable(filepath: str, wait: float, retries: int, logger: logging.Logger
             logger.debug("file gone while waiting: %s", filepath)
             return False
         if cur_size == prev_size and i > 0:
-            # 稳定
             return True
         prev_size = cur_size
     logger.debug("file never stabilized: %s (last_size=%d)", filepath, prev_size)
     return False
 
-# ── 同步逻辑 ──────────────────────────────────────────────────────────
+# ── SYNC LOGIC ────────────────────────────────────────────────────────
 def sync_file(
     src_rel: str,
     src_base: str,
     dst_base: str,
     logger: logging.Logger,
 ) -> bool:
-    """拷贝单个文件，自动创建目标目录。"""
+    """Copy a single file, auto-creating the destination directory tree."""
     src = os.path.join(src_base, src_rel)
     dst = os.path.join(dst_base, src_rel)
     try:
         os.makedirs(os.path.dirname(dst), exist_ok=True)
-        shutil.copy2(src, dst)  # copy2 保留 mtime
+        shutil.copy2(src, dst)
         logger.info("COPIED %s", src_rel)
         return True
     except OSError as e:
         logger.error("copy failed: %s -> %s (%s)", src, dst, e)
         return False
+
 
 def sync_loop(
     src_root: str,
@@ -155,9 +159,9 @@ def sync_loop(
     logger: logging.Logger,
 ):
     """
-    主循环：定期扫描源目录，增量拷贝新/变化的文件到目标。
+    Main loop: periodically scan source dirs, incrementally copy
+    new/changed files to the destination.
     """
-    # 上次扫描的快照：{子目录 -> {相对路径: (size, mtime)}}
     prev_snapshots: Dict[str, Dict[str, Tuple[int, float]]] = {}
 
     logger.info("=" * 50)
@@ -186,53 +190,55 @@ def sync_loop(
                 prev_info = previous.get(rel)
 
                 if prev_info is None:
-                    # 新文件 —— 等待写入稳定
+                    # New file -- wait for it to stabilize
                     logger.debug("new file detected: %s (size=%d)", rel, size)
                     full_src = os.path.join(scan_path, rel)
                     if wait_stable(full_src, stable_wait, stable_retries, logger):
-                        if sync_file(rel, scan_path, dst_root if not sub else os.path.join(dst_root, sub), logger):
+                        if sync_file(rel, scan_path,
+                                     dst_root if not sub else os.path.join(dst_root, sub),
+                                     logger):
                             total_copied += 1
                     else:
                         logger.warning("skipped unstable file: %s", rel)
 
                 elif size != prev_info[0] or mtime > prev_info[1] + 1:
-                    # 文件变化（size 不同或 mtime 更新了 1s 以上）
+                    # File changed (size differs or mtime updated by >1s)
                     logger.debug("changed file: %s (size %d->%d, mtime %.0f->%.0f)",
                                  rel, prev_info[0], size, prev_info[1], mtime)
                     full_src = os.path.join(scan_path, rel)
                     if wait_stable(full_src, stable_wait, stable_retries, logger):
-                        if sync_file(rel, scan_path, dst_root if not sub else os.path.join(dst_root, sub), logger):
+                        if sync_file(rel, scan_path,
+                                     dst_root if not sub else os.path.join(dst_root, sub),
+                                     logger):
                             total_copied += 1
                     else:
                         logger.warning("skipped unstable file: %s", rel)
 
-            # 更新快照
             prev_snapshots[sub] = current
 
         elapsed = time.time() - loop_start
         if total_copied > 0:
-            logger.info("Iter #%d: %d file(s) synced (scan %.1fs)", iteration, total_copied, elapsed)
+            logger.info("Iter #%d: %d file(s) synced (scan %.1fs)",
+                        iteration, total_copied, elapsed)
         else:
             logger.debug("Iter #%d: no changes (scan %.1fs)", iteration, elapsed)
 
-        # 等待下次轮询
         sleep_time = max(1, interval - elapsed)
         time.sleep(sleep_time)
 
-# ── 入口 ──────────────────────────────────────────────────────────────
+# ── ENTRY ─────────────────────────────────────────────────────────────
 def main():
-    parser = argparse.ArgumentParser(description="VideoX-Fun 权重同步守护进程")
+    parser = argparse.ArgumentParser(description="VideoX-Fun weight sync daemon")
     parser.add_argument("--interval", type=int, default=None,
-                        help=f"轮询间隔秒数（默认 {CONFIG['poll_interval']}）")
+                        help=f"Poll interval in seconds (default {CONFIG['poll_interval']})")
     parser.add_argument("--src", type=str, default=None,
-                        help="源目录（覆盖配置）")
+                        help="Source directory (overrides config)")
     parser.add_argument("--dst", type=str, default=None,
-                        help="目标目录（覆盖配置）")
+                        help="Destination directory (overrides config)")
     parser.add_argument("--once", action="store_true",
-                        help="只执行一次同步后退出（不走循环）")
+                        help="Run one full sync then exit (no daemon loop)")
     args = parser.parse_args()
 
-    # 合并配置
     src = args.src or CONFIG["src_root"]
     dst = args.dst or CONFIG["dst_root"]
     interval = args.interval or CONFIG["poll_interval"]
@@ -256,7 +262,8 @@ def main():
             count = 0
             for rel in current:
                 full_dst = os.path.join(dst_sub, rel)
-                if not os.path.exists(full_dst) or os.path.getsize(full_dst) != os.path.getsize(os.path.join(scan_path, rel)):
+                if not os.path.exists(full_dst) or \
+                   os.path.getsize(full_dst) != os.path.getsize(os.path.join(scan_path, rel)):
                     if sync_file(rel, scan_path, dst_sub, logger):
                         count += 1
             logger.info("Subdir '%s': %d file(s) synced", sub or ".", count)
@@ -272,6 +279,7 @@ def main():
             stable_retries=CONFIG["stable_retries"],
             logger=logger,
         )
+
 
 if __name__ == "__main__":
     main()
