@@ -294,7 +294,7 @@ class ImageVideoControlDataset(Dataset):
         enable_subject_info=False,
         padding_subject_info=True,
         return_file_name=False,
-        enable_mask_adapter=False,
+        mask_concat_channels=0,
     ):
         # Loading annotations from files
         print(f"loading annotations from {ann_path} ...")
@@ -332,7 +332,7 @@ class ImageVideoControlDataset(Dataset):
         self.enable_subject_info = enable_subject_info
         self.padding_subject_info = padding_subject_info
         self.return_file_name = return_file_name
-        self.enable_mask_adapter = enable_mask_adapter
+        self.mask_concat_channels = mask_concat_channels
 
         self.video_length_drop_start = video_length_drop_start
         self.video_length_drop_end = video_length_drop_end
@@ -513,7 +513,7 @@ class ImageVideoControlDataset(Dataset):
                 subject_image = None
 
             # Load mask adapter video (white=known region, black=unknown region)
-            if self.enable_mask_adapter:
+            if self.mask_concat_channels > 0:
                 mask_path = data_info.get('mask_path', None)
                 if mask_path is not None:
                     mask_full_path = mask_path if self.data_root is None else os.path.join(self.data_root, mask_path)

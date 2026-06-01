@@ -933,10 +933,10 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--add_mask_adapter",
-        action="store_true",
+        "--mask_concat_channels", type=int, default=0,
         help=(
-            'Whether enable mask adapter for background-aware control. '
+            'Number of extra mask channels concatenated to model input. '
+            '0=disabled, 1=standard binary mask concat. '
             'Requires mask_path in dataset JSON or mask.mp4 in validation dirs.'
         ),
     )
@@ -1155,9 +1155,9 @@ def main():
     transformer_combination_type = config['transformer_additional_kwargs'].get('transformer_combination_type', 'moe')
 
     # Inject mask adapter config before model loading
-    if args.add_mask_adapter:
-        config['transformer_additional_kwargs']['add_mask_adapter'] = True
-        logger.info("Enabling mask adapter for background-aware control")
+    if args.mask_concat_channels > 0:
+        config['transformer_additional_kwargs']['mask_concat_channels'] = args.mask_concat_channels
+        logger.info(f"Enabling mask concat with {args.mask_concat_channels} extra channel(s)")
 
     if transformer_combination_type == 'single':
         # Single dense model: load from root (or configured subpath)
@@ -1201,12 +1201,6 @@ def main():
         )
         network = network.to(weight_dtype)
         network.apply_to(text_encoder, transformer3d, args.train_text_encoder and not args.training_with_video_token_length, True)
-
-    # Unfreeze mask_conv AFTER LoRA injection (peft re-freezes non-target params)
-    if hasattr(transformer3d, 'mask_conv') and transformer3d.mask_conv is not None:
-        for i, (name, param) in enumerate(transformer3d.mask_conv.named_parameters()):
-            param.requires_grad_(True)
-        logging.info(f"Unfroze {i+1} mask_conv parameters")
 
     if args.transformer_path is not None:
         print(f"From checkpoint: {args.transformer_path}")
@@ -1336,31 +1330,14 @@ def main():
     else:
         optimizer_cls = torch.optim.AdamW
 
-    # Collect mask_conv params (not covered by LoRA target_modules)
-    mask_conv_params = []
-    if hasattr(transformer3d, 'mask_conv') and transformer3d.mask_conv is not None:
-        # Re-enable gradients (peft/network.apply_to may re-freeze non-target params)
-        for name, param in transformer3d.mask_conv.named_parameters():
-            param.requires_grad_(True)
-        mask_conv_params = list(filter(lambda p: p.requires_grad, transformer3d.mask_conv.parameters()))
-        if mask_conv_params:
-            logging.info(f"Added {len(mask_conv_params)} mask_conv param groups")
-        else:
-            raise RuntimeError(f"BUG: mask_conv has {sum(1 for _ in transformer3d.mask_conv.parameters())} params but 0 require grad after unfreeze")
-
     if args.use_peft_lora:
         logging.info("Add peft parameters")
         trainable_params = list(filter(lambda p: p.requires_grad, transformer3d.parameters()))
         trainable_params_optim = list(filter(lambda p: p.requires_grad, transformer3d.parameters()))
     else:
         logging.info("Add network parameters")
-        trainable_params = list(filter(lambda p: p.requires_grad, network.parameters())) + mask_conv_params
+        trainable_params = list(filter(lambda p: p.requires_grad, network.parameters()))
         trainable_params_optim = network.prepare_optimizer_params(args.learning_rate / 2, args.learning_rate, args.learning_rate)
-        if mask_conv_params:
-            if isinstance(trainable_params_optim, list):
-                trainable_params_optim = trainable_params_optim + [{'params': mask_conv_params, 'lr': args.learning_rate}]
-            else:
-                trainable_params_optim = list(trainable_params_optim) + [{'params': mask_conv_params, 'lr': args.learning_rate}]
 
     if args.use_came:
         optimizer = optimizer_cls(
@@ -1397,7 +1374,7 @@ def main():
         image_sample_size=args.image_sample_size,
         enable_bucket=args.enable_bucket, 
         enable_camera_info=args.train_mode == "control_camera_ref",
-        enable_mask_adapter=args.add_mask_adapter,
+        mask_concat_channels=args.mask_concat_channels,
     )
 
     # Auto-populate validation prompts/paths from training data if validation_samples is set
@@ -1534,7 +1511,7 @@ def main():
                 new_examples["clip_pixel_values"] = []
 
             # Used for Mask Adapter mode
-            if args.add_mask_adapter:
+            if args.mask_concat_channels > 0:
                 new_examples["mask_adapter_values"] = []
 
             # Get downsample ratio in image and videos<br>
@@ -1684,7 +1661,7 @@ def main():
                 new_examples["control_pixel_values"].append(transform(control_pixel_values))
 
                 # Process mask_adapter_values (binary mask: 1=known, 0=unknown)
-                if args.add_mask_adapter:
+                if args.mask_concat_channels > 0:
                     local_mask = example.get("mask_adapter_values", None)
                     if local_mask is not None and not isinstance(local_mask, np.ndarray):
                         # Torch tensor [F, C, H, W] → numpy [F, H, W, C]
@@ -1768,7 +1745,7 @@ def main():
             if args.add_inpaint_info:
                 new_examples["mask_pixel_values"] = torch.stack([example for example in new_examples["mask_pixel_values"]])
                 new_examples["mask"] = torch.stack([example for example in new_examples["mask"]])
-            if args.add_mask_adapter:
+            if args.mask_concat_channels > 0:
                 new_examples["mask_adapter_values"] = torch.stack([example for example in new_examples["mask_adapter_values"]])
                 # Collate-time sanity: mask should be [B, F, 1, H, W], 0/1
                 m = new_examples["mask_adapter_values"]
@@ -2336,7 +2313,7 @@ def main():
                         inpaint_latents = None
 
                     # Prepare mask for mask adapter (background-aware control)
-                    if args.add_mask_adapter:
+                    if args.mask_concat_channels > 0:
                         mask_adapter_val = batch.get('mask_adapter_values', None)
                         if mask_adapter_val is not None:
                             # mask_adapter_val: [B, F_video, 1, H_video, W_video], binary 0/1
@@ -2344,25 +2321,25 @@ def main():
                             assert mask_adapter_val.ndim == 5, f"mask_adapter_val ndim={mask_adapter_val.ndim}, expected 5 [B,F,1,H,W], shape={mask_adapter_val.shape}"
                             assert mask_adapter_val.shape[2] == 1, f"mask_adapter_val channel={mask_adapter_val.shape[2]}, expected 1"
                             
-                            mask_for_adapter = F.interpolate(
+                            mask_for_concat = F.interpolate(
                                 mask_adapter_val.permute(0, 2, 1, 3, 4).to(accelerator.device, dtype=weight_dtype),
                                 size=latents.size()[-3:],
                                 mode='trilinear', align_corners=True
                             )
-                            # mask_for_adapter: [B, 1, F_latent, h_latent, w_latent], 1=known, 0=unknown
-                            assert mask_for_adapter.shape[0] == latents.shape[0], \
-                                f"mask_for_adapter batch={mask_for_adapter.shape[0]} vs latents batch={latents.shape[0]}"
-                            assert mask_for_adapter.shape[-3:] == latents.shape[-3:], \
-                                f"mask_for_adapter spatial={mask_for_adapter.shape[-3:]} vs latents={latents.shape[-3:]}"
-                            assert mask_for_adapter.device == latents.device, \
-                                f"mask_for_adapter device={mask_for_adapter.device} vs latents={latents.device}"
+                            # mask_for_concat: [B, 1, F_latent, h_latent, w_latent], 1=known, 0=unknown
+                            assert mask_for_concat.shape[0] == latents.shape[0], \
+                                f"mask_for_concat batch={mask_for_concat.shape[0]} vs latents batch={latents.shape[0]}"
+                            assert mask_for_concat.shape[-3:] == latents.shape[-3:], \
+                                f"mask_for_concat spatial={mask_for_concat.shape[-3:]} vs latents={latents.shape[-3:]}"
+                            assert mask_for_concat.device == latents.device, \
+                                f"mask_for_concat device={mask_for_concat.device} vs latents={latents.device}"
                             
-                            loss_mask = mask_for_adapter.detach().to(weight_dtype)
+                            loss_mask = mask_for_concat.detach().to(weight_dtype)
                         else:
-                            mask_for_adapter = None
+                            mask_for_concat = None
                             loss_mask = None
                     else:
-                        mask_for_adapter = None
+                        mask_for_concat = None
                         loss_mask = None
 
                     if control_latents is None:
@@ -2468,6 +2445,9 @@ def main():
 
                 # Predict the noise residual
                 with torch.cuda.amp.autocast(dtype=weight_dtype), torch.cuda.device(device=accelerator.device):
+                    if mask_for_concat is not None:
+                        noisy_latents = torch.cat([noisy_latents, mask_for_concat], dim=1)
+                    
                     noise_pred = transformer3d(
                         x=noisy_latents,
                         context=prompt_embeds,
@@ -2476,7 +2456,6 @@ def main():
                         y=control_latents,
                         y_camera=control_camera_latents if args.train_mode == "control_camera_ref" else None,
                         full_ref=full_ref if args.add_full_ref_image_in_self_attention else None,
-                        mask=mask_for_adapter,
                     )
                 
                 def custom_mse_loss(noise_pred, target, weighting=None, threshold=50):

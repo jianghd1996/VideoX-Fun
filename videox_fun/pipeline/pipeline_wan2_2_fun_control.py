@@ -784,22 +784,22 @@ class Wan2_2FunControlPipeline(DiffusionPipeline):
         target_shape = (self.vae.latent_channels, (num_frames - 1) // self.vae.temporal_compression_ratio + 1, width // self.vae.spatial_compression_ratio, height // self.vae.spatial_compression_ratio)
         seq_len = math.ceil((target_shape[2] * target_shape[3]) / (self.transformer.config.patch_size[1] * self.transformer.config.patch_size[2]) * target_shape[1]) 
 
-        # Process adapter_mask for mask adapter (background-aware control)
-        mask_for_adapter = None
-        if adapter_mask is not None and hasattr(self.transformer, 'mask_conv') and self.transformer.mask_conv is not None:
+        # Process mask for channel concat (background-aware control)
+        mask_for_concat = None
+        if adapter_mask is not None and hasattr(self.transformer, 'mask_concat_channels') and self.transformer.mask_concat_channels > 0:
             # adapter_mask: [B, 1, F_video, H_video, W_video] binary 0/1
             # Resize to latent resolution: [B, 1, F_latent, h_latent, w_latent]
             assert adapter_mask.ndim == 5, f"pipeline adapter_mask ndim={adapter_mask.ndim}, expected 5"
             assert adapter_mask.shape[1] == 1, f"pipeline adapter_mask channel={adapter_mask.shape[1]}, expected 1"
             
             adapter_mask = adapter_mask.to(device=device, dtype=weight_dtype)
-            mask_for_adapter = F.interpolate(
+            mask_for_concat = F.interpolate(
                 adapter_mask,
                 size=(target_shape[1], target_shape[3], target_shape[2]),
                 mode='trilinear', align_corners=True
             )
-            assert mask_for_adapter.shape[-3:] == (target_shape[1], target_shape[3], target_shape[2]), \
-                f"mask_for_adapter spatial={mask_for_adapter.shape[-3:]} vs target={target_shape}"
+            assert mask_for_concat.shape[-3:] == (target_shape[1], target_shape[3], target_shape[2]), \
+                f"mask_for_concat spatial={mask_for_concat.shape[-3:]} vs target={target_shape}"
 
         # 7. Denoising loop
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
@@ -869,6 +869,11 @@ class Wan2_2FunControlPipeline(DiffusionPipeline):
                 else:
                     local_transformer = self.transformer
                 
+                # Concat mask as extra channel (if enabled)
+                if mask_for_concat is not None:
+                    mask_concat_input = torch.cat([mask_for_concat] * 2) if do_classifier_free_guidance else mask_for_concat
+                    latent_model_input = torch.cat([latent_model_input, mask_concat_input], dim=1)
+                
                 # predict noise model_output
                 with torch.cuda.amp.autocast(dtype=weight_dtype), torch.cuda.device(device=device):
                     noise_pred = local_transformer(
@@ -879,7 +884,6 @@ class Wan2_2FunControlPipeline(DiffusionPipeline):
                         y=control_latents_input,
                         y_camera=control_camera_latents_input, 
                         full_ref=full_ref,
-                        mask=torch.cat([mask_for_adapter] * 2) if mask_for_adapter is not None and do_classifier_free_guidance else mask_for_adapter,
                     )
 
                 # perform guidance

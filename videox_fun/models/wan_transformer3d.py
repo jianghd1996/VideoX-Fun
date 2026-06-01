@@ -13,7 +13,6 @@ import numpy as np
 import torch
 import torch.cuda.amp as amp
 import torch.nn as nn
-import torch.nn.functional as F
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.loaders.single_file_model import FromOriginalModelMixin
 from diffusers.models.modeling_utils import ModelMixin
@@ -617,7 +616,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         add_ref_conv=False,
         in_dim_ref_conv=16,
         cross_attn_type=None,
-        add_mask_adapter=False,
+        mask_concat_channels=0,
     ):
         r"""
         Initialize the diffusion model backbone.
@@ -667,8 +666,9 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                 Enable reference frame convolution
             in_dim_ref_conv (`int`, *optional*, defaults to 16):
                 Input channels for reference convolution
-            add_mask_adapter (`bool`, *optional*, defaults to False):
-                Enable mask adapter for background-aware control
+            mask_concat_channels (`int`, *optional*, defaults to 0):
+                Extra mask channels concatenated to input before patch embedding.
+                Mask is concat'd in the pipeline; patch_embedding input = in_dim + mask_concat_channels.
             cross_attn_type (`str`, *optional*, defaults to None):
                 Cross-attention type, auto-determined from model_type if None
         """
@@ -695,7 +695,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
 
         # Embeddings
         self.patch_embedding = nn.Conv3d(
-            in_dim, dim, kernel_size=patch_size, stride=patch_size)
+            in_dim + mask_concat_channels, dim, kernel_size=patch_size, stride=patch_size)
         self.text_embedding = nn.Sequential(
             nn.Linear(text_dim, dim), nn.GELU(approximate='tanh'),
             nn.Linear(dim, dim))
@@ -746,21 +746,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         else:
             self.ref_conv = None
 
-        if add_mask_adapter:
-            hidden_dim = dim // 4
-            self.mask_conv = nn.Sequential(
-                nn.Conv3d(1, hidden_dim, kernel_size=3, padding=1),
-                nn.SiLU(),
-                nn.Conv3d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
-                nn.SiLU(),
-                nn.Conv3d(hidden_dim, dim, kernel_size=3, padding=1),
-            )
-            nn.init.zeros_(self.mask_conv[-1].weight)
-            nn.init.zeros_(self.mask_conv[-1].bias)
-            for name, param in self.mask_conv.named_parameters():
-                param.requires_grad_(True)
-        else:
-            self.mask_conv = None
+        self.mask_concat_channels = mask_concat_channels
 
         self.teacache = None
         self.cfg_skip_ratio = None
@@ -883,7 +869,6 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         y_camera=None,
         full_ref=None,
         subject_ref=None,
-        mask=None,
         cond_flag=True,
     ):
         r"""
@@ -908,9 +893,6 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                 Full reference frame for fun control mode, shape [B, C, F, H, W]
             subject_ref (Tensor, *optional*):
                 Subject reference frames for phantom mode, shape [B, C, F_ref, H, W]
-            mask (Tensor, *optional*):
-                Mask adapter input, shape [B, 1, F_latent, h_latent, w_latent].
-                1=known/reliable region, 0=unknown/unreliable region.
             cond_flag (`bool`, *optional*, defaults to True):
                 Flag to indicate whether this is conditional or unconditional forward pass
         
@@ -932,22 +914,6 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         # Patch embedding: convert video to sequence of patches
         x = [self.patch_embedding(u.unsqueeze(0)) for u in x]
 
-        # Add mask adapter features (for background-aware control)
-        if self.mask_conv is not None and mask is not None:
-            assert mask.ndim == 5, f"mask ndim={mask.ndim}, expected 5 [B,1,F,h,w], shape={mask.shape}"
-            assert mask.shape[1] == 1, f"mask channel={mask.shape[1]}, expected 1"
-            assert mask.shape[0] == len(x), f"mask batch={mask.shape[0]} != x batch={len(x)}"
-            
-            mask_feat = self.mask_conv(mask)  # [B, dim, F, h, w]
-            # Downsample spatially to match patch embedding resolution (2x)
-            mask_feat = F.avg_pool3d(mask_feat, kernel_size=(1, 2, 2), stride=(1, 2, 2))
-            # Keep 5D format to match x[i] shape [1, dim, F, H/2, W/2]; both flattened later
-            mask_feat = [m.unsqueeze(0) for m in mask_feat]
-            assert len(mask_feat) == len(x), f"mask_feat len={len(mask_feat)} != x len={len(x)}"
-            for i, (u, m) in enumerate(zip(x, mask_feat)):
-                assert u.shape == m.shape, f"x[{i}] shape={u.shape} != mask_feat[{i}] shape={m.shape}"
-            x = [u + m.to(u.dtype) for u, m in zip(x, mask_feat)]
-        
         # Add control adapter features (for camera control)
         if self.control_adapter is not None and y_camera is not None:
             y_camera = self.control_adapter(y_camera)
@@ -1492,7 +1458,7 @@ class Wan2_2Transformer3DModel(WanTransformer3DModel):
         downscale_factor_control_adapter=8,
         add_ref_conv=False,
         in_dim_ref_conv=16,
-        add_mask_adapter=False,
+        mask_concat_channels=0,
     ):
         r"""
         Initialize the diffusion model backbone.
@@ -1542,8 +1508,8 @@ class Wan2_2Transformer3DModel(WanTransformer3DModel):
                 Enable reference frame convolution
             in_dim_ref_conv (`int`, *optional*, defaults to 16):
                 Input channels for reference convolution
-            add_mask_adapter (`bool`, *optional*, defaults to False):
-                Enable mask adapter for background-aware control
+            mask_concat_channels (`int`, *optional*, defaults to 0):
+                Extra mask channels concatenated to input before patch embedding
         """
         super().__init__(
             model_type=model_type,
@@ -1568,7 +1534,7 @@ class Wan2_2Transformer3DModel(WanTransformer3DModel):
             downscale_factor_control_adapter=downscale_factor_control_adapter,
             add_ref_conv=add_ref_conv,
             in_dim_ref_conv=in_dim_ref_conv,
-            add_mask_adapter=add_mask_adapter,
+            mask_concat_channels=mask_concat_channels,
             cross_attn_type="cross_attn"
         )
         
