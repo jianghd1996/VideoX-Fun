@@ -652,6 +652,12 @@ def parse_args():
         help="Num frame of video.",
     )
     parser.add_argument(
+        "--min_sampled_frames",
+        type=int,
+        default=0,
+        help="Minimum sampled frames required. Videos with fewer sampled frames will be skipped. 0 means no filtering.",
+    )
+    parser.add_argument(
         "--video_repeat",
         type=int,
         default=0,
@@ -1167,6 +1173,7 @@ def main():
         video_repeat=args.video_repeat, 
         image_sample_size=args.image_sample_size,
         enable_bucket=args.enable_bucket, enable_inpaint=True if args.train_mode != "normal" else False,
+        min_sampled_frames=args.min_sampled_frames,
     )
     
     if args.enable_bucket:

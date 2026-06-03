@@ -95,6 +95,7 @@ class ImageVideoDataset(Dataset):
         enable_inpaint=False,
         inpaint_mask_fill_value=0,
         return_file_name=False,
+        min_sampled_frames=0,
     ):
         # Loading annotations from files
         print(f"loading annotations from {ann_path} ...")
@@ -129,6 +130,7 @@ class ImageVideoDataset(Dataset):
         self.enable_inpaint = enable_inpaint
         self.inpaint_mask_fill_value = inpaint_mask_fill_value
         self.return_file_name = return_file_name
+        self.min_sampled_frames = min_sampled_frames
 
         self.video_length_drop_start = video_length_drop_start
         self.video_length_drop_end = video_length_drop_end
@@ -171,16 +173,28 @@ class ImageVideoDataset(Dataset):
                 video_dir = os.path.join(self.data_root, video_id)
 
             with VideoReader_contextmanager(video_dir, num_threads=2) as video_reader:
+                raw_total_frames = len(video_reader)
+                raw_height = video_reader[0].shape[0]
+                raw_width = video_reader[0].shape[1]
+
                 # Calculate frame sampling range with length dropout
                 min_sample_n_frames = min(
                     self.video_sample_n_frames, 
-                    int(len(video_reader) * (self.video_length_drop_end - self.video_length_drop_start) // self.video_sample_stride)
+                    int(raw_total_frames * (self.video_length_drop_end - self.video_length_drop_start) // self.video_sample_stride)
                 )
+
+                # Log video info: path, raw_frames, WxH, sampled_frames, stride
+                print(f"[VIDEO_SAMPLE] path={video_dir} | raw_frames={raw_total_frames} | resolution={raw_width}x{raw_height} | sampled_frames={min_sample_n_frames} | stride={self.video_sample_stride} | need_frames={self.video_sample_n_frames}")
+
                 if min_sample_n_frames == 0:
                     raise ValueError(f"No Frames in video.")
 
+                # Skip videos with too few sampled frames
+                if min_sample_n_frames < self.min_sampled_frames:
+                    raise ValueError(f"Too few sampled frames: {min_sample_n_frames} < {self.min_sampled_frames}")
+
                 # Select contiguous clip with random start position
-                video_length = int(self.video_length_drop_end * len(video_reader))
+                video_length = int(self.video_length_drop_end * raw_total_frames)
                 clip_length = min(video_length, (min_sample_n_frames - 1) * self.video_sample_stride + 1)
                 start_idx   = random.randint(int(self.video_length_drop_start * video_length), video_length - clip_length) if video_length != clip_length else 0
                 batch_index = np.linspace(start_idx, start_idx + clip_length - 1, min_sample_n_frames, dtype=int)
