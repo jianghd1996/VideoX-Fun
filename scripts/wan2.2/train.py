@@ -1555,7 +1555,7 @@ def main():
                 pixel_values = batch["pixel_values"].to(weight_dtype)
 
                 # Log batch info: rank, step, idx, tensor shape (B, F, C, H, W), data_type
-                print(f'proc[{accelerator.process_index}] step={step} idx={batch["idx"]} shape={list(pixel_values.shape)} data_type={batch.get("data_type", ["?"]*pixel_values.shape[0])}')
+                print(f'proc[{accelerator.process_index}] step={step} idx={batch.get("idx", "N/A")} shape={list(pixel_values.shape)} data_type={batch.get("data_type", ["?"]*pixel_values.shape[0])}')
 
                 # Increase the batch size when the length of the latent sequence of the current sample is small
                 if args.auto_tile_batch_size and args.training_with_video_token_length and zero_stage != 3:

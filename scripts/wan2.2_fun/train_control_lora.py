@@ -2101,7 +2101,7 @@ def main():
                 control_pixel_values = batch["control_pixel_values"].to(weight_dtype)
 
                 # Log batch info: rank, step, idx, tensor shape (B, F, C, H, W)
-                print(f'proc[{accelerator.process_index}] step={step} idx={batch["idx"]} shape={list(pixel_values.shape)}')
+                print(f'proc[{accelerator.process_index}] step={step} idx={batch.get("idx", "N/A")} shape={list(pixel_values.shape)}')
                 if args.train_mode == "control_camera_ref":
                     control_camera_values = batch["control_camera_values"].to(weight_dtype)
 
