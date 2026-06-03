@@ -850,6 +850,12 @@ def parse_args():
         help="Num frame of video.",
     )
     parser.add_argument(
+        "--min_sampled_frames",
+        type=int,
+        default=0,
+        help="Minimum sampled frames required. Videos with fewer sampled frames will be skipped. 0 means no filtering.",
+    )
+    parser.add_argument(
         "--video_repeat",
         type=int,
         default=0,
@@ -1375,6 +1381,7 @@ def main():
         enable_bucket=args.enable_bucket, 
         enable_camera_info=args.train_mode == "control_camera_ref",
         mask_concat_channels=args.mask_concat_channels,
+        min_sampled_frames=args.min_sampled_frames,
     )
 
     # Auto-populate validation prompts/paths from training data if validation_samples is set
@@ -2092,6 +2099,9 @@ def main():
                 # Convert images to latent space
                 pixel_values = batch["pixel_values"].to(weight_dtype)
                 control_pixel_values = batch["control_pixel_values"].to(weight_dtype)
+
+                # Log batch info: rank, step, idx, tensor shape (B, F, C, H, W)
+                print(f'proc[{accelerator.process_index}] step={step} idx={batch["idx"]} shape={list(pixel_values.shape)}')
                 if args.train_mode == "control_camera_ref":
                     control_camera_values = batch["control_camera_values"].to(weight_dtype)
 
