@@ -181,10 +181,16 @@ class AspectRatioBatchImageSampler(BatchSampler):
 
                     width, height = get_image_size_without_loading(image_dir)
 
+                    if width == 0 or height == 0:
+                        print(f"Warning: Invalid image dimensions (width={width}, height={height}), skipping: {image_dir}")
+                        continue
                     ratio = height / width # self.dataset[idx]
                 else:
                     height = int(height)
                     width = int(width)
+                    if width == 0 or height == 0:
+                        print(f"Warning: Invalid dimensions (width={width}, height={height}), skipping item {idx}")
+                        continue
                     ratio = height / width # self.dataset[idx]
             except Exception as e:
                 print(e)
@@ -263,11 +269,18 @@ class AspectRatioBatchSampler(BatchSampler):
                     # Get video dimensions
                     width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))   # Convert float to integer
                     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))  # Convert float to integer
+                    cap.release()
                     
+                    if width == 0 or height == 0:
+                        print(f"Warning: Video read failed (width={width}, height={height}), skipping: {video_dir}")
+                        continue
                     ratio = height / width # self.dataset[idx]
                 else:
                     height = int(height)
                     width = int(width)
+                    if width == 0 or height == 0:
+                        print(f"Warning: Invalid video dimensions (width={width}, height={height}), skipping item {idx}")
+                        continue
                     ratio = height / width # self.dataset[idx]
             except Exception as e:
                 print(e, self.dataset[idx], "This item is error, please check it.")
@@ -348,10 +361,16 @@ class AspectRatioBatchImageVideoSampler(BatchSampler):
 
                         width, height = get_image_size_without_loading(image_dir)
 
+                        if width == 0 or height == 0:
+                            print(f"Warning: Invalid image dimensions (width={width}, height={height}), skipping: {image_dir}")
+                            continue
                         ratio = height / width # self.dataset[idx]
                     else:
                         height = int(height)
                         width = int(width)
+                        if width == 0 or height == 0:
+                            print(f"Warning: Invalid dimensions (width={width}, height={height}), skipping item {idx}")
+                            continue
                         ratio = height / width # self.dataset[idx]
                 except Exception as e:
                     print(e, self.dataset[idx], "This item is error, please check it.")
@@ -390,11 +409,18 @@ class AspectRatioBatchImageVideoSampler(BatchSampler):
                         # Get video dimensions
                         width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))   # Convert float to integer
                         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))  # Convert float to integer
+                        cap.release()
                         
+                        if width == 0 or height == 0:
+                            print(f"Warning: Video read failed (width={width}, height={height}), skipping: {video_dir}")
+                            continue
                         ratio = height / width # self.dataset[idx]
                     else:
                         height = int(height)
                         width = int(width)
+                        if width == 0 or height == 0:
+                            print(f"Warning: Invalid video dimensions (width={width}, height={height}), skipping item {idx}")
+                            continue
                         ratio = height / width # self.dataset[idx]
                 except Exception as e:
                     print(e, self.dataset[idx], "This item is error, please check it.")
