@@ -211,6 +211,11 @@ logger = get_logger(__name__, log_level="INFO")
 def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, config, accelerator, weight_dtype, global_step):
     # All ranks participate in validation to avoid NCCL timeout on multi-GPU
     try:
+        # DEBUG: Check transformer device before anything
+        if hasattr(transformer3d, 'parameters'):
+            first_param = next(transformer3d.parameters())
+            logger.info(f"[DEBUG] Rank {accelerator.process_index}: transformer device at start = {first_param.device}")
+        
         is_deepspeed = type(transformer3d).__name__ == 'DeepSpeedEngine'
         if is_deepspeed:
             origin_config = transformer3d.config
@@ -473,6 +478,13 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                         f"sample/sample-{global_step}-rank{accelerator.process_index}-image-{i}.mp4"
                     )
                 )
+                
+                # Clean up memory after each validation sample to prevent accumulation
+                del sample, concat_sample, concat
+                if has_gt:
+                    del gt_np, gt_frames_list
+                del control_np, control_frames_list
+                torch.cuda.empty_cache()
 
             del pipeline
             gc.collect()
@@ -2088,7 +2100,8 @@ def main():
     idx_sampling = DiscreteSampling(train_sampling_steps, start_num_idx=start_num_idx, uniform_sampling=args.uniform_sampling)
 
     # Run validation once at start to verify pipeline works
-    if args.validation_prompts is not None and accelerator.is_main_process:
+    # All ranks must participate to avoid NCCL timeout on multi-GPU
+    if args.validation_prompts is not None:
         logger.info("Running initial validation at training start...")
         log_validation(
             vae,
@@ -2102,8 +2115,12 @@ def main():
             weight_dtype,
             global_step=0,
         )
+        accelerator.wait_for_everyone()
         gc.collect()
         torch.cuda.empty_cache()
+        # Explicitly switch transformer back to training mode after validation
+        transformer3d.train()
+        logger.info(f"Validation completed. Transformer training mode: {transformer3d.training}")
 
     # Initialize loss log for later analysis
     loss_log_path = os.path.join(args.output_dir, "training_loss.jsonl")
