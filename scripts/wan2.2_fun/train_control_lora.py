@@ -281,6 +281,20 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 transformer_2=transformer3d_2,
                 scheduler=scheduler,
             )
+            
+            if args.seed is None:
+                generator = None
+            else:
+                rank_seed = args.seed + accelerator.process_index
+                generator = torch.Generator(device=accelerator.device).manual_seed(rank_seed)
+                logger.info(f"Rank {accelerator.process_index} using seed: {rank_seed}")
+
+            # Distribute validation samples across ranks for parallel processing
+            num_ranks = accelerator.num_processes
+            rank = accelerator.process_index
+            validation_indices = list(range(rank, len(args.validation_prompts), num_ranks))
+            logger.info(f"Rank {rank}: processing validation samples {validation_indices} (total {len(args.validation_prompts)}, {num_ranks} ranks)")
+            
             for i in validation_indices:
                 import cv2
                 import tempfile
