@@ -60,9 +60,10 @@ sed -i 's|/cache/02_model/Wan2.2-Fun-5B-Control/|/mnt/DataPart/jianghongda/Video
 sed -i 's|datasets/internal_datasets/|/mnt/DataPart/jianghongda/dataset/livephoto|g' scripts/wan2.2_fun/train_control_lora.sh
 sed -i 's|/cache/00_data/metadata.json|datasets/dataset.json|g' scripts/wan2.2_fun/train_control_lora.sh
 sed -i 's|/cache/00_data/test_data_zhuan/|/mnt/DataPart/jianghongda/dataset/livephoto/static|g' scripts/wan2.2_fun/train_control_lora.sh
+sed -i 's|CUDA_VISIBLE_DEVICES=0,1,2,3|CUDA_VISIBLE_DEVICES=5,6|g' scripts/wan2.2_fun/train_control_lora.sh
 
 # 验证替换结果
-grep -E "MODEL_NAME|DATASET|validation_data_dir" scripts/wan2.2_fun/train_control_lora.sh
+grep -E "MODEL_NAME|DATASET|validation_data_dir|CUDA_VISIBLE" scripts/wan2.2_fun/train_control_lora.sh
 ```
 
 **反馈**: grep 输出，确认路径已正确替换。
@@ -71,6 +72,8 @@ grep -E "MODEL_NAME|DATASET|validation_data_dir" scripts/wan2.2_fun/train_contro
 
 ## Task 4: 干运行测试（2步验证）
 
+使用 GPU 5、6 两卡测试。
+
 ```bash
 cd /mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun
 
@@ -78,7 +81,7 @@ cd /mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun
 ls /mnt/DataPart/jianghongda/VideoX-Fun/models/Diffusion_Transformer/Wan2.2-Fun-5B-Control/ | head -20
 
 # 干运行：只跑 2 步，验证模型加载 + 数据读取正常
-CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch --mixed_precision=bf16 scripts/wan2.2_fun/train_control_lora.py \
+CUDA_VISIBLE_DEVICES=5,6 accelerate launch --mixed_precision=bf16 scripts/wan2.2_fun/train_control_lora.py \
     --config_path=config/wan2.2/wan_civitai_5b.yaml \
     --pretrained_model_name_or_path=/mnt/DataPart/jianghongda/VideoX-Fun/models/Diffusion_Transformer/Wan2.2-Fun-5B-Control \
     --train_data_dir=/mnt/DataPart/jianghongda/dataset/livephoto \
@@ -133,19 +136,23 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch --mixed_precision=bf16 scripts/wa
 
 ## Task 5: 如果 Task 4 成功，正式训练
 
+在 tmux 里跑正式训练，使用 GPU 5、6。
+
 ```bash
 cd /mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun
 
-# 确认 Task 4 没问题后，用完整参数跑正式训练
-nohup bash scripts/wan2.2_fun/train_control_lora.sh > train.log 2>&1 &
+# 创建 tmux session 并启动训练
+tmux new-session -d -s train "CUDA_VISIBLE_DEVICES=5,6 bash scripts/wan2.2_fun/train_control_lora.sh"
 
-# 监控训练进度
-tail -f train.log
+# 查看训练输出
+tmux attach -t train
 ```
 
-**反馈**: 
-- `tail train.log` 前 50 行
-- GPU 占用情况: `nvidia-smi`
+> 注意：如果 shell 脚本里的路径还没替换（Task 3），也可以直接用 Task 4 的命令，把 `--max_train_steps=2` 去掉即可。
+
+**反馈**:
+- 训练启动后前 50 行输出
+- GPU 占用情况: `nvidia-smi | grep -E 'MiB|GPU'`
 - 确认训练已正常启动
 
 ---
