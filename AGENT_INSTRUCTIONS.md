@@ -1,89 +1,57 @@
 # 训练机 Agent 执行指令
 
-> 执行命令 → 输出存文件 → 把文件内容反馈回来。
-> 不要修改任何代码文件。
+> 代码已修改，训练机只需 git pull + 验证。
+> 测试通过后不要启动训练，把启动命令反馈回来。
 
-## 环境
-
-- 仓库: `/mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun`
-- 模型: `/mnt/DataPart/jianghongda/VideoX-Fun/models/Diffusion_Transformer/Wan2.2-Fun-5B-Control`
-- 数据: `/mnt/DataPart/jianghongda/dataset/livephoto`（GT: static, 控制: static_gs_render）
-- Python 环境: `/mnt/DataPart/jianghongda/env/wan2.2/`
-
----
-
-## Step 1: 停止现有训练（如果有）
-
-```bash
-tmux kill-session -t train 2>/dev/null; pkill -f train_control_lora.py 2>/dev/null; echo "stopped" | tee /tmp/step0.log
-```
-
----
-
-## Step 2: 修改 shell 脚本（虚拟环境 + 路径 + GPU + 进程数）
+## Step 1: 同步代码
 
 ```bash
 cd /mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun
-cp scripts/wan2.2_fun/train_control_lora.sh scripts/wan2.2_fun/train_control_lora.sh.bak
-
-# 在开头添加虚拟环境激活
-sed -i '1i source /mnt/DataPart/jianghongda/env/wan2.2/bin/activate' scripts/wan2.2_fun/train_control_lora.sh
-
-# 替换路径
-sed -i 's|/cache/02_model/Wan2.2-Fun-5B-Control/|/mnt/DataPart/jianghongda/VideoX-Fun/models/Diffusion_Transformer/Wan2.2-Fun-5B-Control|g' scripts/wan2.2_fun/train_control_lora.sh
-sed -i 's|datasets/internal_datasets/|/mnt/DataPart/jianghongda/dataset/livephoto|g' scripts/wan2.2_fun/train_control_lora.sh
-sed -i 's|/cache/00_data/metadata.json|datasets/dataset.json|g' scripts/wan2.2_fun/train_control_lora.sh
-sed -i 's|/cache/00_data/test_data_zhuan/|/mnt/DataPart/jianghongda/dataset/livephoto/static|g' scripts/wan2.2_fun/train_control_lora.sh
-sed -i 's|CUDA_VISIBLE_DEVICES=0,1,2,3|CUDA_VISIBLE_DEVICES=5,6|g' scripts/wan2.2_fun/train_control_lora.sh
-sed -i 's|accelerate launch --mixed_precision|accelerate launch --num_processes=2 --mixed_precision|g' scripts/wan2.2_fun/train_control_lora.sh
-
-# 显示修改结果
-head -10 scripts/wan2.2_fun/train_control_lora.sh | tee /tmp/step2_head.log
-grep -E "MODEL_NAME|DATASET|CUDA_VISIBLE|validation" scripts/wan2.2_fun/train_control_lora.sh | tee /tmp/step2.log
+git pull origin main 2>&1 | tee /tmp/step1.log
 ```
 
-**反馈**: 把 `/tmp/step2_head.log` 和 `/tmp/step2.log` 内容贴回来。
+**反馈**: `/tmp/step1.log` 内容
 
 ---
 
-## Step 3: 在 tmux 里启动训练
+## Step 2: 验证 shell 脚本路径
 
 ```bash
-tmux new-session -d -s train -c /mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun "bash scripts/wan2.2_fun/train_control_lora.sh 2>&1 | tee train.log"
+cat scripts/wan2.2_fun/train_control_lora.sh | head -20 | tee /tmp/step2.log
 ```
 
-等 60 秒后检查：
-
-```bash
-sleep 60
-tail -80 train.log | tee /tmp/step3.log
-nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total --format=csv | tee /tmp/step3_gpu.log
-```
-
-**反馈**: 把 `/tmp/step3.log` 和 `/tmp/step3_gpu.log` 内容贴回来。
+**反馈**: `/tmp/step2.log` 内容，确认路径正确。
 
 ---
 
-## Step 4: 持续监控
+## Step 3: 干运行测试（2步）
 
 ```bash
-# 查看最近训练日志
-tail -50 train.log | tee /tmp/step4.log
+cd /mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun
+source /mnt/DataPart/jianghongda/env/wan2.2/bin/activate
 
-# 检查是否有 division by zero 错误
-grep -i "division by zero\|error\|Error\|ERROR" train.log | tail -20 | tee /tmp/step4_error.log
+CUDA_VISIBLE_DEVICES=5,6 accelerate launch --num_processes=2 --mixed_precision=bf16 scripts/wan2.2_fun/train_control_lora.py --config_path=config/wan2.2/wan_civitai_5b.yaml --pretrained_model_name_or_path=/mnt/DataPart/jianghongda/VideoX-Fun/models/Diffusion_Transformer/Wan2.2-Fun-5B-Control --train_data_dir=/mnt/DataPart/jianghongda/dataset/livephoto --train_data_meta=datasets/dataset.json --image_sample_size=1440 --video_sample_size=1440 --token_sample_size=1440 --video_sample_stride=1 --video_sample_n_frames=81 --train_batch_size=1 --video_repeat=1 --gradient_accumulation_steps=1 --dataloader_num_workers=4 --max_train_steps=2 --checkpointing_steps=1000 --learning_rate=1e-04 --seed=42 --output_dir=output_dir_test --gradient_checkpointing --mixed_precision=bf16 --adam_weight_decay=3e-2 --adam_epsilon=1e-10 --vae_mini_batch=1 --max_grad_norm=0.05 --random_hw_adapt --training_with_video_token_length --enable_bucket --uniform_sampling --train_mode=control_ref --control_ref_image=random --add_inpaint_info --mask_concat_channels 1 --control_mask_ratio=0.3 --add_full_ref_image_in_self_attention --rank=64 --network_alpha=32 --target_name=q,k,v,ffn.0,ffn.2 --use_peft_lora --low_vram > /tmp/step3.log 2>&1
 
-# GPU 状态
-nvidia-smi | tee /tmp/step4_gpu.log
+tail -30 /tmp/step3.log | tee /tmp/step3_tail.log
+grep -E "ERROR|error|Traceback|loaded|Loaded|step" /tmp/step3.log | head -20 | tee /tmp/step3_summary.log
+echo "Exit code: $?" | tee /tmp/step3_exit.log
 ```
 
-**反馈**: 把 `/tmp/step4.log`、`/tmp/step4_error.log`、`/tmp/step4_gpu.log` 内容贴回来。
+**反馈**: `/tmp/step3_tail.log`、`/tmp/step3_summary.log`、`/tmp/step3_exit.log` 内容
 
 ---
 
-## 注意事项
+## Step 4: 测试通过后反馈
 
-1. **不要修改任何代码文件**（.py 文件）
-2. 报错时把完整 traceback 存到文件再贴
-3. 如果有 division by zero 错误，把相关行前后 10 行也贴出来
-4. 不确定的事情，反馈回来
+测试通过后，反馈以下内容：
+
+```
+✅ 测试通过
+
+启动命令（在 tmux 里执行）：
+cd /mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun
+source /mnt/DataPart/jianghongda/env/wan2.2/bin/activate
+bash scripts/wan2.2_fun/train_control_lora.sh
+```
+
+**不要启动训练**，把启动命令贴回来即可。

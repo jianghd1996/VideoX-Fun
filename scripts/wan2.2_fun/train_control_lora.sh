@@ -1,19 +1,21 @@
-export MODEL_NAME="/cache/02_model/Wan2.2-Fun-5B-Control/"
-export DATASET_NAME="datasets/internal_datasets/"
-export DATASET_META_NAME="/cache/00_data/metadata.json"
+source /mnt/DataPart/jianghongda/env/wan2.2/bin/activate
 
-# 4 GPUs available
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export MODEL_NAME="/mnt/DataPart/jianghongda/VideoX-Fun/models/Diffusion_Transformer/Wan2.2-Fun-5B-Control"
+export DATASET_NAME="/mnt/DataPart/jianghongda/dataset/livephoto"
+export DATASET_META_NAME="datasets/dataset.json"
+
+# Use GPU 5, 6
+export CUDA_VISIBLE_DEVICES=5,6
 
 # Reduce CUDA memory fragmentation (prevents OOM during validation decode)
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-# NCCL_IB_DISABLE=1 and NCCL_P2P_DISABLE=1 are used in multi nodes without RDMA. 
+# NCCL_IB_DISABLE=1 and NCCL_P2P_DISABLE=1 are used in multi nodes without RDMA.
 # export NCCL_IB_DISABLE=1
 # export NCCL_P2P_DISABLE=1
 NCCL_DEBUG=INFO
 
-accelerate launch --mixed_precision="bf16" scripts/wan2.2_fun/train_control_lora.py \
+accelerate launch --num_processes=2 --mixed_precision="bf16" scripts/wan2.2_fun/train_control_lora.py \
   --config_path="config/wan2.2/wan_civitai_5b.yaml" \
   --pretrained_model_name_or_path=$MODEL_NAME \
   --train_data_dir=$DATASET_NAME \
@@ -54,5 +56,5 @@ accelerate launch --mixed_precision="bf16" scripts/wan2.2_fun/train_control_lora
   --target_name="q,k,v,ffn.0,ffn.2" \
   --use_peft_lora \
   --low_vram \
-  --validation_data_dir="/cache/00_data/test_data_zhuan/" \
+  --validation_data_dir="/mnt/DataPart/jianghongda/dataset/livephoto/static" \
   --num_inference_steps=8
