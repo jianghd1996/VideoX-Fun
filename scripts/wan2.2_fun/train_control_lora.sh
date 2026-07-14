@@ -1,5 +1,3 @@
-source /mnt/DataPart/jianghongda/env/wan2.2/bin/activate
-
 export MODEL_NAME="/mnt/DataPart/jianghongda/VideoX-Fun/models/Diffusion_Transformer/Wan2.2-Fun-5B-Control"
 export DATASET_NAME="/mnt/DataPart/jianghongda/dataset/livephoto"
 export DATASET_META_NAME="datasets/dataset.json"
