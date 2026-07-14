@@ -1390,10 +1390,10 @@ def main():
             meta_json = json.load(f)
         sampled = random.sample(meta_json, min(args.validation_samples, len(meta_json)))
         args.validation_prompts = [item['text'] for item in sampled]
-        # control_file_path is already absolute; prefer it for control training
-        args.validation_paths = [item.get('control_file_path', item['file_path']) for item in sampled]
+        # control_file_path and file_path are relative; prepend train_data_dir
+        args.validation_paths = [os.path.join(args.train_data_dir, item.get('control_file_path', item['file_path'])) for item in sampled]
         # file_path is the original GT video for comparison
-        args.validation_gt_paths = [item['file_path'] for item in sampled]
+        args.validation_gt_paths = [os.path.join(args.train_data_dir, item['file_path']) for item in sampled]
         logger.info(f"Auto-sampled {len(sampled)} validation entries from training JSON.")
 
     # Build validation data from dedicated test directory (overrides other validation sources)
