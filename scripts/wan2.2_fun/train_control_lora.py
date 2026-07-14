@@ -2577,6 +2577,8 @@ def main():
                 train_loss = 0.0
 
                 if global_step % args.checkpointing_steps == 0:
+                    # Sync before checkpoint to avoid NCCL timeout
+                    accelerator.wait_for_everyone()
                     if args.use_deepspeed or args.use_fsdp or accelerator.is_main_process:
                         # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
                         if args.checkpoints_total_limit is not None:
@@ -2618,6 +2620,8 @@ def main():
                             accelerator_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
                             accelerator.save_state(accelerator_save_path)
                             logger.info(f"Saved state to {accelerator_save_path}")
+                    # Sync after checkpoint to ensure all ranks are in sync
+                    accelerator.wait_for_everyone()
 
                 if args.validation_prompts is not None and global_step % args.validation_steps == 0:
                     # All ranks participate in validation to avoid NCCL timeout
