@@ -204,9 +204,19 @@ def match_videos(
     control_videos: Dict[str, str],
     captions: Dict[str, str],
     use_relative_paths: bool = True,
+    gt_subdir: str = "",
+    control_subdir: str = "",
 ) -> List[Dict]:
     """
     Match GT videos with control videos and captions.
+    
+    Args:
+        gt_videos: Dict mapping relative path to full GT video path
+        control_videos: Dict mapping relative path to full control video path
+        captions: Dict mapping keys to caption text
+        use_relative_paths: If True, use relative paths in output
+        gt_subdir: Subdirectory prefix for GT videos (e.g., "static")
+        control_subdir: Subdirectory prefix for control videos (e.g., "static_gs_render")
     
     Returns:
         List of dataset entries
@@ -239,8 +249,9 @@ def match_videos(
             continue
         
         if use_relative_paths:
-            file_path = f"{key}{Path(gt_path).suffix}"
-            control_file_path = f"{key}{Path(control_path).suffix}"
+            # Add subdir prefix if specified
+            file_path = f"{gt_subdir}/{key}{Path(gt_path).suffix}" if gt_subdir else f"{key}{Path(gt_path).suffix}"
+            control_file_path = f"{control_subdir}/{key}{Path(control_path).suffix}" if control_subdir else f"{key}{Path(control_path).suffix}"
         else:
             file_path = gt_path
             control_file_path = control_path
@@ -323,6 +334,14 @@ def main():
         "--absolute_paths", action="store_true",
         help="Use absolute paths instead of relative paths"
     )
+    parser.add_argument(
+        "--gt_subdir", type=str, default="",
+        help="Subdirectory prefix for GT video paths (e.g., 'static')"
+    )
+    parser.add_argument(
+        "--control_subdir", type=str, default="",
+        help="Subdirectory prefix for control video paths (e.g., 'static_gs_render')"
+    )
     
     args = parser.parse_args()
     
@@ -352,6 +371,8 @@ def main():
         control_videos=control_videos,
         captions=captions,
         use_relative_paths=not args.absolute_paths,
+        gt_subdir=args.gt_subdir,
+        control_subdir=args.control_subdir,
     )
     
     # Step 4: Validate
