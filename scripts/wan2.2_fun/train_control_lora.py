@@ -264,6 +264,11 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
 
                     transformer3d_2 = accelerator.unwrap_model(transformer3d) if type(transformer3d).__name__ == 'DistributedDataParallel' else transformer3d
 
+            # Explicitly move transformer back to GPU (pipeline.to() may not handle this after .to('cpu'))
+            transformer3d_1 = transformer3d_1.to(device=accelerator.device, dtype=weight_dtype)
+            if transformer3d_2 is not None:
+                transformer3d_2 = transformer3d_2.to(device=accelerator.device, dtype=weight_dtype)
+
             pipeline = Wan2_2FunControlPipeline(
                 vae=vae, 
                 text_encoder=text_encoder,
