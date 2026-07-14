@@ -46,4 +46,5 @@ accelerate launch --gpu-ids 4,5 --num_processes=2 --mixed_precision="bf16" scrip
   --use_peft_lora \
   --low_vram \
   --validation_samples 4 \
-  --validation_n_frames 9
+  --validation_n_frames 81 \
+  --validation_sample_size 720

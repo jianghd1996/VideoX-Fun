@@ -325,11 +325,12 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                         end_image_path = tmp_end.name
                         is_temp_end = True
 
-                width, height = calculate_dimensions(args.image_sample_size * args.image_sample_size,  width / height)
+                # Use lower resolution (720P) for validation to save VRAM
+                validation_sample_size = getattr(args, 'validation_sample_size', args.image_sample_size)
+                width, height = calculate_dimensions(validation_sample_size * validation_sample_size, width / height)
                 temporal_ratio = vae.config.temporal_compression_ratio
-                # Use validation_n_frames to limit VRAM usage during validation
-                validation_frames = getattr(args, 'validation_n_frames', args.video_sample_n_frames)
-                max_video_length = int((validation_frames - 1) // temporal_ratio * temporal_ratio) + 1 if validation_frames != 1 else 1
+                # Use full video_sample_n_frames for validation
+                max_video_length = int((args.video_sample_n_frames - 1) // temporal_ratio * temporal_ratio) + 1 if args.video_sample_n_frames != 1 else 1
                 video_length = min(max_video_length, control_total_frames)
                 # 确保仍是 4N+1 格式
                 video_length = (video_length - 1) // temporal_ratio * temporal_ratio + 1
@@ -871,8 +872,14 @@ def parse_args():
     parser.add_argument(
         "--validation_n_frames",
         type=int,
-        default=21,
-        help="Max number of frames for validation video. Default 21 to save VRAM.",
+        default=81,
+        help="Max number of frames for validation video. Default 81.",
+    )
+    parser.add_argument(
+        "--validation_sample_size",
+        type=int,
+        default=720,
+        help="Sample size (resolution) for validation. Default 720 for 720P to save VRAM.",
     )
     parser.add_argument(
         "--min_sampled_frames",
