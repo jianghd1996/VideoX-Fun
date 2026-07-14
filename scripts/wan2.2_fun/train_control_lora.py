@@ -209,6 +209,9 @@ check_min_version("0.18.0.dev0")
 logger = get_logger(__name__, log_level="INFO")
 
 def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, config, accelerator, weight_dtype, global_step):
+    # All ranks participate in validation to avoid NCCL timeout on multi-GPU
+    # Only main process saves results
+    is_main_process = accelerator.is_main_process
     try:
         is_deepspeed = type(transformer3d).__name__ == 'DeepSpeedEngine'
         if is_deepspeed:
@@ -278,11 +281,12 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 generator = torch.Generator(device=accelerator.device).manual_seed(rank_seed)
                 logger.info(f"Rank {accelerator.process_index} using seed: {rank_seed}")
 
-            # Randomly sample 1 validation case to avoid NCCL timeout on multi-GPU
-            import random
-            val_idx = random.randint(0, len(args.validation_prompts) - 1)
-            logger.info(f"Validation: randomly selected sample {val_idx}/{len(args.validation_prompts)-1}")
-            for i in [val_idx]:
+            # Distribute validation samples across ranks for parallel processing
+            num_ranks = accelerator.num_processes
+            rank = accelerator.process_index
+            validation_indices = list(range(rank, len(args.validation_prompts), num_ranks))
+            logger.info(f"Rank {rank}: processing validation samples {validation_indices} (total {len(args.validation_prompts)}, {num_ranks} ranks)")
+            for i in validation_indices:
                 import cv2
                 import tempfile
                 # 用 control video 获取尺寸信息 + 实际帧数（用于对齐 4N+1）
@@ -401,6 +405,7 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     guidance_scale      = args.guidance_scale,
                     boundary            = config['transformer_additional_kwargs'].get('boundary', 0.900)
                 ).videos
+                # Each rank saves its own validation results
                 os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
 
                 # 加载 GT 视频帧用于对比（如果有的话）
@@ -451,6 +456,7 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     concat = np.concatenate([control_np, sp_frames], axis=2)  # [T, H, W*2, C]
                 concat_sample = torch.from_numpy(concat.transpose(3, 0, 1, 2) / 255.0).unsqueeze(0).float()
 
+                # Each rank saves its own validation results
                 save_videos_grid(
                     concat_sample, 
                     os.path.join(
@@ -2605,19 +2611,19 @@ def main():
                             logger.info(f"Saved state to {accelerator_save_path}")
 
                 if args.validation_prompts is not None and global_step % args.validation_steps == 0:
-                    if accelerator.is_main_process:
-                        log_validation(
-                            vae,
-                            text_encoder,
-                            tokenizer,
-                            transformer3d,
-                            network,
-                            args,
-                            config,
-                            accelerator,
-                            weight_dtype,
-                            global_step,
-                        )
+                    # All ranks participate in validation to avoid NCCL timeout
+                    log_validation(
+                        vae,
+                        text_encoder,
+                        tokenizer,
+                        transformer3d,
+                        network,
+                        args,
+                        config,
+                        accelerator,
+                        weight_dtype,
+                        global_step,
+                    )
                     accelerator.wait_for_everyone()
 
             logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
@@ -2627,19 +2633,19 @@ def main():
                 break
 
         if args.validation_prompts is not None and epoch % args.validation_epochs == 0:
-            if accelerator.is_main_process:
-                log_validation(
-                    vae,
-                    text_encoder,
-                    tokenizer,
-                    transformer3d,
-                    network,
-                    args,
-                    config,
-                    accelerator,
-                    weight_dtype,
-                    global_step,
-                )
+            # All ranks participate in validation to avoid NCCL timeout
+            log_validation(
+                vae,
+                text_encoder,
+                tokenizer,
+                transformer3d,
+                network,
+                args,
+                config,
+                accelerator,
+                weight_dtype,
+                global_step,
+            )
             accelerator.wait_for_everyone()
 
     # Create the pipeline using the trained modules and save it.
