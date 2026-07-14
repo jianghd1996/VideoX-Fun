@@ -234,42 +234,44 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
             scheduler = FlowMatchEulerDiscreteScheduler(
                 **filter_kwargs(FlowMatchEulerDiscreteScheduler, OmegaConf.to_container(config['scheduler_kwargs']))
             )
+            # Create independent transformer instances for validation to avoid accelerate/DDP device management issues
+            # Copy current training weights to ensure consistency
+            def _create_transformer_for_validation(subpath_hint):
+                """Create a fresh transformer instance with current training weights"""
+                sub_path = config['transformer_additional_kwargs'].get(subpath_hint, 'transformer')
+                tpath = os.path.join(args.pretrained_model_name_or_path, sub_path) if sub_path else args.pretrained_model_name_or_path
+                if not os.path.isdir(tpath):
+                    tpath = args.pretrained_model_name_or_path
+                
+                # Load from pretrained
+                model = Wan2_2Transformer3DModel.from_pretrained(
+                    tpath,
+                    transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs']),
+                )
+                
+                # Copy current training weights
+                training_state = accelerator.unwrap_model(transformer3d).state_dict()
+                model.load_state_dict(training_state, strict=False)
+                
+                # Move to device explicitly
+                model = model.to(device=accelerator.device, dtype=weight_dtype)
+                model.eval()  # Set to eval mode for inference
+                
+                return model
+            
             if args.boundary_type == "full":
-                transformer3d_1 = accelerator.unwrap_model(transformer3d) if type(transformer3d).__name__ == 'DistributedDataParallel' else transformer3d
+                transformer3d_1 = _create_transformer_for_validation('transformer_low_noise_model_subpath')
                 transformer3d_2 = None
             elif config['transformer_additional_kwargs'].get('transformer_combination_type', 'moe') == 'single':
-                # Single dense model: use the trained transformer directly, no second model
-                transformer3d_1 = accelerator.unwrap_model(transformer3d) if type(transformer3d).__name__ == 'DistributedDataParallel' else transformer3d
+                transformer3d_1 = _create_transformer_for_validation('transformer_low_noise_model_subpath')
                 transformer3d_2 = None
             else:
                 if args.boundary_type == "low":
-                    transformer3d_1 = accelerator.unwrap_model(transformer3d) if type(transformer3d).__name__ == 'DistributedDataParallel' else transformer3d
-                    
-                    sub_path = config['transformer_additional_kwargs'].get('transformer_high_noise_model_subpath', 'transformer')
-                    tpath = os.path.join(args.pretrained_model_name_or_path, sub_path) if sub_path else args.pretrained_model_name_or_path
-                    if not os.path.isdir(tpath):
-                        tpath = args.pretrained_model_name_or_path
-                    transformer3d_2 = Wan2_2Transformer3DModel.from_pretrained(
-                        tpath,
-                        transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs']),
-                    ).to(weight_dtype)
-                    
+                    transformer3d_1 = _create_transformer_for_validation('transformer_low_noise_model_subpath')
+                    transformer3d_2 = _create_transformer_for_validation('transformer_high_noise_model_subpath')
                 else:
-                    sub_path = config['transformer_additional_kwargs'].get('transformer_low_noise_model_subpath', 'transformer')
-                    tpath = os.path.join(args.pretrained_model_name_or_path, sub_path) if sub_path else args.pretrained_model_name_or_path
-                    if not os.path.isdir(tpath):
-                        tpath = args.pretrained_model_name_or_path
-                    transformer3d_1 = Wan2_2Transformer3DModel.from_pretrained(
-                        tpath,
-                        transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs']),
-                    ).to(weight_dtype)
-
-                    transformer3d_2 = accelerator.unwrap_model(transformer3d) if type(transformer3d).__name__ == 'DistributedDataParallel' else transformer3d
-
-            # Explicitly move transformer back to GPU (pipeline.to() may not handle this after .to('cpu'))
-            transformer3d_1 = transformer3d_1.to(device=accelerator.device, dtype=weight_dtype)
-            if transformer3d_2 is not None:
-                transformer3d_2 = transformer3d_2.to(device=accelerator.device, dtype=weight_dtype)
+                    transformer3d_1 = _create_transformer_for_validation('transformer_high_noise_model_subpath')
+                    transformer3d_2 = _create_transformer_for_validation('transformer_low_noise_model_subpath')
 
             pipeline = Wan2_2FunControlPipeline(
                 vae=vae, 
@@ -279,27 +281,6 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 transformer_2=transformer3d_2,
                 scheduler=scheduler,
             )
-            # Move all pipeline components to device explicitly
-            pipeline.vae = pipeline.vae.to(device=accelerator.device, dtype=weight_dtype)
-            if pipeline.text_encoder is not None:
-                pipeline.text_encoder = pipeline.text_encoder.to(device=accelerator.device, dtype=weight_dtype)
-            # Ensure transformer is on GPU (may have been moved to CPU by pipeline.to() or previous validation)
-            pipeline.transformer = pipeline.transformer.to(device=accelerator.device, dtype=weight_dtype)
-            if pipeline.transformer_2 is not None:
-                pipeline.transformer_2 = pipeline.transformer_2.to(device=accelerator.device, dtype=weight_dtype)
-
-            if args.seed is None:
-                generator = None
-            else:
-                rank_seed = args.seed + accelerator.process_index
-                generator = torch.Generator(device=accelerator.device).manual_seed(rank_seed)
-                logger.info(f"Rank {accelerator.process_index} using seed: {rank_seed}")
-
-            # Distribute validation samples across ranks for parallel processing
-            num_ranks = accelerator.num_processes
-            rank = accelerator.process_index
-            validation_indices = list(range(rank, len(args.validation_prompts), num_ranks))
-            logger.info(f"Rank {rank}: processing validation samples {validation_indices} (total {len(args.validation_prompts)}, {num_ranks} ranks)")
             for i in validation_indices:
                 import cv2
                 import tempfile
