@@ -114,24 +114,88 @@ def load_captions(caption_file: str) -> Dict[str, str]:
     """
     Load captions from JSON file.
     
-    Supports keys with or without extension:
-        {"video1": "..."} or {"video1.mp4": "..."}
+    Supports two formats:
+    
+    1. Dict format — keys can include path or be plain filename, with or without extension:
+        {"subdir/video1": "..."} or {"video1.mp4": "..."}
+    
+    2. List format — each item is an object with caption text and a path key:
+        [
+            {
+                "video_path": "/abs/path/to/video.mp4",
+                "relative_path": "subdir/video.mp4",
+                "video_name": "video.mp4",
+                "caption": "A dog running..."
+            },
+            ...
+        ]
+    
+    Keys are stored in two forms for flexible matching:
+        - relative path without extension  (e.g. "subdir/video1")
+        - filename stem only               (e.g. "video1")
+    Both are added so match_videos can look up either way.
     """
     if not os.path.exists(caption_file):
         print(f"[ERROR] Caption file not found: {caption_file}")
         sys.exit(1)
     
     with open(caption_file, 'r', encoding='utf-8') as f:
-        captions = json.load(f)
+        raw = json.load(f)
     
-    # Normalize keys: remove extension if present
-    normalized = {}
-    for key, value in captions.items():
-        key_no_ext = Path(key).stem
-        normalized[key_no_ext] = value
-        debug_log(f"Caption: {key_no_ext} -> {value[:50]}{'...' if len(value) > 50 else ''}")
+    normalized: Dict[str, str] = {}
     
-    print(f"  Loaded {len(normalized)} captions")
+    if isinstance(raw, list):
+        # List-of-objects format
+        for item in raw:
+            caption_text = item.get("caption", "")
+            if not caption_text:
+                continue
+            
+            # Build multiple lookup keys for flexible matching
+            # 1) relative_path without extension (preferred)
+            rel = item.get("relative_path", "")
+            if rel:
+                rel_key = str(Path(rel).with_suffix(''))
+                normalized[rel_key] = caption_text
+                # Also store the filename-stem-only form as fallback
+                stem_key = Path(rel).stem
+                if stem_key != rel_key:
+                    normalized.setdefault(stem_key, caption_text)
+            
+            # 2) video_name (filename with ext) → stem
+            vname = item.get("video_name", "")
+            if vname:
+                stem_key = Path(vname).stem
+                normalized.setdefault(stem_key, caption_text)
+            
+            # 3) video_path basename as final fallback
+            vpath = item.get("video_path", "")
+            if vpath:
+                stem_key = Path(vpath).stem
+                normalized.setdefault(stem_key, caption_text)
+            
+            debug_log(f"Caption: {rel_key if rel else stem_key} -> {caption_text[:50]}{'...' if len(caption_text) > 50 else ''}")
+        
+        print(f"  Loaded {len(normalized)} caption entries (from {len(raw)} items)")
+    
+    elif isinstance(raw, dict):
+        # Dict format
+        for key, value in raw.items():
+            # Store as-is without extension (preserves directory parts)
+            key_no_ext = str(Path(key).with_suffix(''))
+            normalized[key_no_ext] = value
+            # Also store filename-stem-only as fallback
+            stem_key = Path(key).stem
+            if stem_key != key_no_ext:
+                normalized.setdefault(stem_key, value)
+            debug_log(f"Caption: {key_no_ext} -> {value[:50]}{'...' if len(value) > 50 else ''}")
+        
+        print(f"  Loaded {len(normalized)} caption entries (from {len(raw)} dict keys)")
+    
+    else:
+        print(f"[ERROR] Unsupported caption format: {type(raw).__name__}. Expected list or dict.")
+        sys.exit(1)
+    
     return normalized
 
 
