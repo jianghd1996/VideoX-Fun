@@ -214,6 +214,12 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
         if is_deepspeed:
             origin_config = transformer3d.config
             transformer3d.config = accelerator.unwrap_model(transformer3d).config
+        
+        # Move transformer to CPU to free VRAM for VAE decode
+        if hasattr(transformer3d, 'to'):
+            transformer3d.to('cpu')
+            torch.cuda.empty_cache()
+        
         with torch.no_grad(), torch.cuda.amp.autocast(dtype=weight_dtype), torch.cuda.device(device=accelerator.device):
             logger.info("Running validation... ")
             scheduler = FlowMatchEulerDiscreteScheduler(
@@ -317,8 +323,9 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
 
                 width, height = calculate_dimensions(args.image_sample_size * args.image_sample_size,  width / height)
                 temporal_ratio = vae.config.temporal_compression_ratio
-                # 计算 pipeline 期望的 video_length (4N+1)，但 clamp 到 control video 的实际帧数
-                max_video_length = int((args.video_sample_n_frames - 1) // temporal_ratio * temporal_ratio) + 1 if args.video_sample_n_frames != 1 else 1
+                # Use validation_n_frames to limit VRAM usage during validation
+                validation_frames = getattr(args, 'validation_n_frames', args.video_sample_n_frames)
+                max_video_length = int((validation_frames - 1) // temporal_ratio * temporal_ratio) + 1 if validation_frames != 1 else 1
                 video_length = min(max_video_length, control_total_frames)
                 # 确保仍是 4N+1 格式
                 video_length = (video_length - 1) // temporal_ratio * temporal_ratio + 1
@@ -856,6 +863,12 @@ def parse_args():
         type=int,
         default=17,
         help="Num frame of video.",
+    )
+    parser.add_argument(
+        "--validation_n_frames",
+        type=int,
+        default=21,
+        help="Max number of frames for validation video. Default 21 to save VRAM.",
     )
     parser.add_argument(
         "--min_sampled_frames",

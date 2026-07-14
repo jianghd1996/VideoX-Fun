@@ -45,4 +45,5 @@ accelerate launch --gpu-ids 4,5 --num_processes=2 --mixed_precision="bf16" scrip
   --target_name="q,k,v,ffn.0,ffn.2" \
   --use_peft_lora \
   --low_vram \
-  --validation_samples 4
+  --validation_samples 4 \
+  --validation_n_frames 21
