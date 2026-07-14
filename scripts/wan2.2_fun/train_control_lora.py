@@ -360,6 +360,14 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                         logger.info(f"Validation: loaded mask adapter video, shape={adapter_mask.shape}, "
                                    f"known_ratio={(adapter_mask > 0.5).float().mean():.2%}")
 
+                # If model expects mask_concat_channels, create default adapter_mask
+                mask_concat_ch = getattr(transformer3d, 'mask_concat_channels', 0)
+                if mask_concat_ch > 0 and adapter_mask is None:
+                    # Create all-ones mask: [1, 1, video_length, height, width]
+                    adapter_mask = torch.ones(1, 1, video_length, height, width, 
+                                             device=accelerator.device, dtype=weight_dtype)
+                    logger.info(f"Validation: created default adapter_mask (all ones), shape={adapter_mask.shape}")
+
                 # Fragment CUDA memory before validation (avoids OOM after many training steps)
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
