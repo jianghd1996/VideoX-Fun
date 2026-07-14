@@ -215,10 +215,14 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
             origin_config = transformer3d.config
             transformer3d.config = accelerator.unwrap_model(transformer3d).config
         
-        # Move transformer to CPU to free VRAM for VAE decode
+        # Move transformer and text_encoder to CPU to free VRAM for VAE decode
         if hasattr(transformer3d, 'to'):
             transformer3d.to('cpu')
-            torch.cuda.empty_cache()
+        if hasattr(text_encoder, 'to'):
+            text_encoder.to('cpu')
+        gc.collect()
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
         
         with torch.no_grad(), torch.cuda.amp.autocast(dtype=weight_dtype), torch.cuda.device(device=accelerator.device):
             logger.info("Running validation... ")

@@ -913,6 +913,15 @@ class Wan2_2FunControlPipeline(DiffusionPipeline):
                     pbar.update(1)
 
         if output_type == "pil":
+            # Move transformer to CPU before VAE decode to free VRAM
+            if hasattr(self, 'transformer') and self.transformer is not None:
+                self.transformer.to('cpu')
+            if hasattr(self, 'transformer_2') and self.transformer_2 is not None:
+                self.transformer_2.to('cpu')
+            import gc
+            gc.collect()
+            torch.cuda.empty_cache()
+            
             video = self.decode_latents(latents)
             video = torch.from_numpy(video)
         else:
