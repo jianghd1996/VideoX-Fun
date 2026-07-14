@@ -5,6 +5,9 @@ export DATASET_META_NAME="datasets/dataset.json"
 # Reduce CUDA memory fragmentation (prevents OOM during validation decode)
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
+# Increase NCCL timeout to handle large video loading differences between ranks
+export NCCL_TIMEOUT=1800  # 30 minutes instead of default 10 minutes
+
 accelerate launch --gpu-ids 4,5 --num_processes=2 --mixed_precision="bf16" scripts/wan2.2_fun/train_control_lora.py \
   --config_path="config/wan2.2/wan_civitai_5b.yaml" \
   --pretrained_model_name_or_path=$MODEL_NAME \
