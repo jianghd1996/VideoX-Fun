@@ -1,132 +1,152 @@
 # 训练机 Agent 执行指令
 
 > 本文件由开发机上的 agent 编写，供训练机上的 agent 执行。
-> 代码已更新并推送到 GitHub（commit 305be16），请先 pull 再执行。
+> 上次反馈已处理：路径已修正，训练脚本路径已更新。
 
 ## 环境信息
 
-- 仓库路径: `/mnt/DataPart/jianghd1996/VideoX-Fun-dev/VideoX-Fun`
+- 仓库路径: `/mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun`
 - 当前分支: `main`
-- 工作流: 先 git pull → 逐步执行 → 完整反馈输出
+- 模型路径: `/mnt/DataPart/jianghongda/VideoX-Fun/models/Diffusion_Transformer/Wan2.2-Fun-5B-Control`
+- 数据根目录: `/mnt/DataPart/jianghongda/dataset/livephoto`
+  - GT 视频: `static`
+  - 控制信号: `static_gs_render`
+  - Captions: `static_captions.json`
 
 ---
 
 ## Task 1: 同步最新代码
 
-已修复 `scripts/generate_dataset_json.py` 中的两个 bug：
-- caption 文件格式不支持 list-of-objects
-- `Path(key).stem` 把目录路径吃掉了，导致 0 匹配
-
 ```bash
-cd /mnt/DataPart/jianghd1996/VideoX-Fun-dev/VideoX-Fun
+cd /mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun
 git pull origin main
 ```
 
-**反馈**: git pull 的结果，确认 commit 是 `305be16` 或更新。
+**反馈**: git pull 结果，确认 commit 更新。
 
 ---
 
-## Task 2: 重新生成 dataset.json
+## Task 2: 用已生成的 dataset.json 替换训练脚本里的路径
 
-用修复后的脚本重新跑：
+dataset.json 已经生成成功（4868 条匹配），现在需要把它拷贝到训练脚本能读到的位置，并修改训练脚本参数。
 
 ```bash
-cd /mnt/DataPart/jianghd1996/VideoX-Fun-dev/VideoX-Fun
+cd /mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun
 
-DEBUG=1 python scripts/generate_dataset_json.py \
-    --gt_root /mnt/DataPart/jianghongda/dataset/livephoto/static \
-    --control_root /mnt/DataPart/jianghongda/dataset/livephoto/static_control \
-    --caption_file /mnt/DataPart/jianghongda/dataset/livephoto/static_captions_dict.json \
-    --output dataset.json
+# 把 dataset.json 拷贝到仓库内（训练脚本的 train_data_meta 参数指向这里）
+cp dataset.json datasets/dataset.json
+
+# 确认文件存在
+ls -lh datasets/dataset.json
+head -20 datasets/dataset.json
 ```
 
-**需要反馈的信息**:
-1. 完整的终端输出
-2. Matched 数量是否接近 4868
-3. 生成的 dataset.json 前 3 条: `head -30 dataset.json`
-4. 总条目数: `python -c "import json; print(len(json.load(open('dataset.json'))))"`
+**反馈**: 确认文件已拷贝，内容正确。
 
 ---
 
-## Task 3: 配置 accelerate
+## Task 3: 修改训练脚本 shell 文件
 
-上次反馈 accelerate 未配置，训练前必须完成。
+训练脚本 `scripts/wan2.2_fun/train_control_lora.sh` 里的路径需要更新。
 
 ```bash
-# 方案 A：交互式配置（推荐 4 卡训练）
-accelerate config
-# 选择: multi-GPU, 4 GPUs, DeepSpeed 或 FSDP 根据需求, mixed precision fp16
+cd /mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun
 
-# 方案 B：如果交互不方便，直接写配置文件
-mkdir -p ~/.cache/huggingface/accelerate
-cat > ~/.cache/huggingface/accelerate/default_config.yaml << 'EOF'
-compute_environment: LOCAL_MACHINE
-distributed_type: MULTI_GPU
-downcast_bf16: 'no'
-gpu_ids: '0,1,2,3'
-machine_rank: 0
-main_training_function: main
-mixed_precision: fp16
-num_machines: 1
-num_processes: 4
-rdzv_backend: static
-same_network: true
-tpu_env: []
-tpu_use_cluster: false
-tpu_use_sudo: false
-use_cpu: false
-EOF
+# 备份原文件
+cp scripts/wan2.2_fun/train_control_lora.sh scripts/wan2.2_fun/train_control_lora.sh.bak
+
+# 用 sed 替换路径
+sed -i 's|/cache/02_model/Wan2.2-Fun-5B-Control/|/mnt/DataPart/jianghongda/VideoX-Fun/models/Diffusion_Transformer/Wan2.2-Fun-5B-Control|g' scripts/wan2.2_fun/train_control_lora.sh
+sed -i 's|datasets/internal_datasets/|/mnt/DataPart/jianghongda/dataset/livephoto|g' scripts/wan2.2_fun/train_control_lora.sh
+sed -i 's|/cache/00_data/metadata.json|datasets/dataset.json|g' scripts/wan2.2_fun/train_control_lora.sh
+sed -i 's|/cache/00_data/test_data_zhuan/|/mnt/DataPart/jianghongda/dataset/livephoto/static|g' scripts/wan2.2_fun/train_control_lora.sh
+
+# 验证替换结果
+grep -E "MODEL_NAME|DATASET|validation_data_dir" scripts/wan2.2_fun/train_control_lora.sh
 ```
 
-**反馈**: `cat ~/.cache/huggingface/accelerate/default_config.yaml` 的完整内容。
+**反馈**: grep 输出，确认路径已正确替换。
 
 ---
 
-## Task 4: 验证训练脚本可以正常解析参数
+## Task 4: 干运行测试（2步验证）
 
 ```bash
-cd /mnt/DataPart/jianghd1996/VideoX-Fun-dev/VideoX-Fun
+cd /mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun
 
-# 先确认模型路径存在
-ls -la /cache/02_model/Wan2.2-Fun-5B-Control/ | head -20
+# 先确认模型目录有文件
+ls /mnt/DataPart/jianghongda/VideoX-Fun/models/Diffusion_Transformer/Wan2.2-Fun-5B-Control/ | head -20
 
-# 确认数据路径存在
-ls -la /cache/00_data/metadata.json 2>/dev/null
-ls -la datasets/internal_datasets/ 2>/dev/null
-
-# 测试训练脚本参数解析（上次失败了）
-python scripts/wan2.2_fun/train_control_lora.py --help 2>&1 | head -50
+# 干运行：只跑 2 步，验证模型加载 + 数据读取正常
+CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch --mixed_precision=bf16 scripts/wan2.2_fun/train_control_lora.py \
+    --config_path=config/wan2.2/wan_civitai_5b.yaml \
+    --pretrained_model_name_or_path=/mnt/DataPart/jianghongda/VideoX-Fun/models/Diffusion_Transformer/Wan2.2-Fun-5B-Control \
+    --train_data_dir=/mnt/DataPart/jianghongda/dataset/livephoto \
+    --train_data_meta=datasets/dataset.json \
+    --image_sample_size=1440 \
+    --video_sample_size=1440 \
+    --token_sample_size=1440 \
+    --video_sample_stride=1 \
+    --video_sample_n_frames=81 \
+    --train_batch_size=1 \
+    --video_repeat=1 \
+    --gradient_accumulation_steps=1 \
+    --dataloader_num_workers=4 \
+    --max_train_steps=2 \
+    --checkpointing_steps=1000 \
+    --learning_rate=1e-04 \
+    --seed=42 \
+    --output_dir=output_dir_test \
+    --gradient_checkpointing \
+    --mixed_precision=bf16 \
+    --adam_weight_decay=3e-2 \
+    --adam_epsilon=1e-10 \
+    --vae_mini_batch=1 \
+    --max_grad_norm=0.05 \
+    --random_hw_adapt \
+    --training_with_video_token_length \
+    --enable_bucket \
+    --uniform_sampling \
+    --train_mode=control_ref \
+    --control_ref_image=random \
+    --add_inpaint_info \
+    --mask_concat_channels 1 \
+    --control_mask_ratio=0.3 \
+    --add_full_ref_image_in_self_attention \
+    --rank=64 \
+    --network_alpha=32 \
+    --target_name=q,k,v,ffn.0,ffn.2 \
+    --use_peft_lora \
+    --low_vram \
+    2>&1 | head -150
 ```
 
-**反馈**: 以上三个命令的完整输出。如果 `--help` 报错，贴完整 traceback。
+> 注意：去掉了 `--validation_data_dir` 和 `--num_inference_steps`，先不跑验证，只验证训练流程能跑通。
+
+**反馈**: 完整输出，特别关注：
+- 是否有 import / 路径错误
+- 模型是否成功加载（应该看到 `Loading model...` 之类的日志）
+- 数据是否正确读取（应该看到 `Loaded X samples` 或类似日志）
+- 是否在 2 步后正常结束
 
 ---
 
-## Task 5: 干运行测试（不实际训练）
-
-如果 Task 4 的 `--help` 成功了，尝试加载模型验证配置：
+## Task 5: 如果 Task 4 成功，正式训练
 
 ```bash
-cd /mnt/DataPart/jianghd1996/VideoX-Fun-dev/VideoX-Fun
+cd /mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun
 
-CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch scripts/wan2.2_fun/train_control_lora.py \
-    --pretrained_model_name_or_path /cache/02_model/Wan2.2-Fun-5B-Control/ \
-    --train_data_dir datasets/internal_datasets/ \
-    --train_data_meta /cache/00_data/metadata.json \
-    --output_dir output_dir_wan2.2_5b_control_lora \
-    --train_batch_size 1 \
-    --gradient_accumulation_steps 1 \
-    --max_train_steps 2 \
-    --logging_steps 1 \
-    2>&1 | head -100
+# 确认 Task 4 没问题后，用完整参数跑正式训练
+nohup bash scripts/wan2.2_fun/train_control_lora.sh > train.log 2>&1 &
+
+# 监控训练进度
+tail -f train.log
 ```
 
-> 注意: 这里加了 `--max_train_steps 2`，只跑 2 步验证流程能走通，不会真正训练。
-
-**反馈**: 完整的输出，特别关注：
-- 是否有 import 错误
-- 模型是否成功加载
-- 数据是否正确读取
+**反馈**: 
+- `tail train.log` 前 50 行
+- GPU 占用情况: `nvidia-smi`
+- 确认训练已正常启动
 
 ---
 
