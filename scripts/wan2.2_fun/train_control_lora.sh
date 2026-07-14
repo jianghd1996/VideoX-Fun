@@ -53,6 +53,4 @@ accelerate launch --num_processes=2 --mixed_precision="bf16" scripts/wan2.2_fun/
   --network_alpha=32 \
   --target_name="q,k,v,ffn.0,ffn.2" \
   --use_peft_lora \
-  --low_vram \
-  --validation_data_dir="/mnt/DataPart/jianghongda/dataset/livephoto/static" \
-  --num_inference_steps=8
+  --low_vram
