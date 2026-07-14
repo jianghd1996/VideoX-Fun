@@ -38,7 +38,6 @@ accelerate launch --gpu-ids 4,5 --num_processes=2 --mixed_precision="bf16" scrip
   --train_mode="control_ref" \
   --control_ref_image="random" \
   --add_inpaint_info \
-  --mask_concat_channels 1 \
   --control_mask_ratio=0.3 \
   --add_full_ref_image_in_self_attention \
   --rank=64 \
