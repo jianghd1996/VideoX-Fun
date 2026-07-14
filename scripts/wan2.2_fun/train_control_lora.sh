@@ -10,9 +10,9 @@ accelerate launch --gpu-ids 4,5 --num_processes=2 --mixed_precision="bf16" scrip
   --pretrained_model_name_or_path=$MODEL_NAME \
   --train_data_dir=$DATASET_NAME \
   --train_data_meta=$DATASET_META_NAME \
-  --image_sample_size=1440 \
-  --video_sample_size=1440 \
-  --token_sample_size=1440 \
+  --image_sample_size=720 \
+  --video_sample_size=720 \
+  --token_sample_size=720 \
   --video_sample_stride=1 \
   --video_sample_n_frames=81 \
   --train_batch_size=1 \
