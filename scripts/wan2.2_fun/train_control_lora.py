@@ -210,22 +210,19 @@ logger = get_logger(__name__, log_level="INFO")
 
 def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, config, accelerator, weight_dtype, global_step):
     # All ranks participate in validation to avoid NCCL timeout on multi-GPU
-    # Only main process saves results
-    is_main_process = accelerator.is_main_process
     try:
         is_deepspeed = type(transformer3d).__name__ == 'DeepSpeedEngine'
         if is_deepspeed:
             origin_config = transformer3d.config
             transformer3d.config = accelerator.unwrap_model(transformer3d).config
         
-        # Move transformer and text_encoder to CPU to free VRAM for VAE decode
-        if hasattr(transformer3d, 'to'):
-            transformer3d.to('cpu')
-        if hasattr(text_encoder, 'to'):
+        # CRITICAL: Ensure transformer stays on GPU throughout validation
+        # Only move text_encoder to CPU if low_vram mode to free VRAM
+        if args.low_vram and hasattr(text_encoder, 'to'):
+            logger.info(f"Rank {accelerator.process_index}: Moving text_encoder to CPU (low_vram mode)")
             text_encoder.to('cpu')
-        gc.collect()
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
+            gc.collect()
+            torch.cuda.empty_cache()
         
         with torch.no_grad(), torch.cuda.amp.autocast(dtype=weight_dtype), torch.cuda.device(device=accelerator.device):
             logger.info("Running validation... ")
@@ -277,7 +274,14 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 transformer_2=transformer3d_2,
                 scheduler=scheduler,
             )
-            pipeline = pipeline.to(accelerator.device)
+            # Move all pipeline components to device explicitly
+            pipeline.vae = pipeline.vae.to(device=accelerator.device, dtype=weight_dtype)
+            if pipeline.text_encoder is not None:
+                pipeline.text_encoder = pipeline.text_encoder.to(device=accelerator.device, dtype=weight_dtype)
+            # Ensure transformer is on GPU (may have been moved to CPU by pipeline.to() or previous validation)
+            pipeline.transformer = pipeline.transformer.to(device=accelerator.device, dtype=weight_dtype)
+            if pipeline.transformer_2 is not None:
+                pipeline.transformer_2 = pipeline.transformer_2.to(device=accelerator.device, dtype=weight_dtype)
 
             if args.seed is None:
                 generator = None
