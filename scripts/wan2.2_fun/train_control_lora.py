@@ -234,51 +234,17 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
             scheduler = FlowMatchEulerDiscreteScheduler(
                 **filter_kwargs(FlowMatchEulerDiscreteScheduler, OmegaConf.to_container(config['scheduler_kwargs']))
             )
-            # Create independent transformer instances for validation to avoid accelerate/DDP device management issues
-            # Copy current training weights to ensure consistency
-            def _create_transformer_for_validation(subpath_hint):
-                """Create a fresh transformer instance with current training weights"""
-                sub_path = config['transformer_additional_kwargs'].get(subpath_hint, 'transformer')
-                tpath = os.path.join(args.pretrained_model_name_or_path, sub_path) if sub_path else args.pretrained_model_name_or_path
-                if not os.path.isdir(tpath):
-                    tpath = args.pretrained_model_name_or_path
-                
-                # Load from pretrained
-                model = Wan2_2Transformer3DModel.from_pretrained(
-                    tpath,
-                    transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs']),
-                )
-                
-                # Copy current training weights
-                training_state = accelerator.unwrap_model(transformer3d).state_dict()
-                model.load_state_dict(training_state, strict=False)
-                
-                # Move to device explicitly
-                model = model.to(device=accelerator.device, dtype=weight_dtype)
-                model.eval()  # Set to eval mode for inference
-                
-                return model
+            # Use the training transformer directly for validation - avoids device/LoRA weight issues
+            # Set to eval mode temporarily, restore after validation
+            was_training = transformer3d.training
+            transformer3d.eval()
             
-            if args.boundary_type == "full":
-                transformer3d_1 = _create_transformer_for_validation('transformer_low_noise_model_subpath')
-                transformer3d_2 = None
-            elif config['transformer_additional_kwargs'].get('transformer_combination_type', 'moe') == 'single':
-                transformer3d_1 = _create_transformer_for_validation('transformer_low_noise_model_subpath')
-                transformer3d_2 = None
-            else:
-                if args.boundary_type == "low":
-                    transformer3d_1 = _create_transformer_for_validation('transformer_low_noise_model_subpath')
-                    transformer3d_2 = _create_transformer_for_validation('transformer_high_noise_model_subpath')
-                else:
-                    transformer3d_1 = _create_transformer_for_validation('transformer_high_noise_model_subpath')
-                    transformer3d_2 = _create_transformer_for_validation('transformer_low_noise_model_subpath')
-
             pipeline = Wan2_2FunControlPipeline(
                 vae=vae, 
                 text_encoder=text_encoder,
                 tokenizer=tokenizer,
-                transformer=transformer3d_1,
-                transformer_2=transformer3d_2,
+                transformer=transformer3d,
+                transformer_2=None,
                 scheduler=scheduler,
             )
             
@@ -473,7 +439,7 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     concat_sample, 
                     os.path.join(
                         args.output_dir, 
-                        f"sample/sample-{global_step}-rank{accelerator.process_index}-image-{i}.mp4"
+                        f"sample/step{global_step:06d}_sample{i:03d}.mp4"
                     )
                 )
                 
@@ -485,6 +451,9 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 torch.cuda.empty_cache()
 
             del pipeline
+            # Restore training mode
+            if was_training:
+                transformer3d.train()
             gc.collect()
             torch.cuda.empty_cache()
             vae.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
@@ -500,6 +469,9 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
         error_msg = f"[VALIDATION ERROR] rank={accelerator.process_index} step={global_step}\n{traceback.format_exc()}"
         print(error_msg, flush=True)
         logger.error(error_msg)
+        # Restore training mode on error too
+        if 'was_training' in locals() and was_training:
+            transformer3d.train()
         vae.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
         transformer3d.to(accelerator.device, dtype=weight_dtype)
         if not args.enable_text_encoder_in_dataloader:
