@@ -276,6 +276,17 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 control_total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
                 cap.release()
 
+                # Use lower resolution (720P) for validation to save VRAM
+                validation_sample_size = getattr(args, 'validation_sample_size', args.image_sample_size)
+                width, height = calculate_dimensions(validation_sample_size * validation_sample_size, width / height)
+                temporal_ratio = vae.config.temporal_compression_ratio
+                # Use full video_sample_n_frames for validation
+                max_video_length = int((args.video_sample_n_frames - 1) // temporal_ratio * temporal_ratio) + 1 if args.video_sample_n_frames != 1 else 1
+                video_length = min(max_video_length, control_total_frames)
+                # 确保仍是 4N+1 格式
+                video_length = (video_length - 1) // temporal_ratio * temporal_ratio + 1
+                video_length = max(video_length, 1)
+
                 # 获取 I2V 首尾帧
                 start_image_path = None
                 end_image_path = None
@@ -290,13 +301,18 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     end_image_path = end_images[i]
                 else:
                     # 兜底：从 GT video 提取首帧和尾帧
+                    # 注意：尾帧索引应该是 video_length - 1，而不是 gt_total_frames - 1
+                    # 因为 get_video_to_video_latent() 从开头采样 video_length 帧
                     gt_path = getattr(args, 'validation_gt_paths', args.validation_paths)[i]
                     gt_cap = cv2.VideoCapture(gt_path)
                     gt_total_frames = int(gt_cap.get(cv2.CAP_PROP_FRAME_COUNT))
                     gt_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     ret_first, first_frame = gt_cap.read()
-                    gt_cap.set(cv2.CAP_PROP_POS_FRAMES, gt_total_frames - 1)
+                    # 尾帧索引对齐到 video_length
+                    end_frame_idx = min(video_length - 1, gt_total_frames - 1)
+                    gt_cap.set(cv2.CAP_PROP_POS_FRAMES, end_frame_idx)
                     ret_last, last_frame = gt_cap.read()
+                    logger.debug(f"Validation frame alignment: video_length={video_length}, gt_total_frames={gt_total_frames}, end_frame_idx={end_frame_idx}")
                     gt_cap.release()
                     if ret_first:
                         tmp_start = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
@@ -308,17 +324,6 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                         cv2.imwrite(tmp_end.name, last_frame)
                         end_image_path = tmp_end.name
                         is_temp_end = True
-
-                # Use lower resolution (720P) for validation to save VRAM
-                validation_sample_size = getattr(args, 'validation_sample_size', args.image_sample_size)
-                width, height = calculate_dimensions(validation_sample_size * validation_sample_size, width / height)
-                temporal_ratio = vae.config.temporal_compression_ratio
-                # Use full video_sample_n_frames for validation
-                max_video_length = int((args.video_sample_n_frames - 1) // temporal_ratio * temporal_ratio) + 1 if args.video_sample_n_frames != 1 else 1
-                video_length = min(max_video_length, control_total_frames)
-                # 确保仍是 4N+1 格式
-                video_length = (video_length - 1) // temporal_ratio * temporal_ratio + 1
-                video_length = max(video_length, 1)
                 
                 inpaint_video, inpaint_video_mask, clip_image = get_image_to_video_latent(start_image_path, end_image_path, video_length=video_length, sample_size=[height, width])
                 # 清理临时帧文件（直接路径的文件不删）
@@ -385,6 +390,10 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     guidance_scale      = args.guidance_scale,
                     boundary            = config['transformer_additional_kwargs'].get('boundary', 0.900)
                 ).videos
+
+                # Move transformer back to GPU after pipeline call (pipeline moves it to CPU for VAE decode)
+                unwrapped_transformer.to(accelerator.device, dtype=weight_dtype)
+
                 # Each rank saves its own validation results
                 os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
 
