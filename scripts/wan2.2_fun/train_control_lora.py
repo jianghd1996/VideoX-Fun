@@ -240,7 +240,9 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
             transformer3d.eval()
             
             # Use unwrapped model for pipeline to avoid DDP wrapper issues
+            # Ensure it's on the correct device
             unwrapped_transformer = accelerator.unwrap_model(transformer3d)
+            unwrapped_transformer = unwrapped_transformer.to(device=accelerator.device, dtype=weight_dtype)
             
             pipeline = Wan2_2FunControlPipeline(
                 vae=vae, 
