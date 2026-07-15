@@ -286,7 +286,10 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 generator = None
             else:
                 rank_seed = args.seed + accelerator.process_index
-                generator = torch.Generator(device=accelerator.device).manual_seed(rank_seed)
+                # Use CPU generator: in low_vram mode pipeline device can be CPU,
+                # and randn_tensor refuses to make a CPU tensor from a CUDA generator.
+                # CPU generators can produce tensors on any target device.
+                generator = torch.Generator(device="cpu").manual_seed(rank_seed)
                 logger.info(f"Rank {accelerator.process_index} using seed: {rank_seed}")
 
             # Distribute validation samples across ranks for parallel processing
