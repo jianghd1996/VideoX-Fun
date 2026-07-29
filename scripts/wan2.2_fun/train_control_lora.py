@@ -248,7 +248,7 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 last_frame_pil = Image.fromarray(last_frame_rgb).resize((target_w, target_h))
 
                 inpaint_video, inpaint_video_mask, clip_image = get_image_to_video_latent(
-                    first_frame_pil, last_frame_pil, video_length=video_length, sample_size=[target_h, target_w]
+                    [first_frame_pil], [last_frame_pil], video_length=video_length, sample_size=[target_h, target_w]
                 )
 
                 input_video, input_video_mask, _, _ = get_video_to_video_latent(
