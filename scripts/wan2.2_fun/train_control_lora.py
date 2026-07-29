@@ -193,11 +193,12 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
 
             rank_seed = (args.seed or 42) + accelerator.process_index
             generator = torch.Generator(device=accelerator.device).manual_seed(rank_seed)
+            cpu_generator = torch.Generator().manual_seed(rank_seed)
             logger.info(f"Rank {accelerator.process_index} using seed: {rank_seed}")
 
             num_samples = args.validation_samples_per_gpu
             dataset_size = len(train_dataset.dataset)
-            sample_indices = torch.randperm(dataset_size, generator=generator)[:num_samples].tolist()
+            sample_indices = torch.randperm(dataset_size, generator=cpu_generator)[:num_samples].tolist()
 
             video_length = int((args.validation_n_frames - 1) // vae.config.temporal_compression_ratio * vae.config.temporal_compression_ratio) + 1 if args.validation_n_frames != 1 else 1
 
