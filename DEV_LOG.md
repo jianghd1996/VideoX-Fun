@@ -44,7 +44,18 @@ VideoX-Fun: Video generation & editing framework supporting multiple models:
 
 > Add notes here for future sessions to pick up context.
 
-### 2026-07-29
+### 2026-07-29 (Session 2)
+- Updated `train_control_lora.sh` for Wan2.2-Fun-5B-Control training
+- Key changes:
+  - Config: `wan_civitai_5b.yaml` (5B single-Transformer) instead of `wan_civitai_i2v.yaml` (A14B dual-Transformer)
+  - `boundary_type="full"` for 5B single-Transformer (was `"low"` for A14B)
+  - Multi-GPU: `--gpu-ids 6,7 --num_processes=2 --main_process_port=29501`
+  - Paths updated to user's remote server paths
+- Dataset: Relative paths in JSON, base dir `/mnt/DataPart/jianghongda/dataset/livephoto`
+- Metadata: `/mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun-ori/datasets/dataset1+2.json`
+- Note: Metadata JSON lacks width/height fields, will be read from video files at runtime (slower)
+
+### 2026-07-29 (Session 1)
 - Initial setup: configured remote dev workflow
 - Created DEV_LOG.md
 - First push to GitHub

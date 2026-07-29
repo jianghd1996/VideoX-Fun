@@ -1,13 +1,10 @@
-export MODEL_NAME="models/Diffusion_Transformer/Wan2.2-Fun-A14B-Control"
-export DATASET_NAME="datasets/internal_datasets/"
-export DATASET_META_NAME="datasets/internal_datasets/metadata.json"
-# NCCL_IB_DISABLE=1 and NCCL_P2P_DISABLE=1 are used in multi nodes without RDMA. 
-# export NCCL_IB_DISABLE=1
-# export NCCL_P2P_DISABLE=1
+export MODEL_NAME="/mnt/DataPart/jianghongda/VideoX-Fun/models/Diffusion_Transformer/Wan2.2-Fun-5B-Control"
+export DATASET_NAME="/mnt/DataPart/jianghongda/dataset/livephoto"
+export DATASET_META_NAME="/mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun-ori/datasets/dataset1+2.json"
 NCCL_DEBUG=INFO
 
-accelerate launch --mixed_precision="bf16" scripts/wan2.2_fun/train_control_lora.py \
-  --config_path="config/wan2.2/wan_civitai_i2v.yaml" \
+accelerate launch --gpu-ids 6,7 --num_processes=2 --mixed_precision="bf16" --main_process_port=29501 scripts/wan2.2_fun/train_control_lora.py \
+  --config_path="config/wan2.2/wan_civitai_5b.yaml" \
   --pretrained_model_name_or_path=$MODEL_NAME \
   --train_data_dir=$DATASET_NAME \
   --train_data_meta=$DATASET_META_NAME \
@@ -39,7 +36,7 @@ accelerate launch --mixed_precision="bf16" scripts/wan2.2_fun/train_control_lora
   --control_ref_image="random" \
   --add_inpaint_info \
   --add_full_ref_image_in_self_attention \
-  --boundary_type="low" \
+  --boundary_type="full" \
   --rank=64 \
   --network_alpha=32 \
   --target_name="q,k,v,ffn.0,ffn.2" \
