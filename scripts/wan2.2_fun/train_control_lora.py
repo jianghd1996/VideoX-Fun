@@ -198,11 +198,24 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
 
             num_samples = args.validation_samples_per_gpu
             dataset_size = len(train_dataset.dataset)
-            sample_indices = torch.randperm(dataset_size, generator=cpu_generator)[:num_samples].tolist()
-
+            
             video_length = int((args.validation_n_frames - 1) // vae.config.temporal_compression_ratio * vae.config.temporal_compression_ratio) + 1 if args.validation_n_frames != 1 else 1
 
-            for sample_idx, data_idx in enumerate(sample_indices):
+            # Sample with retry: ensure we get num_samples valid samples
+            sampled_count = 0
+            used_indices = set()
+            max_retries = num_samples * 10  # Avoid infinite loop
+            
+            while sampled_count < num_samples and max_retries > 0:
+                max_retries -= 1
+                # Sample a new index
+                data_idx = torch.randint(0, dataset_size, (1,), generator=cpu_generator).item()
+                
+                # Skip if already used
+                if data_idx in used_indices:
+                    continue
+                used_indices.add(data_idx)
+                
                 data_info = train_dataset.dataset[data_idx]
                 gt_video_path = data_info['file_path']
                 control_video_path = data_info.get('control_file_path', '')
@@ -216,10 +229,10 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     control_video_full_path = control_video_path
 
                 if not os.path.exists(gt_video_full_path):
-                    logger.warning(f"GT video not found: {gt_video_full_path}, skipping sample {sample_idx}")
+                    logger.warning(f"GT video not found: {gt_video_full_path}, retrying...")
                     continue
                 if control_video_full_path and not os.path.exists(control_video_full_path):
-                    logger.warning(f"Control video not found: {control_video_full_path}, skipping sample {sample_idx}")
+                    logger.warning(f"Control video not found: {control_video_full_path}, retrying...")
                     continue
 
                 # Decide temporal reversal (50% probability)
@@ -237,7 +250,7 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 gt_cap.release()
 
                 if not ret_first or not ret_last:
-                    logger.warning(f"Failed to read first/last frames from {gt_video_full_path}, skipping sample {sample_idx}")
+                    logger.warning(f"Failed to read first/last frames from {gt_video_full_path}, retrying...")
                     continue
 
                 first_frame_rgb = cv2.cvtColor(first_frame, cv2.COLOR_BGR2RGB)
@@ -246,9 +259,9 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 # If reversing, swap first and last frames
                 if do_reverse:
                     first_frame_rgb, last_frame_rgb = last_frame_rgb, first_frame_rgb
-                    logger.info(f"Validation sample {sample_idx+1}/{num_samples}: idx={data_idx}, temporal REVERSED")
+                    logger.info(f"Validation sample {sampled_count+1}/{num_samples}: idx={data_idx}, temporal REVERSED")
                 else:
-                    logger.info(f"Validation sample {sample_idx+1}/{num_samples}: idx={data_idx}, temporal normal")
+                    logger.info(f"Validation sample {sampled_count+1}/{num_samples}: idx={data_idx}, temporal normal")
 
                 # Read control video dimensions to compute target_w (ensures control and inpaint latent shapes match)
                 ctrl_cap = cv2.VideoCapture(control_video_full_path)
@@ -317,7 +330,11 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     ),
                     n_rows=3
                 )
-                logger.info(f"Saved validation sample {sample_idx+1}/{num_samples}: idx={data_idx}")
+                
+                sampled_count += 1
+            
+            if max_retries <= 0:
+                logger.warning(f"Validation: reached max retries, only generated {sampled_count}/{num_samples} samples")
 
             del pipeline
             gc.collect()
