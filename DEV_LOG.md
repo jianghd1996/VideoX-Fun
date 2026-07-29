@@ -77,6 +77,8 @@ VideoX-Fun: Video generation & editing framework supporting multiple models:
   - `torch.randperm` requires CPU generator, not CUDA generator - created separate `cpu_generator`
   - `get_image_to_video_latent` expects lists of images, not single Image objects - wrapped frames in lists
   - Pipeline mask dimension mismatch for 5B model when latent spatial dims are odd - used `F.interpolate` instead of `::2` stride
+  - **F variable shadowing**: Renamed `F` to `num_frames` in sanity check logging to avoid shadowing `torch.nn.functional` (caused AttributeError at line 2009)
+  - **Tokenizers fork warning**: Set `TOKENIZERS_PARALLELISM=false` in shell script
 - Added temporal reversal augmentation:
   - Training: 50% probability to reverse both GT and control videos along temporal axis
   - Validation: 50% probability to reverse, with correct first/last frame alignment (swap frames when reversed)
