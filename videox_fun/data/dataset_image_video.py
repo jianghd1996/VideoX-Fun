@@ -294,6 +294,7 @@ class ImageVideoControlDataset(Dataset):
         enable_subject_info=False,
         padding_subject_info=True,
         return_file_name=False,
+        temporal_reverse_prob=0.0,
     ):
         # Loading annotations from files
         print(f"loading annotations from {ann_path} ...")
@@ -331,6 +332,7 @@ class ImageVideoControlDataset(Dataset):
         self.enable_subject_info = enable_subject_info
         self.padding_subject_info = padding_subject_info
         self.return_file_name = return_file_name
+        self.temporal_reverse_prob = temporal_reverse_prob
 
         self.video_length_drop_start = video_length_drop_start
         self.video_length_drop_end = video_length_drop_end
@@ -485,6 +487,17 @@ class ImageVideoControlDataset(Dataset):
                 else:
                     control_pixel_values = torch.zeros_like(pixel_values) if not self.enable_bucket else np.zeros_like(pixel_values)
                 control_camera_values = None
+            
+            # Temporal reversal augmentation
+            if self.temporal_reverse_prob > 0 and random.random() < self.temporal_reverse_prob:
+                if isinstance(pixel_values, np.ndarray):
+                    pixel_values = pixel_values[::-1].copy()
+                elif isinstance(pixel_values, torch.Tensor):
+                    pixel_values = pixel_values.flip(0).contiguous()
+                if isinstance(control_pixel_values, np.ndarray):
+                    control_pixel_values = control_pixel_values[::-1].copy()
+                elif isinstance(control_pixel_values, torch.Tensor):
+                    control_pixel_values = control_pixel_values.flip(0).contiguous()
             
             # Load subject reference images (for subject-driven generation)
             if self.enable_subject_info:

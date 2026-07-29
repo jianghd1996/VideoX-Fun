@@ -222,6 +222,9 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     logger.warning(f"Control video not found: {control_video_full_path}, skipping sample {sample_idx}")
                     continue
 
+                # Decide temporal reversal (50% probability)
+                do_reverse = random.random() < 0.5
+
                 gt_cap = cv2.VideoCapture(gt_video_full_path)
                 gt_total_frames = int(gt_cap.get(cv2.CAP_PROP_FRAME_COUNT))
                 gt_width = int(gt_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -240,6 +243,13 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 first_frame_rgb = cv2.cvtColor(first_frame, cv2.COLOR_BGR2RGB)
                 last_frame_rgb = cv2.cvtColor(last_frame, cv2.COLOR_BGR2RGB)
 
+                # If reversing, swap first and last frames
+                if do_reverse:
+                    first_frame_rgb, last_frame_rgb = last_frame_rgb, first_frame_rgb
+                    logger.info(f"Validation sample {sample_idx+1}/{num_samples}: idx={data_idx}, temporal REVERSED")
+                else:
+                    logger.info(f"Validation sample {sample_idx+1}/{num_samples}: idx={data_idx}, temporal normal")
+
                 target_h = 960  # 720P
                 target_w = int(target_h * gt_width / gt_height)
                 target_w = target_w - (target_w % 16)
@@ -254,6 +264,10 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 input_video, input_video_mask, _, _ = get_video_to_video_latent(
                     control_video_full_path, video_length=video_length, sample_size=[target_h, target_w]
                 )
+
+                # Reverse control video if needed
+                if do_reverse:
+                    input_video = torch.flip(input_video, [2])
 
                 sample = pipeline(
                     text, 
@@ -276,6 +290,11 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 control_video_for_concat, _, _, _ = get_video_to_video_latent(
                     control_video_full_path, video_length=video_length, sample_size=[target_h, target_w]
                 )
+
+                # Reverse GT and control videos for concat if needed
+                if do_reverse:
+                    gt_video_for_concat = torch.flip(gt_video_for_concat, [2])
+                    control_video_for_concat = torch.flip(control_video_for_concat, [2])
 
                 gt_video_for_concat = gt_video_for_concat.to(sample.device, dtype=sample.dtype)
                 control_video_for_concat = control_video_for_concat.to(sample.device, dtype=sample.dtype)
@@ -1184,7 +1203,8 @@ def main():
         video_repeat=args.video_repeat, 
         image_sample_size=args.image_sample_size,
         enable_bucket=args.enable_bucket, 
-        enable_camera_info=args.train_mode == "control_camera_ref"
+        enable_camera_info=args.train_mode == "control_camera_ref",
+        temporal_reverse_prob=0.5
     )
 
     def worker_init_fn(_seed):
@@ -1759,6 +1779,11 @@ def main():
                 control_pixel_values = batch["control_pixel_values"].cpu()
                 pixel_values = rearrange(pixel_values, "b f c h w -> b c f h w")
                 control_pixel_values = rearrange(control_pixel_values, "b f c h w -> b c f h w")
+                
+                # Log resolution and frame count
+                B, C, F, H, W = pixel_values.shape
+                logger.info(f"Training data sample - Resolution: {W}x{H}, Frames: {F}, Batch size: {B}")
+                
                 os.makedirs(os.path.join(args.output_dir, "sanity_check"), exist_ok=True)
                 for idx, (pixel_value, control_pixel_value, text) in enumerate(zip(pixel_values, control_pixel_values, texts)):
                     pixel_value = pixel_value[None, ...]

@@ -830,7 +830,14 @@ class Wan2_2FunControlPipeline(DiffusionPipeline):
 
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 if self.vae.spatial_compression_ratio >= 16 and init_video is not None:
-                    temp_ts = ((mask[0][0][:, ::2, ::2]) * t).flatten()
+                    p_h = self.transformer.config.patch_size[1]
+                    p_w = self.transformer.config.patch_size[2]
+                    downsampled = F.interpolate(
+                        mask[0][0].unsqueeze(0).unsqueeze(0),
+                        size=(mask.shape[2], mask.shape[3] // p_h, mask.shape[4] // p_w),
+                        mode='trilinear', align_corners=False
+                    ).squeeze(0).squeeze(0)
+                    temp_ts = (downsampled * t).flatten()
                     temp_ts = torch.cat([
                         temp_ts,
                         temp_ts.new_ones(seq_len - temp_ts.size(0)) * t
