@@ -147,7 +147,8 @@ check_min_version("0.18.0.dev0")
 
 logger = get_logger(__name__, log_level="INFO")
 
-def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, config, accelerator, weight_dtype, global_step):
+def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, config, accelerator, weight_dtype, global_step, train_dataset):
+    import cv2
     try:
         is_deepspeed = type(transformer3d).__name__ == 'DeepSpeedEngine'
         if is_deepspeed:
@@ -190,33 +191,76 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
             )
             pipeline = pipeline.to(accelerator.device)
 
-            if args.seed is None:
-                generator = None
-            else:
-                rank_seed = args.seed + accelerator.process_index
-                generator = torch.Generator(device=accelerator.device).manual_seed(rank_seed)
-                logger.info(f"Rank {accelerator.process_index} using seed: {rank_seed}")
+            rank_seed = (args.seed or 42) + accelerator.process_index
+            generator = torch.Generator(device=accelerator.device).manual_seed(rank_seed)
+            logger.info(f"Rank {accelerator.process_index} using seed: {rank_seed}")
 
-            for i in range(len(args.validation_prompts)):
-                import cv2
-                cap = cv2.VideoCapture(args.validation_paths[i])
-                width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                cap.release()
+            num_samples = args.validation_samples_per_gpu
+            dataset_size = len(train_dataset.dataset)
+            sample_indices = torch.randperm(dataset_size, generator=generator)[:num_samples].tolist()
 
-                width, height = calculate_dimensions(args.image_sample_size * args.image_sample_size,  width / height)
-                video_length = int((args.video_sample_n_frames - 1) // vae.config.temporal_compression_ratio * vae.config.temporal_compression_ratio) + 1 if args.video_sample_n_frames != 1 else 1
-                
-                inpaint_video, inpaint_video_mask, clip_image = get_image_to_video_latent(None, None, video_length=video_length, sample_size=[height, width])
-                input_video, input_video_mask, ref_image, clip_image = get_video_to_video_latent(args.validation_paths[i], video_length=video_length, sample_size=[height, width])
+            video_length = int((args.validation_n_frames - 1) // vae.config.temporal_compression_ratio * vae.config.temporal_compression_ratio) + 1 if args.validation_n_frames != 1 else 1
+
+            for sample_idx, data_idx in enumerate(sample_indices):
+                data_info = train_dataset.dataset[data_idx]
+                gt_video_path = data_info['file_path']
+                control_video_path = data_info.get('control_file_path', '')
+                text = data_info.get('text', '')
+
+                if train_dataset.data_root is not None:
+                    gt_video_full_path = os.path.join(train_dataset.data_root, gt_video_path)
+                    control_video_full_path = os.path.join(train_dataset.data_root, control_video_path) if control_video_path else ''
+                else:
+                    gt_video_full_path = gt_video_path
+                    control_video_full_path = control_video_path
+
+                if not os.path.exists(gt_video_full_path):
+                    logger.warning(f"GT video not found: {gt_video_full_path}, skipping sample {sample_idx}")
+                    continue
+                if control_video_full_path and not os.path.exists(control_video_full_path):
+                    logger.warning(f"Control video not found: {control_video_full_path}, skipping sample {sample_idx}")
+                    continue
+
+                gt_cap = cv2.VideoCapture(gt_video_full_path)
+                gt_total_frames = int(gt_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                gt_width = int(gt_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                gt_height = int(gt_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+                gt_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                ret_first, first_frame = gt_cap.read()
+                gt_cap.set(cv2.CAP_PROP_POS_FRAMES, gt_total_frames - 1)
+                ret_last, last_frame = gt_cap.read()
+                gt_cap.release()
+
+                if not ret_first or not ret_last:
+                    logger.warning(f"Failed to read first/last frames from {gt_video_full_path}, skipping sample {sample_idx}")
+                    continue
+
+                first_frame_rgb = cv2.cvtColor(first_frame, cv2.COLOR_BGR2RGB)
+                last_frame_rgb = cv2.cvtColor(last_frame, cv2.COLOR_BGR2RGB)
+
+                target_h = args.video_sample_size
+                target_w = int(target_h * gt_width / gt_height)
+                target_w = target_w - (target_w % 16)
+
+                first_frame_pil = Image.fromarray(first_frame_rgb).resize((target_w, target_h))
+                last_frame_pil = Image.fromarray(last_frame_rgb).resize((target_w, target_h))
+
+                inpaint_video, inpaint_video_mask, clip_image = get_image_to_video_latent(
+                    first_frame_pil, last_frame_pil, video_length=video_length, sample_size=[target_h, target_w]
+                )
+
+                input_video, input_video_mask, _, _ = get_video_to_video_latent(
+                    control_video_full_path, video_length=video_length, sample_size=[target_h, target_w]
+                )
+
                 sample = pipeline(
-                    args.validation_prompts[i], 
+                    text, 
                     num_frames = video_length,
                     negative_prompt = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走",
-                    height      = height,
-                    width       = width,
+                    height      = target_h,
+                    width       = target_w,
                     generator   = generator,
-
                     control_video   = input_video,
                     video           = inpaint_video,
                     mask_video      = inpaint_video_mask,
@@ -224,14 +268,30 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     guidance_scale      = 4.5,
                     boundary            = config['transformer_additional_kwargs'].get('boundary', 0.900)
                 ).videos
+
+                gt_video_for_concat, _, _, _ = get_video_to_video_latent(
+                    gt_video_full_path, video_length=video_length, sample_size=[target_h, target_w]
+                )
+                control_video_for_concat, _, _, _ = get_video_to_video_latent(
+                    control_video_full_path, video_length=video_length, sample_size=[target_h, target_w]
+                )
+
+                gt_video_for_concat = gt_video_for_concat.to(sample.device, dtype=sample.dtype)
+                control_video_for_concat = control_video_for_concat.to(sample.device, dtype=sample.dtype)
+                sample = sample.clamp(0, 1)
+
+                concat_video = torch.cat([gt_video_for_concat, control_video_for_concat, sample], dim=0)
+
                 os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
                 save_videos_grid(
-                    sample, 
+                    concat_video, 
                     os.path.join(
                         args.output_dir, 
-                        f"sample/sample-{global_step}-rank{accelerator.process_index}-image-{i}.mp4"
-                    )
+                        f"sample/sample-{global_step}-rank{accelerator.process_index}-idx{data_idx}.mp4"
+                    ),
+                    n_rows=3
                 )
+                logger.info(f"Saved validation sample {sample_idx+1}/{num_samples}: idx={data_idx}")
 
             del pipeline
             gc.collect()
@@ -244,10 +304,11 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
         if is_deepspeed:
             transformer3d.config = origin_config
     except Exception as e:
+        import traceback
+        logger.error(f"Validation error on rank {accelerator.process_index}: {e}\n{traceback.format_exc()}")
         gc.collect()
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
-        print(f"Eval error on rank {accelerator.process_index} with info {e}")
         vae.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
         transformer3d.to(accelerator.device, dtype=weight_dtype)
         if not args.enable_text_encoder_in_dataloader:
@@ -508,6 +569,18 @@ def parse_args():
         type=int,
         default=2000,
         help="Run validation every X steps.",
+    )
+    parser.add_argument(
+        "--validation_samples_per_gpu",
+        type=int,
+        default=2,
+        help="Number of validation samples per GPU.",
+    )
+    parser.add_argument(
+        "--validation_n_frames",
+        type=int,
+        default=21,
+        help="Number of frames for validation video.",
     )
     parser.add_argument(
         "--tracker_project_name",
@@ -1661,6 +1734,23 @@ def main():
     for epoch in range(first_epoch, args.num_train_epochs):
         train_loss = 0.0
         batch_sampler.sampler.generator = torch.Generator().manual_seed(args.seed + epoch)
+        
+        if epoch == first_epoch and global_step == 0:
+            logger.info("Running initial validation at step 0...")
+            log_validation(
+                vae,
+                text_encoder,
+                tokenizer,
+                transformer3d,
+                network,
+                args,
+                config,
+                accelerator,
+                weight_dtype,
+                global_step,
+                train_dataset,
+            )
+        
         for step, batch in enumerate(train_dataloader):
             # Data batch sanity check
             if epoch == first_epoch and step == 0:
@@ -2098,7 +2188,7 @@ def main():
                             accelerator.save_state(accelerator_save_path)
                             logger.info(f"Saved state to {accelerator_save_path}")
 
-                if args.validation_prompts is not None and global_step % args.validation_steps == 0:
+                if global_step % args.validation_steps == 0:
                     log_validation(
                         vae,
                         text_encoder,
@@ -2110,6 +2200,7 @@ def main():
                         accelerator,
                         weight_dtype,
                         global_step,
+                        train_dataset,
                     )
 
             logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
@@ -2118,18 +2209,19 @@ def main():
             if global_step >= args.max_train_steps:
                 break
 
-        if args.validation_prompts is not None and epoch % args.validation_epochs == 0:
+        if epoch % args.validation_epochs == 0:
             log_validation(
                 vae,
                 text_encoder,
                 tokenizer,
                 transformer3d,
                 network,
-                config,
                 args,
+                config,
                 accelerator,
                 weight_dtype,
                 global_step,
+                train_dataset,
             )
 
     # Create the pipeline using the trained modules and save it.

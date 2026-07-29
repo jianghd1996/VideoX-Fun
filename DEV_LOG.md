@@ -55,6 +55,25 @@ VideoX-Fun: Video generation & editing framework supporting multiple models:
 - Metadata: `/mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun-ori/datasets/dataset1+2.json`
 - Note: Metadata JSON lacks width/height fields, will be read from video files at runtime (slower)
 
+### 2026-07-29 (Session 3)
+- Changed to single GPU: `--gpu-ids 7 --num_processes=1`
+- Implemented new `log_validation` function:
+  - Randomly samples from training data (not from validation_prompts/paths)
+  - Extracts first/last frames from GT video as start/end images
+  - Uses control video as control signal
+  - Generates video using pipeline
+  - Saves 3-panel concat: GT | Control | Generated (n_rows=3)
+  - Supports multi-GPU: each card runs its own samples
+  - 2 samples per GPU per validation (configurable via `--validation_samples_per_gpu`)
+  - Validation runs at step 0 and every 500 steps
+  - Validation uses 21 frames to avoid OOM (configurable via `--validation_n_frames`)
+- Added new args:
+  - `--validation_samples_per_gpu`: Number of validation samples per GPU (default 2)
+  - `--validation_n_frames`: Number of frames for validation video (default 21)
+- Changed `checkpointing_steps` from 50 to 500
+- Changed `validation_steps` from 2000 to 500
+- Removed dependency on `--validation_prompts` and `--validation_paths` for validation
+
 ### 2026-07-29 (Session 1)
 - Initial setup: configured remote dev workflow
 - Created DEV_LOG.md
