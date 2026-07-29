@@ -21,7 +21,7 @@ accelerate launch --gpu-ids 6,7 --num_processes=2 --mixed_precision="bf16" --mai
   --checkpointing_steps=500 \
   --validation_steps=500 \
   --validation_samples_per_gpu=2 \
-  --validation_n_frames=21 \
+  --validation_n_frames=81 \
   --learning_rate=1e-04 \
   --seed=42 \
   --output_dir="output_dir_wan2.2_fun_control_lora" \

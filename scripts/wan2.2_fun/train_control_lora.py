@@ -240,7 +240,7 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 first_frame_rgb = cv2.cvtColor(first_frame, cv2.COLOR_BGR2RGB)
                 last_frame_rgb = cv2.cvtColor(last_frame, cv2.COLOR_BGR2RGB)
 
-                target_h = args.video_sample_size
+                target_h = 960  # 720P
                 target_w = int(target_h * gt_width / gt_height)
                 target_w = target_w - (target_w % 16)
 
@@ -265,7 +265,7 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     control_video   = input_video,
                     video           = inpaint_video,
                     mask_video      = inpaint_video_mask,
-                    num_inference_steps = 25,
+                    num_inference_steps = 8,
                     guidance_scale      = 4.5,
                     boundary            = config['transformer_additional_kwargs'].get('boundary', 0.900)
                 ).videos
