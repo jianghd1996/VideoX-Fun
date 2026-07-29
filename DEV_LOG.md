@@ -56,7 +56,7 @@ VideoX-Fun: Video generation & editing framework supporting multiple models:
 - Note: Metadata JSON lacks width/height fields, will be read from video files at runtime (slower)
 
 ### 2026-07-29 (Session 3)
-- Changed to single GPU: `--gpu-ids 7 --num_processes=1`
+- Changed to dual GPU: `--gpu-ids 6,7 --num_processes=2`
 - Implemented new `log_validation` function:
   - Randomly samples from training data (not from validation_prompts/paths)
   - Extracts first/last frames from GT video as start/end images
@@ -76,6 +76,11 @@ VideoX-Fun: Video generation & editing framework supporting multiple models:
 - Fixed bugs:
   - `torch.randperm` requires CPU generator, not CUDA generator - created separate `cpu_generator`
   - `get_image_to_video_latent` expects lists of images, not single Image objects - wrapped frames in lists
+  - Pipeline mask dimension mismatch for 5B model when latent spatial dims are odd - used `F.interpolate` instead of `::2` stride
+- Added temporal reversal augmentation:
+  - Training: 50% probability to reverse both GT and control videos along temporal axis
+  - Validation: 50% probability to reverse, with correct first/last frame alignment (swap frames when reversed)
+- Added logging for resolution and frame count during training data sampling
 
 ### 2026-07-29 (Session 1)
 - Initial setup: configured remote dev workflow
