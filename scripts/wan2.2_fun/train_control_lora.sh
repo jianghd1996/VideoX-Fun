@@ -3,7 +3,7 @@ export DATASET_NAME="/mnt/DataPart/jianghongda/dataset/livephoto"
 export DATASET_META_NAME="/mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun-ori/datasets/dataset1+2.json"
 NCCL_DEBUG=INFO
 
-accelerate launch --gpu-ids 7 --num_processes=1 --mixed_precision="bf16" --main_process_port=29501 scripts/wan2.2_fun/train_control_lora.py \
+CUDA_VISIBLE_DEVICES=7 accelerate launch --mixed_precision="bf16" --main_process_port=29501 scripts/wan2.2_fun/train_control_lora.py \
   --config_path="config/wan2.2/wan_civitai_5b.yaml" \
   --pretrained_model_name_or_path=$MODEL_NAME \
   --train_data_dir=$DATASET_NAME \
