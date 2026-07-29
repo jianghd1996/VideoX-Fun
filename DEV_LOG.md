@@ -56,7 +56,7 @@ VideoX-Fun: Video generation & editing framework supporting multiple models:
 - Note: Metadata JSON lacks width/height fields, will be read from video files at runtime (slower)
 
 ### 2026-07-29 (Session 3)
-- Changed to dual GPU: `--gpu-ids 6,7 --num_processes=2` (fix: single GPU with `--gpu-ids` caused accelerate error)
+- Changed to single GPU: `--gpu-ids 7 --num_processes=1`
 - Implemented new `log_validation` function:
   - Randomly samples from training data (not from validation_prompts/paths)
   - Extracts first/last frames from GT video as start/end images
@@ -73,6 +73,9 @@ VideoX-Fun: Video generation & editing framework supporting multiple models:
 - Changed `checkpointing_steps` from 50 to 500
 - Changed `validation_steps` from 2000 to 500
 - Removed dependency on `--validation_prompts` and `--validation_paths` for validation
+- Fixed bugs:
+  - `torch.randperm` requires CPU generator, not CUDA generator - created separate `cpu_generator`
+  - `get_image_to_video_latent` expects lists of images, not single Image objects - wrapped frames in lists
 
 ### 2026-07-29 (Session 1)
 - Initial setup: configured remote dev workflow
