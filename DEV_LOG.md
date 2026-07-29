@@ -62,7 +62,7 @@ VideoX-Fun: Video generation & editing framework supporting multiple models:
   - Extracts first/last frames from GT video as start/end images
   - Uses control video as control signal
   - Generates video using pipeline
-  - Saves 3-panel concat: GT | Control | Generated (n_rows=3)
+  - Saves 4-panel concat: GT | Control | Mask | Generated (n_rows=4)
   - Supports multi-GPU: each card runs its own samples
   - 2 samples per GPU per validation (configurable via `--validation_samples_per_gpu`)
   - Validation runs at step 0 and every 500 steps
@@ -85,6 +85,13 @@ VideoX-Fun: Video generation & editing framework supporting multiple models:
   - Training: 50% probability to reverse both GT and control videos along temporal axis
   - Validation: 50% probability to reverse, with correct first/last frame alignment (swap frames when reversed)
 - Added logging for resolution and frame count during training data sampling
+- **Mask-Aware Control Adapter** (v2.0):
+  - Added automatic mask extraction from control video in dataset (detects black regions where RGB < 20)
+  - Added `ControlMaskEncoder` module: small 3D conv (1ch → 64ch → latent_channels) that encodes mask and adds to control latents
+  - Mask encoder is trained fully (not with LoRA) with 10x learning rate
+  - Mask encoder parameters are saved with checkpoints (embedded in LoRA state dict with prefix `control_mask_encoder.`)
+  - Validation now shows 4-panel output: GT | Control Video | Mask | Generated
+  - This allows the model to learn to ignore invalid/black regions in 3D Gaussian rendered control videos
 
 ### 2026-07-29 (Session 1)
 - Initial setup: configured remote dev workflow

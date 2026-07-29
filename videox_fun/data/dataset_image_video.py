@@ -479,13 +479,23 @@ class ImageVideoControlDataset(Dataset):
                     # Release control video reader early
                     del control_video_reader
 
+                    # Extract mask from control video (detect black regions)
+                    # Black pixels: all RGB channels < threshold
+                    control_mask = (control_pixel_values.max(axis=-1) > 20).astype(np.float32)  # [F, H, W]
+                    control_mask = control_mask[..., np.newaxis]  # [F, H, W, 1]
+
                     # Convert to tensor and apply transforms
                     if not self.enable_bucket:
                         control_pixel_values = torch.from_numpy(control_pixel_values).permute(0, 3, 1, 2).contiguous()
                         control_pixel_values = control_pixel_values / 255.
                         control_pixel_values = self.video_transforms(control_pixel_values)
+                        
+                        control_mask = torch.from_numpy(control_mask).permute(0, 3, 1, 2).contiguous()  # [F, 1, H, W]
+                        # Apply same resize/crop as control video (no normalization for mask)
+                        control_mask = F.interpolate(control_mask, size=control_pixel_values.shape[-2:], mode='nearest')
                 else:
                     control_pixel_values = torch.zeros_like(pixel_values) if not self.enable_bucket else np.zeros_like(pixel_values)
+                    control_mask = torch.ones_like(control_pixel_values[:, :1]) if not self.enable_bucket else np.ones_like(control_pixel_values[:, :, :, :1])
                 control_camera_values = None
             
             # Temporal reversal augmentation
@@ -498,6 +508,10 @@ class ImageVideoControlDataset(Dataset):
                     control_pixel_values = control_pixel_values[::-1].copy()
                 elif isinstance(control_pixel_values, torch.Tensor):
                     control_pixel_values = control_pixel_values.flip(0).contiguous()
+                if isinstance(control_mask, np.ndarray):
+                    control_mask = control_mask[::-1].copy()
+                elif isinstance(control_mask, torch.Tensor):
+                    control_mask = control_mask.flip(0).contiguous()
             
             # Load subject reference images (for subject-driven generation)
             if self.enable_subject_info:
@@ -523,7 +537,7 @@ class ImageVideoControlDataset(Dataset):
             else:
                 subject_image = None
 
-            return pixel_values, control_pixel_values, subject_image, control_camera_values, text, "video"
+            return pixel_values, control_pixel_values, control_mask, subject_image, control_camera_values, text, "video"
         else:
             # Load and preprocess image
             image_path, text = data_info['file_path'], data_info['text']
@@ -593,10 +607,11 @@ class ImageVideoControlDataset(Dataset):
                 if data_type_local != data_type:
                     raise ValueError("data_type_local != data_type")
 
-                pixel_values, control_pixel_values, subject_image, control_camera_values, name, data_type = self.get_batch(idx)
+                pixel_values, control_pixel_values, control_mask, subject_image, control_camera_values, name, data_type = self.get_batch(idx)
 
                 sample["pixel_values"] = pixel_values
                 sample["control_pixel_values"] = control_pixel_values
+                sample["control_mask"] = control_mask
                 sample["subject_image"] = subject_image
                 sample["text"] = name
                 sample["data_type"] = data_type

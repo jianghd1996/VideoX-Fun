@@ -142,12 +142,39 @@ def resize_mask(mask, latent, process_first_frame_only=True):
         )
     return resized_mask
 
+
+class ControlMaskEncoder(torch.nn.Module):
+    """Small 3D conv module that encodes control mask and adds it to control latents.
+    
+    The mask indicates valid (1) vs invalid/black (0) regions in the control video.
+    This encoder maps the 1-channel mask to the same channel dimension as control latents,
+    allowing the model to learn to ignore invalid control regions.
+    """
+    def __init__(self, in_channels=1, out_channels=16, mid_channels=64):
+        super().__init__()
+        self.encoder = torch.nn.Sequential(
+            torch.nn.Conv3d(in_channels, mid_channels, kernel_size=3, padding=1),
+            torch.nn.SiLU(),
+            torch.nn.Conv3d(mid_channels, out_channels, kernel_size=3, padding=1),
+        )
+    
+    def forward(self, mask_latents):
+        """
+        Args:
+            mask_latents: [B, 1, T, H, W] binary mask in latent space
+        
+        Returns:
+            mask_features: [B, out_channels, T, H, W] features to add to control latents
+        """
+        return self.encoder(mask_latents)
+
+
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.18.0.dev0")
 
 logger = get_logger(__name__, log_level="INFO")
 
-def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, config, accelerator, weight_dtype, global_step, train_dataset):
+def log_validation(vae, text_encoder, tokenizer, transformer3d, control_mask_encoder, network, args, config, accelerator, weight_dtype, global_step, train_dataset):
     import cv2
     try:
         is_deepspeed = type(transformer3d).__name__ == 'DeepSpeedEngine'
@@ -310,16 +337,27 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     control_video_full_path, video_length=video_length, sample_size=[target_h, target_w]
                 )
 
+                # Extract mask from control video (detect black regions)
+                # control_video_for_concat is [1, C, F, H, W] in range [0, 1]
+                control_video_np = (control_video_for_concat[0].permute(1, 2, 3, 0).cpu().numpy() * 255).astype(np.uint8)  # [F, H, W, C]
+                control_mask_np = (control_video_np.max(axis=-1) > 20).astype(np.float32)  # [F, H, W]
+                control_mask_video = torch.from_numpy(control_mask_np).unsqueeze(0).unsqueeze(0).float()  # [1, 1, F, H, W]
+                # Expand to 3 channels for visualization
+                control_mask_video_3ch = control_mask_video.expand(-1, 3, -1, -1, -1)  # [1, 3, F, H, W]
+
                 # Reverse GT and control videos for concat if needed
                 if do_reverse:
                     gt_video_for_concat = torch.flip(gt_video_for_concat, [2])
                     control_video_for_concat = torch.flip(control_video_for_concat, [2])
+                    control_mask_video_3ch = torch.flip(control_mask_video_3ch, [2])
 
                 gt_video_for_concat = gt_video_for_concat.to(sample.device, dtype=sample.dtype)
                 control_video_for_concat = control_video_for_concat.to(sample.device, dtype=sample.dtype)
+                control_mask_video_3ch = control_mask_video_3ch.to(sample.device, dtype=sample.dtype)
                 sample = sample.clamp(0, 1)
 
-                concat_video = torch.cat([gt_video_for_concat, control_video_for_concat, sample], dim=0)
+                # 4-panel concat: GT | Control | Mask | Generated
+                concat_video = torch.cat([gt_video_for_concat, control_video_for_concat, control_mask_video_3ch, sample], dim=0)
 
                 os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
                 save_videos_grid(
@@ -328,7 +366,7 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                         args.output_dir, 
                         f"sample/sample-{global_step}-rank{accelerator.process_index}-idx{data_idx}.mp4"
                     ),
-                    n_rows=3
+                    n_rows=4
                 )
                 
                 sampled_count += 1
@@ -1028,6 +1066,13 @@ def main():
         transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs']),
     ).to(weight_dtype)
 
+    # Initialize ControlMaskEncoder for mask-aware control
+    control_mask_encoder = ControlMaskEncoder(
+        in_channels=1, 
+        out_channels=vae.config.latent_channels, 
+        mid_channels=64
+    ).to(accelerator.device, dtype=weight_dtype)
+
     # Freeze vae and text_encoder and set transformer3d to trainable
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
@@ -1192,9 +1237,14 @@ def main():
         trainable_params = list(filter(lambda p: p.requires_grad, network.parameters()))
         trainable_params_optim = network.prepare_optimizer_params(args.learning_rate / 2, args.learning_rate, args.learning_rate)
 
+    # Add control_mask_encoder parameters (trained fully, not with LoRA)
+    mask_encoder_params = list(control_mask_encoder.parameters())
+    trainable_params.extend(mask_encoder_params)
+    logging.info(f"Added {len(mask_encoder_params)} control_mask_encoder parameters")
+
     if args.use_came:
         optimizer = optimizer_cls(
-            trainable_params_optim,
+            [{'params': trainable_params_optim}, {'params': mask_encoder_params, 'lr': args.learning_rate * 10}],
             lr=args.learning_rate,
             # weight_decay=args.adam_weight_decay,
             betas=(0.9, 0.999, 0.9999), 
@@ -1202,7 +1252,7 @@ def main():
         )
     else:
         optimizer = optimizer_cls(
-            trainable_params_optim,
+            [{'params': trainable_params_optim}, {'params': mask_encoder_params, 'lr': args.learning_rate * 10}],
             lr=args.learning_rate,
             betas=(args.adam_beta1, args.adam_beta2),
             weight_decay=args.adam_weight_decay,
@@ -1306,6 +1356,7 @@ def main():
             new_examples["text"]         = []
             # Used in Control Mode
             new_examples["control_pixel_values"] = []
+            new_examples["control_mask"] = []
             # Used in Control Ref Mode
             if args.train_mode != "control":
                 new_examples["ref_pixel_values"] = []
@@ -1410,6 +1461,15 @@ def main():
 
                 control_pixel_values = torch.from_numpy(example["control_pixel_values"]).permute(0, 3, 1, 2).contiguous()
                 control_pixel_values = control_pixel_values / 255.
+                
+                # Control mask: [F, 1, H, W] -> already processed in dataset
+                control_mask = example.get("control_mask", None)
+                if control_mask is not None:
+                    if isinstance(control_mask, np.ndarray):
+                        control_mask = torch.from_numpy(control_mask).permute(0, 3, 1, 2).contiguous()  # [F, 1, H, W]
+                    elif isinstance(control_mask, torch.Tensor) and control_mask.dim() == 4:
+                        # Already [F, 1, H, W]
+                        pass
 
                 if args.fix_sample_size is not None:
                     # Get adapt hw for resize
@@ -1466,6 +1526,17 @@ def main():
 
                 new_examples["pixel_values"].append(transform(pixel_values)[:batch_video_length])
                 new_examples["control_pixel_values"].append(transform(control_pixel_values))
+                
+                # Process and append control mask
+                if control_mask is not None:
+                    # Resize mask to match control_pixel_values size (no normalization)
+                    target_h, target_w = new_examples["control_pixel_values"][-1].shape[-2:]
+                    control_mask_resized = F.interpolate(control_mask.unsqueeze(0).float(), size=(control_mask.shape[-2], target_h, target_w), mode='nearest').squeeze(0)
+                    new_examples["control_mask"].append(control_mask_resized[:batch_video_length])
+                else:
+                    # Default: all ones (no mask)
+                    mask_shape = (control_pixel_values.shape[0], 1, control_pixel_values.shape[2], control_pixel_values.shape[3])
+                    new_examples["control_mask"].append(torch.ones(mask_shape))
             
                 if args.train_mode == "control_camera_ref":
                     control_camera_values = example.get("control_camera_values", None)
@@ -1519,6 +1590,7 @@ def main():
             # Limit the number of frames to the same
             new_examples["pixel_values"] = torch.stack([example for example in new_examples["pixel_values"]])
             new_examples["control_pixel_values"] = torch.stack([example[:batch_video_length] for example in new_examples["control_pixel_values"]])
+            new_examples["control_mask"] = torch.stack([example[:batch_video_length] for example in new_examples["control_mask"]])
             if args.train_mode != "control":
                 new_examples["ref_pixel_values"] = torch.stack([example for example in new_examples["ref_pixel_values"]])
                 new_examples["clip_pixel_values"] = torch.stack([example for example in new_examples["clip_pixel_values"]])
@@ -1584,14 +1656,14 @@ def main():
 
     # Prepare everything with our `accelerator`.
     if args.use_peft_lora:
-        transformer3d, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-            transformer3d, optimizer, train_dataloader, lr_scheduler
+        transformer3d, control_mask_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            transformer3d, control_mask_encoder, optimizer, train_dataloader, lr_scheduler
         )
     else:
         transformer3d.network = network
         transformer3d = transformer3d.to(dtype=weight_dtype)
-        transformer3d, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-            transformer3d, optimizer, train_dataloader, lr_scheduler
+        transformer3d, control_mask_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            transformer3d, control_mask_encoder, optimizer, train_dataloader, lr_scheduler
         )
 
     if fsdp_stage != 0 or zero_stage != 0:
@@ -1604,6 +1676,7 @@ def main():
     # Move text_encode and vae to gpu and cast to weight_dtype
     vae.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
     transformer3d.to(accelerator.device, dtype=weight_dtype)
+    control_mask_encoder.to(accelerator.device, dtype=weight_dtype)
     if not args.enable_text_encoder_in_dataloader:
         text_encoder.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
 
@@ -1786,6 +1859,7 @@ def main():
                 text_encoder,
                 tokenizer,
                 transformer3d,
+                control_mask_encoder,
                 network,
                 args,
                 config,
@@ -2141,6 +2215,21 @@ def main():
                     else:
                         timesteps = mask_conditions.new_ones(mask_conditions_bs, seq_len) * timesteps[:, None,]
 
+                # Apply control mask encoder (with gradients for training)
+                if args.train_mode != "control_camera_ref":
+                    control_mask = batch["control_mask"].to(accelerator.device, dtype=weight_dtype)  # [B, F, 1, H, W]
+                    control_mask = rearrange(control_mask, "b f c h w -> b c f h w")  # [B, 1, F, H, W]
+                    # Downsample mask to latent resolution
+                    control_mask_latents = F.interpolate(
+                        control_mask, 
+                        size=(latents.shape[2], latents.shape[3], latents.shape[4]), 
+                        mode='trilinear', 
+                        align_corners=False
+                    )
+                    # Encode mask and add to control_latents
+                    mask_features = control_mask_encoder(control_mask_latents)
+                    control_latents = control_latents + mask_features
+
                 # Predict the noise residual
                 with torch.cuda.amp.autocast(dtype=weight_dtype), torch.cuda.device(device=accelerator.device):
                     noise_pred = transformer3d(
@@ -2222,6 +2311,10 @@ def main():
                             if args.use_peft_lora:
                                 safetensor_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}.safetensors")
                                 network_state_dict = get_peft_model_state_dict(accelerator.unwrap_model(transformer3d))
+                                # Add mask encoder state dict
+                                mask_encoder_state_dict = accelerator.unwrap_model(control_mask_encoder).state_dict()
+                                for k, v in mask_encoder_state_dict.items():
+                                    network_state_dict[f"control_mask_encoder.{k}"] = v
                                 save_model(safetensor_save_path, network_state_dict)
 
                                 safetensor_kohya_format_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}-compatible_with_comfyui.safetensors")
@@ -2230,11 +2323,20 @@ def main():
                                 logger.info(f"Saved safetensor to {safetensor_save_path}")
                             else:
                                 safetensor_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}.safetensors")
-                                save_model(safetensor_save_path, accelerator.unwrap_model(network))
+                                network_state_dict = accelerator.unwrap_model(network).state_dict()
+                                # Add mask encoder state dict
+                                mask_encoder_state_dict = accelerator.unwrap_model(control_mask_encoder).state_dict()
+                                for k, v in mask_encoder_state_dict.items():
+                                    network_state_dict[f"control_mask_encoder.{k}"] = v
+                                save_model(safetensor_save_path, network_state_dict)
                                 logger.info(f"Saved safetensor to {safetensor_save_path}")
                         else:
                             accelerator_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
                             accelerator.save_state(accelerator_save_path)
+                            # Also save mask encoder
+                            if accelerator.is_main_process:
+                                mask_encoder_save_path = os.path.join(accelerator_save_path, "control_mask_encoder.safetensors")
+                                save_model(mask_encoder_save_path, accelerator.unwrap_model(control_mask_encoder).state_dict())
                             logger.info(f"Saved state to {accelerator_save_path}")
 
                 if global_step % args.validation_steps == 0:
@@ -2243,6 +2345,7 @@ def main():
                         text_encoder,
                         tokenizer,
                         transformer3d,
+                        control_mask_encoder,
                         network,
                         args,
                         config,
@@ -2264,6 +2367,7 @@ def main():
                 text_encoder,
                 tokenizer,
                 transformer3d,
+                control_mask_encoder,
                 network,
                 args,
                 config,
@@ -2283,6 +2387,10 @@ def main():
             if args.use_peft_lora:
                 safetensor_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}.safetensors")
                 network_state_dict = get_peft_model_state_dict(accelerator.unwrap_model(transformer3d))
+                # Add mask encoder state dict
+                mask_encoder_state_dict = accelerator.unwrap_model(control_mask_encoder).state_dict()
+                for k, v in mask_encoder_state_dict.items():
+                    network_state_dict[f"control_mask_encoder.{k}"] = v
                 save_model(safetensor_save_path, network_state_dict)
 
                 safetensor_kohya_format_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}-compatible_with_comfyui.safetensors")
@@ -2291,11 +2399,20 @@ def main():
                 logger.info(f"Saved safetensor to {safetensor_save_path}")
             else:
                 safetensor_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}.safetensors")
-                save_model(safetensor_save_path, accelerator.unwrap_model(network))
+                network_state_dict = accelerator.unwrap_model(network).state_dict()
+                # Add mask encoder state dict
+                mask_encoder_state_dict = accelerator.unwrap_model(control_mask_encoder).state_dict()
+                for k, v in mask_encoder_state_dict.items():
+                    network_state_dict[f"control_mask_encoder.{k}"] = v
+                save_model(safetensor_save_path, network_state_dict)
                 logger.info(f"Saved safetensor to {safetensor_save_path}")
         else:
             accelerator_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
             accelerator.save_state(accelerator_save_path)
+            # Also save mask encoder
+            if accelerator.is_main_process:
+                mask_encoder_save_path = os.path.join(accelerator_save_path, "control_mask_encoder.safetensors")
+                save_model(mask_encoder_save_path, accelerator.unwrap_model(control_mask_encoder).state_dict())
             logger.info(f"Saved state to {accelerator_save_path}")
 
     accelerator.end_training()
