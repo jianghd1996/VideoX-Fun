@@ -80,6 +80,7 @@ VideoX-Fun: Video generation & editing framework supporting multiple models:
   - **F variable shadowing**: Renamed `F` to `num_frames` in sanity check logging to avoid shadowing `torch.nn.functional` (caused AttributeError at line 2009)
   - **Tokenizers fork warning**: Set `TOKENIZERS_PARALLELISM=false` in shell script
   - **Aspect ratio mismatch**: GT and control videos may have different aspect ratios. Using GT aspect ratio for `target_w` caused latent shape mismatch (33 vs 32) in the denoising loop. Fixed by reading control video dimensions to compute `target_w`, ensuring both control_video and inpaint_video use the same spatial dimensions.
+  - **Validation sampling count**: Only got 3 samples instead of 4 (2 GPUs × 2 samples). Fixed by replacing for-loop with while-loop and retry mechanism - ensures each GPU generates exactly `validation_samples_per_gpu` valid samples by retrying when file not found or frame read fails
 - Added temporal reversal augmentation:
   - Training: 50% probability to reverse both GT and control videos along temporal axis
   - Validation: 50% probability to reverse, with correct first/last frame alignment (swap frames when reversed)
