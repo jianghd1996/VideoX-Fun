@@ -250,8 +250,14 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 else:
                     logger.info(f"Validation sample {sample_idx+1}/{num_samples}: idx={data_idx}, temporal normal")
 
+                # Read control video dimensions to compute target_w (ensures control and inpaint latent shapes match)
+                ctrl_cap = cv2.VideoCapture(control_video_full_path)
+                ctrl_width = int(ctrl_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                ctrl_height = int(ctrl_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                ctrl_cap.release()
+
                 target_h = 960  # 720P
-                target_w = int(target_h * gt_width / gt_height)
+                target_w = int(target_h * ctrl_width / ctrl_height)
                 target_w = target_w - (target_w % 16)
 
                 first_frame_pil = Image.fromarray(first_frame_rgb).resize((target_w, target_h))
