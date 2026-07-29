@@ -1781,8 +1781,8 @@ def main():
                 control_pixel_values = rearrange(control_pixel_values, "b f c h w -> b c f h w")
                 
                 # Log resolution and frame count
-                B, C, F, H, W = pixel_values.shape
-                logger.info(f"Training data sample - Resolution: {W}x{H}, Frames: {F}, Batch size: {B}")
+                B, C, num_frames, H, W = pixel_values.shape
+                logger.info(f"Training data sample - Resolution: {W}x{H}, Frames: {num_frames}, Batch size: {B}")
                 
                 os.makedirs(os.path.join(args.output_dir, "sanity_check"), exist_ok=True)
                 for idx, (pixel_value, control_pixel_value, text) in enumerate(zip(pixel_values, control_pixel_values, texts)):

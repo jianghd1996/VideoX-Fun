@@ -1,6 +1,7 @@
 export MODEL_NAME="/mnt/DataPart/jianghongda/VideoX-Fun/models/Diffusion_Transformer/Wan2.2-Fun-5B-Control"
 export DATASET_NAME="/mnt/DataPart/jianghongda/dataset/livephoto"
 export DATASET_META_NAME="/mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun-ori/datasets/dataset1+2.json"
+export TOKENIZERS_PARALLELISM=false
 NCCL_DEBUG=INFO
 
 accelerate launch --gpu-ids 6,7 --num_processes=2 --mixed_precision="bf16" --main_process_port=29501 scripts/wan2.2_fun/train_control_lora.py \
