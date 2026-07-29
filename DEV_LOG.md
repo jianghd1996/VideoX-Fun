@@ -56,7 +56,7 @@ VideoX-Fun: Video generation & editing framework supporting multiple models:
 - Note: Metadata JSON lacks width/height fields, will be read from video files at runtime (slower)
 
 ### 2026-07-29 (Session 3)
-- Changed to single GPU: `CUDA_VISIBLE_DEVICES=7` (fix: `--gpu-ids 7 --num_processes=1` caused accelerate error)
+- Changed to dual GPU: `--gpu-ids 6,7 --num_processes=2` (fix: single GPU with `--gpu-ids` caused accelerate error)
 - Implemented new `log_validation` function:
   - Randomly samples from training data (not from validation_prompts/paths)
   - Extracts first/last frames from GT video as start/end images
