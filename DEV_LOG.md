@@ -66,10 +66,10 @@ VideoX-Fun: Video generation & editing framework supporting multiple models:
   - Supports multi-GPU: each card runs its own samples
   - 2 samples per GPU per validation (configurable via `--validation_samples_per_gpu`)
   - Validation runs at step 0 and every 500 steps
-  - Validation uses 21 frames to avoid OOM (configurable via `--validation_n_frames`)
+  - Validation uses 81 frames at 720P resolution (960) with 8 inference steps
 - Added new args:
   - `--validation_samples_per_gpu`: Number of validation samples per GPU (default 2)
-  - `--validation_n_frames`: Number of frames for validation video (default 21)
+  - `--validation_n_frames`: Number of frames for validation video (default 81)
 - Changed `checkpointing_steps` from 50 to 500
 - Changed `validation_steps` from 2000 to 500
 - Removed dependency on `--validation_prompts` and `--validation_paths` for validation
