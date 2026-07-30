@@ -337,10 +337,16 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, control_mask_enc
                     control_video_full_path, video_length=video_length, sample_size=[target_h, target_w]
                 )
 
-                # Extract mask from control video (detect black regions)
-                # control_video_for_concat is [1, C, F, H, W] in range [0, 1]
+                # Extract GT-aware mask from control video
+                # control_video_for_concat and gt_video_for_concat are [1, C, F, H, W] in range [0, 1]
                 control_video_np = (control_video_for_concat[0].permute(1, 2, 3, 0).cpu().numpy() * 255).astype(np.uint8)  # [F, H, W, C]
-                control_mask_np = (control_video_np.max(axis=-1) > 20).astype(np.float32)  # [F, H, W]
+                gt_video_np = (gt_video_for_concat[0].permute(1, 2, 3, 0).cpu().numpy() * 255).astype(np.uint8)  # [F, H, W, C]
+                
+                # Mask = (control black) AND (GT not black) = background hole
+                control_black = control_video_np.max(axis=-1) < 20  # [F, H, W] bool
+                gt_black = gt_video_np.max(axis=-1) < 20  # [F, H, W] bool
+                control_mask_np = (control_black & ~gt_black).astype(np.float32)  # [F, H, W]
+                
                 control_mask_video = torch.from_numpy(control_mask_np).unsqueeze(0).unsqueeze(0).float()  # [1, 1, F, H, W]
                 # Expand to 3 channels for visualization
                 control_mask_video_3ch = control_mask_video.expand(-1, 3, -1, -1, -1)  # [1, 3, F, H, W]
