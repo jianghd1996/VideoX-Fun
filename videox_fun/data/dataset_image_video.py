@@ -480,9 +480,8 @@ class ImageVideoControlDataset(Dataset):
                     del control_video_reader
 
                     # Extract mask from control video (detect black regions)
-                    # Black pixels: all RGB channels < threshold
-                    control_mask = (control_pixel_values.max(axis=-1) > 20).astype(np.float32)  # [F, H, W]
-                    control_mask = control_mask[..., np.newaxis]  # [F, H, W, 1]
+                    # Use uint8 to save memory (0=invalid, 1=valid)
+                    control_mask = (control_pixel_values.max(axis=-1) > 20).astype(np.uint8)  # [F, H, W]
 
                     # Convert to tensor and apply transforms
                     if not self.enable_bucket:
@@ -490,12 +489,17 @@ class ImageVideoControlDataset(Dataset):
                         control_pixel_values = control_pixel_values / 255.
                         control_pixel_values = self.video_transforms(control_pixel_values)
                         
-                        control_mask = torch.from_numpy(control_mask).permute(0, 3, 1, 2).contiguous()  # [F, 1, H, W]
-                        # Apply same resize/crop as control video (no normalization for mask)
-                        control_mask = F.interpolate(control_mask, size=control_pixel_values.shape[-2:], mode='nearest')
+                        # control_mask is [F, H, W] uint8, convert to [F, 1, H, W] float
+                        control_mask = torch.from_numpy(control_mask).unsqueeze(1).float()  # [F, 1, H, W]
+                        # Resize mask to match control_pixel_values size
+                        control_mask = F.interpolate(control_mask.unsqueeze(0), size=control_pixel_values.shape[-2:], mode='nearest').squeeze(0)
                 else:
                     control_pixel_values = torch.zeros_like(pixel_values) if not self.enable_bucket else np.zeros_like(pixel_values)
-                    control_mask = torch.ones_like(control_pixel_values[:, :1]) if not self.enable_bucket else np.ones_like(control_pixel_values[:, :, :, :1])
+                    # Default mask: all ones (valid everywhere)
+                    if not self.enable_bucket:
+                        control_mask = torch.ones(pixel_values.shape[0], 1, pixel_values.shape[2], pixel_values.shape[3])
+                    else:
+                        control_mask = np.ones((pixel_values.shape[0], pixel_values.shape[1], pixel_values.shape[2]), dtype=np.uint8)
                 control_camera_values = None
             
             # Temporal reversal augmentation

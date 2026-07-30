@@ -17,7 +17,7 @@ accelerate launch --gpu-ids 6,7 --num_processes=2 --mixed_precision="bf16" --mai
   --train_batch_size=1 \
   --video_repeat=1 \
   --gradient_accumulation_steps=1 \
-  --dataloader_num_workers=8 \
+  --dataloader_num_workers=4 \
   --num_train_epochs=100 \
   --checkpointing_steps=500 \
   --validation_steps=500 \

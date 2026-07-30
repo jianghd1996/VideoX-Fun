@@ -1529,10 +1529,12 @@ def main():
                 
                 # Process and append control mask
                 if control_mask is not None:
-                    # Resize mask to match control_pixel_values size (no normalization)
-                    target_h, target_w = new_examples["control_pixel_values"][-1].shape[-2:]
-                    control_mask_resized = F.interpolate(control_mask.unsqueeze(0).float(), size=(control_mask.shape[-2], target_h, target_w), mode='nearest').squeeze(0)
-                    new_examples["control_mask"].append(control_mask_resized[:batch_video_length])
+                    # control_mask is [F, H, W] uint8, convert to [F, 1, H, W] float
+                    if isinstance(control_mask, np.ndarray):
+                        control_mask = torch.from_numpy(control_mask).unsqueeze(1).float()  # [F, 1, H, W]
+                    elif isinstance(control_mask, torch.Tensor) and control_mask.dim() == 3:
+                        control_mask = control_mask.unsqueeze(1).float()  # [F, 1, H, W]
+                    new_examples["control_mask"].append(control_mask[:batch_video_length])
                 else:
                     # Default: all ones (no mask)
                     mask_shape = (control_pixel_values.shape[0], 1, control_pixel_values.shape[2], control_pixel_values.shape[3])
