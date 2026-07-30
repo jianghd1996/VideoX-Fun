@@ -485,9 +485,18 @@ class ImageVideoControlDataset(Dataset):
 
                     # Extract mask: control black AND GT not black = background hole
                     # control black AND GT black = foreground (don't mask)
-                    control_black = control_pixel_values.max(axis=-1) < 20  # [F, H, W] bool
-                    gt_black = pixel_values.max(axis=-1) < 20  # [F, H, W] bool (numpy)
-                    control_mask = (control_black & ~gt_black).astype(np.uint8)  # [F, H, W] uint8
+                    # GT and control may have different spatial dims, so compute separately
+                    control_black = control_pixel_values.max(axis=-1) < 20  # [F, Hc, Wc] bool
+                    gt_black = pixel_values.max(axis=-1) < 20  # [F, Hg, Wg] bool (numpy)
+                    
+                    # Convert to tensors and resize GT mask to control's spatial dims
+                    control_black_t = torch.from_numpy(control_black.astype(np.uint8)).unsqueeze(1).float()  # [F, 1, Hc, Wc]
+                    gt_black_t = torch.from_numpy(gt_black.astype(np.uint8)).unsqueeze(1).float()  # [F, 1, Hg, Wg]
+                    # Resize GT mask to match control resolution
+                    gt_black_t = F.interpolate(gt_black_t, size=control_black_t.shape[-2:], mode='nearest')
+                    # Background hole = control is black AND GT is not black
+                    control_mask_t = (control_black_t * (1 - gt_black_t)).to(torch.uint8)  # [F, 1, Hc, Wc]
+                    control_mask = control_mask_t.squeeze(1)  # [F, Hc, Wc] uint8
 
                     # Convert to tensor and apply transforms
                     if not self.enable_bucket:
@@ -495,9 +504,9 @@ class ImageVideoControlDataset(Dataset):
                         control_pixel_values = control_pixel_values / 255.
                         control_pixel_values = self.video_transforms(control_pixel_values)
                         
-                        # control_mask is [F, H, W] uint8, convert to [F, 1, H, W] float
-                        control_mask = torch.from_numpy(control_mask).unsqueeze(1).float()  # [F, 1, H, W]
-                        # Resize mask to match control_pixel_values size
+                        # control_mask is [F, Hc, Wc] uint8, convert to [F, 1, Hc, Wc] float
+                        control_mask = control_mask.float().unsqueeze(1)  # [F, 1, Hc, Wc]
+                        # Resize mask to match control_pixel_values size after transform
                         control_mask = F.interpolate(control_mask.unsqueeze(0), size=control_pixel_values.shape[-2:], mode='nearest').squeeze(0)
                     else:
                         # Bucket case: keep mask as numpy, will be converted in collate_fn
