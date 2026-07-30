@@ -92,6 +92,14 @@ VideoX-Fun: Video generation & editing framework supporting multiple models:
   - Mask encoder parameters are saved with checkpoints (embedded in LoRA state dict with prefix `control_mask_encoder.`)
   - Validation now shows 4-panel output: GT | Control Video | Mask | Generated
   - This allows the model to learn to ignore invalid/black regions in 3D Gaussian rendered control videos
+- **GT-Aware Mask Extraction** (v2.1):
+  - Improved mask extraction to distinguish foreground black objects from background holes
+  - Training: mask = (control black AND GT not black) = background hole only
+  - If both control and GT are black at same position → foreground object (not masked)
+  - Prevents masking naturally black foreground objects (black clothes, hair, etc.)
+  - Validation: uses same GT-aware logic for mask visualization
+  - At inference time: use control video black regions as mask (model learned to handle this)
+  - Fixed DataLoader worker OOM by reducing `dataloader_num_workers` from 8 to 4 and using uint8 for mask storage
 
 ### 2026-07-29 (Session 1)
 - Initial setup: configured remote dev workflow
