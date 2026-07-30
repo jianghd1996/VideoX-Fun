@@ -417,6 +417,10 @@ class ImageVideoControlDataset(Dataset):
             # Release video reader early to free file handles and decode buffers
             del video_reader
 
+            # Extract mask from control video using GT comparison
+            # This will be refined after control video is loaded
+            control_mask = None
+
             # Convert to tensor, normalize to [-1, 1], apply transforms
             if not self.enable_bucket:
                 pixel_values = torch.from_numpy(pixel_values).permute(0, 3, 1, 2).contiguous()
@@ -479,9 +483,11 @@ class ImageVideoControlDataset(Dataset):
                     # Release control video reader early
                     del control_video_reader
 
-                    # Extract mask from control video (detect black regions)
-                    # Use uint8 to save memory (0=invalid, 1=valid)
-                    control_mask = (control_pixel_values.max(axis=-1) > 20).astype(np.uint8)  # [F, H, W]
+                    # Extract mask: control black AND GT not black = background hole
+                    # control black AND GT black = foreground (don't mask)
+                    control_black = control_pixel_values.max(axis=-1) < 20  # [F, H, W] bool
+                    gt_black = pixel_values.max(axis=-1) < 20  # [F, H, W] bool (numpy)
+                    control_mask = (control_black & ~gt_black).astype(np.uint8)  # [F, H, W] uint8
 
                     # Convert to tensor and apply transforms
                     if not self.enable_bucket:
@@ -493,6 +499,9 @@ class ImageVideoControlDataset(Dataset):
                         control_mask = torch.from_numpy(control_mask).unsqueeze(1).float()  # [F, 1, H, W]
                         # Resize mask to match control_pixel_values size
                         control_mask = F.interpolate(control_mask.unsqueeze(0), size=control_pixel_values.shape[-2:], mode='nearest').squeeze(0)
+                    else:
+                        # Bucket case: keep mask as numpy, will be converted in collate_fn
+                        pass
                 else:
                     control_pixel_values = torch.zeros_like(pixel_values) if not self.enable_bucket else np.zeros_like(pixel_values)
                     # Default mask: all ones (valid everywhere)
