@@ -2044,6 +2044,21 @@ def main():
 
                     if args.train_mode != "control_camera_ref":
                         control_latents = _batch_encode_vae(control_pixel_values)
+                        
+                        # Apply control mask encoder BEFORE concatenation (control_latents has vae.latent_channels here)
+                        control_mask = batch["control_mask"].to(accelerator.device, dtype=weight_dtype)  # [B, F, 1, H, W]
+                        control_mask = rearrange(control_mask, "b f c h w -> b c f h w")  # [B, 1, F, H, W]
+                        # Downsample mask to latent resolution
+                        control_mask_latents = F.interpolate(
+                            control_mask, 
+                            size=(control_latents.shape[2], control_latents.shape[3], control_latents.shape[4]), 
+                            mode='trilinear', 
+                            align_corners=False
+                        )
+                        # Encode mask and add to control_latents (both have vae.latent_channels)
+                        mask_features = control_mask_encoder(control_mask_latents)
+                        control_latents = control_latents + mask_features
+                        
                         # Make control latents to zero
                         for bs_index in range(control_latents.size()[0]):
                             if rng is None:
@@ -2222,21 +2237,6 @@ def main():
                         timesteps = torch.cat([temp_ts, temp_ts.new_ones(mask_conditions_bs, seq_len - temp_ts.size(1)) * timesteps[:, None,]], dim = 1)
                     else:
                         timesteps = mask_conditions.new_ones(mask_conditions_bs, seq_len) * timesteps[:, None,]
-
-                # Apply control mask encoder (with gradients for training)
-                if args.train_mode != "control_camera_ref":
-                    control_mask = batch["control_mask"].to(accelerator.device, dtype=weight_dtype)  # [B, F, 1, H, W]
-                    control_mask = rearrange(control_mask, "b f c h w -> b c f h w")  # [B, 1, F, H, W]
-                    # Downsample mask to latent resolution
-                    control_mask_latents = F.interpolate(
-                        control_mask, 
-                        size=(latents.shape[2], latents.shape[3], latents.shape[4]), 
-                        mode='trilinear', 
-                        align_corners=False
-                    )
-                    # Encode mask and add to control_latents
-                    mask_features = control_mask_encoder(control_mask_latents)
-                    control_latents = control_latents + mask_features
 
                 # Predict the noise residual
                 with torch.cuda.amp.autocast(dtype=weight_dtype), torch.cuda.device(device=accelerator.device):
