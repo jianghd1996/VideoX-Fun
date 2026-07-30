@@ -74,8 +74,7 @@ from videox_fun.models import (AutoencoderKLWan, AutoencoderKLWan3_8,
                                WanT5EncoderModel)
 from videox_fun.pipeline import Wan2_2FunControlPipeline
 from videox_fun.utils.discrete_sampler import DiscreteSampling
-from videox_fun.utils.lora_utils import (convert_peft_lora_to_kohya_lora,
-                                         create_network, merge_lora,
+from videox_fun.utils.lora_utils import (create_network, merge_lora,
                                          unmerge_lora)
 from videox_fun.utils.utils import (calculate_dimensions, get_image_latent,
                                     get_image_to_video_latent,
@@ -218,10 +217,11 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, control_mask_enc
             )
             pipeline = pipeline.to(accelerator.device)
 
-            rank_seed = (args.seed or 42) + accelerator.process_index
+            # Use global_step to make seed different for each validation
+            rank_seed = (args.seed or 42) + accelerator.process_index + global_step
             generator = torch.Generator(device=accelerator.device).manual_seed(rank_seed)
             cpu_generator = torch.Generator().manual_seed(rank_seed)
-            logger.info(f"Rank {accelerator.process_index} using seed: {rank_seed}")
+            logger.info(f"Rank {accelerator.process_index} using seed: {rank_seed} (global_step={global_step})")
 
             num_samples = args.validation_samples_per_gpu
             dataset_size = len(train_dataset.dataset)
@@ -1141,9 +1141,6 @@ def main():
                     safetensor_save_path = os.path.join(output_dir, f"lora_diffusion_pytorch_model.safetensors")
                     if args.use_peft_lora:
                         network_state_dict = get_peft_model_state_dict(accelerator.unwrap_model(models[-1]), accelerate_state_dict)
-                        network_state_dict_kohya = convert_peft_lora_to_kohya_lora(network_state_dict)
-                        safetensor_kohya_format_save_path = os.path.join(output_dir, f"lora_diffusion_pytorch_model_compatible_with_comfyui.safetensors")
-                        save_model(safetensor_kohya_format_save_path, network_state_dict_kohya)
                     else:
                         network_state_dict = {}
                         for key in accelerate_state_dict:
@@ -1171,9 +1168,6 @@ def main():
                     safetensor_save_path = os.path.join(output_dir, f"lora_diffusion_pytorch_model.safetensors")
                     if args.use_peft_lora:
                         network_state_dict = get_peft_model_state_dict(accelerator.unwrap_model(models[-1]), accelerate_state_dict)
-                        network_state_dict_kohya = convert_peft_lora_to_kohya_lora(network_state_dict)
-                        safetensor_kohya_format_save_path = os.path.join(output_dir, f"lora_diffusion_pytorch_model_compatible_with_comfyui.safetensors")
-                        save_model(safetensor_kohya_format_save_path, network_state_dict_kohya)
                     else:
                         network_state_dict = {}
                         for key in accelerate_state_dict:
@@ -2293,25 +2287,39 @@ def main():
 
                 if global_step % args.checkpointing_steps == 0:
                     if args.use_deepspeed or args.use_fsdp or accelerator.is_main_process:
-                        # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
+                        # Clean up old checkpoints if limit is set
                         if args.checkpoints_total_limit is not None:
-                            checkpoints = os.listdir(args.output_dir)
-                            checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
-                            checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
-
-                            # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
-                            if len(checkpoints) >= args.checkpoints_total_limit:
-                                num_to_remove = len(checkpoints) - args.checkpoints_total_limit + 1
-                                removing_checkpoints = checkpoints[0:num_to_remove]
-
-                                logger.info(
-                                    f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
-                                )
-                                logger.info(f"removing checkpoints: {', '.join(removing_checkpoints)}")
-
-                                for removing_checkpoint in removing_checkpoints:
-                                    removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
-                                    shutil.rmtree(removing_checkpoint)
+                            # Find all checkpoint files (directories and safetensors)
+                            all_files = os.listdir(args.output_dir)
+                            checkpoint_dirs = [d for d in all_files if d.startswith("checkpoint-") and os.path.isdir(os.path.join(args.output_dir, d))]
+                            safetensor_files = [f for f in all_files if f.startswith("checkpoint-") and f.endswith(".safetensors")]
+                            
+                            # Sort by step number
+                            checkpoint_dirs = sorted(checkpoint_dirs, key=lambda x: int(x.split("-")[1]))
+                            safetensor_files = sorted(safetensor_files, key=lambda x: int(x.split("-")[1]))
+                            
+                            # Total number of checkpoints
+                            total_checkpoints = len(checkpoint_dirs) + len(safetensor_files)
+                            
+                            # Remove oldest checkpoints if over limit
+                            if total_checkpoints >= args.checkpoints_total_limit:
+                                num_to_remove = total_checkpoints - args.checkpoints_total_limit + 1
+                                
+                                # Remove directories first
+                                dirs_to_remove = checkpoint_dirs[:min(num_to_remove, len(checkpoint_dirs))]
+                                for removing_checkpoint in dirs_to_remove:
+                                    removing_checkpoint_path = os.path.join(args.output_dir, removing_checkpoint)
+                                    logger.info(f"Removing checkpoint directory: {removing_checkpoint_path}")
+                                    shutil.rmtree(removing_checkpoint_path)
+                                
+                                # Remove safetensor files
+                                remaining_to_remove = num_to_remove - len(dirs_to_remove)
+                                if remaining_to_remove > 0:
+                                    files_to_remove = safetensor_files[:remaining_to_remove]
+                                    for removing_file in files_to_remove:
+                                        removing_file_path = os.path.join(args.output_dir, removing_file)
+                                        logger.info(f"Removing checkpoint file: {removing_file_path}")
+                                        os.remove(removing_file_path)
                         gc.collect()
                         torch.cuda.empty_cache()
                         torch.cuda.ipc_collect()
@@ -2324,10 +2332,6 @@ def main():
                                 for k, v in mask_encoder_state_dict.items():
                                     network_state_dict[f"control_mask_encoder.{k}"] = v
                                 save_model(safetensor_save_path, network_state_dict)
-
-                                safetensor_kohya_format_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}-compatible_with_comfyui.safetensors")
-                                network_state_dict_kohya = convert_peft_lora_to_kohya_lora(network_state_dict)
-                                save_model(safetensor_kohya_format_save_path, network_state_dict_kohya)
                                 logger.info(f"Saved safetensor to {safetensor_save_path}")
                             else:
                                 safetensor_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}.safetensors")
@@ -2400,10 +2404,6 @@ def main():
                 for k, v in mask_encoder_state_dict.items():
                     network_state_dict[f"control_mask_encoder.{k}"] = v
                 save_model(safetensor_save_path, network_state_dict)
-
-                safetensor_kohya_format_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}-compatible_with_comfyui.safetensors")
-                network_state_dict_kohya = convert_peft_lora_to_kohya_lora(network_state_dict)
-                save_model(safetensor_kohya_format_save_path, network_state_dict_kohya)
                 logger.info(f"Saved safetensor to {safetensor_save_path}")
             else:
                 safetensor_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}.safetensors")
