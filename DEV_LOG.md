@@ -44,6 +44,12 @@ VideoX-Fun: Video generation & editing framework supporting multiple models:
 
 > Add notes here for future sessions to pick up context.
 
+### 2026-07-31 (Session 4)
+- Fixed resume from checkpoint to support safetensor file paths
+- Added support for loading mask encoder state dict from checkpoint
+- Optimizer/scheduler states are now only loaded when resuming from directory (not safetensor file)
+- Updated train_control_lora.sh to resume from checkpoint-5500.safetensors
+
 ### 2026-07-29 (Session 2)
 - Updated `train_control_lora.sh` for Wan2.2-Fun-5B-Control training
 - Key changes:
