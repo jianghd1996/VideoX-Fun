@@ -1784,7 +1784,12 @@ def main():
                         lora_state_dict[k] = v
                 
                 # Load LoRA state dict
-                m, u = accelerator.unwrap_model(network).load_state_dict(lora_state_dict, strict=False)
+                if args.use_peft_lora:
+                    # Load into transformer3d directly for peft_lora
+                    m, u = accelerator.unwrap_model(transformer3d).load_state_dict(lora_state_dict, strict=False)
+                else:
+                    # Load into network for kohya-style
+                    m, u = accelerator.unwrap_model(network).load_state_dict(lora_state_dict, strict=False)
                 print(f"missing keys: {len(m)}, unexpected keys: {len(u)}")
                 
                 # Load mask encoder state dict if it exists
