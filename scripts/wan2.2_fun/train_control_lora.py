@@ -1721,26 +1721,42 @@ def main():
     # Potentially load in the weights and states from a previous save
     if args.resume_from_checkpoint:
         if args.resume_from_checkpoint != "latest":
-            path = os.path.basename(args.resume_from_checkpoint)
+            # Check if it's a safetensor file or directory
+            if args.resume_from_checkpoint.endswith('.safetensors'):
+                # It's a safetensor file path
+                safetensor_path = args.resume_from_checkpoint
+                filename = os.path.basename(safetensor_path)
+                # Extract step number from filename like "checkpoint-5500.safetensors"
+                global_step = int(filename.split("-")[1].split(".")[0])
+                checkpoint_folder_path = os.path.dirname(safetensor_path)
+                is_safetensor_file = True
+            else:
+                # It's a directory path
+                path = os.path.basename(args.resume_from_checkpoint)
+                global_step = int(path.split("-")[1])
+                checkpoint_folder_path = os.path.join(args.output_dir, path)
+                is_safetensor_file = False
         else:
             # Get the most recent checkpoint
             dirs = os.listdir(args.output_dir)
             dirs = [d for d in dirs if d.startswith("checkpoint")]
             dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
             path = dirs[-1] if len(dirs) > 0 else None
+            
+            if path is None:
+                accelerator.print(
+                    f"Checkpoint '{args.resume_from_checkpoint}' does not exist. Starting a new training run."
+                )
+                args.resume_from_checkpoint = None
+                initial_global_step = 0
+            else:
+                global_step = int(path.split("-")[1])
+                checkpoint_folder_path = os.path.join(args.output_dir, path)
+                is_safetensor_file = False
 
-        if path is None:
-            accelerator.print(
-                f"Checkpoint '{args.resume_from_checkpoint}' does not exist. Starting a new training run."
-            )
-            args.resume_from_checkpoint = None
-            initial_global_step = 0
-        else:
-            global_step = int(path.split("-")[1])
-
+        if args.resume_from_checkpoint is not None:
             initial_global_step = global_step
 
-            checkpoint_folder_path = os.path.join(args.output_dir, path)
             pkl_path = os.path.join(checkpoint_folder_path, "sampler_pos_start.pkl")
             if os.path.exists(pkl_path):
                 with open(pkl_path, 'rb') as file:
@@ -1751,56 +1767,87 @@ def main():
 
             if zero_stage != 3 and not args.use_fsdp:
                 from safetensors.torch import load_file
-                state_dict = load_file(os.path.join(checkpoint_folder_path, "lora_diffusion_pytorch_model.safetensors"), device=str(accelerator.device))
-                m, u = accelerator.unwrap_model(network).load_state_dict(state_dict, strict=False)
+                if is_safetensor_file:
+                    # Load from safetensor file
+                    state_dict = load_file(safetensor_path, device=str(accelerator.device))
+                else:
+                    # Load from directory
+                    state_dict = load_file(os.path.join(checkpoint_folder_path, "lora_diffusion_pytorch_model.safetensors"), device=str(accelerator.device))
+                
+                # Separate mask encoder state dict if it exists
+                mask_encoder_state_dict = {}
+                lora_state_dict = {}
+                for k, v in state_dict.items():
+                    if k.startswith("control_mask_encoder."):
+                        mask_encoder_state_dict[k.replace("control_mask_encoder.", "")] = v
+                    else:
+                        lora_state_dict[k] = v
+                
+                # Load LoRA state dict
+                m, u = accelerator.unwrap_model(network).load_state_dict(lora_state_dict, strict=False)
                 print(f"missing keys: {len(m)}, unexpected keys: {len(u)}")
+                
+                # Load mask encoder state dict if it exists
+                if mask_encoder_state_dict:
+                    m, u = accelerator.unwrap_model(control_mask_encoder).load_state_dict(mask_encoder_state_dict, strict=False)
+                    print(f"Mask encoder - missing keys: {len(m)}, unexpected keys: {len(u)}")
+                else:
+                    print("No mask encoder state dict found in checkpoint, using random initialization")
+                
+                # Only load optimizer/scheduler state if loading from directory (not safetensor file)
+                if not is_safetensor_file:
+                    optimizer_file_pt = os.path.join(checkpoint_folder_path, "optimizer.pt")
+                    optimizer_file_bin = os.path.join(checkpoint_folder_path, "optimizer.bin")
+                    optimizer_file_to_load = None
 
-                optimizer_file_pt = os.path.join(checkpoint_folder_path, "optimizer.pt")
-                optimizer_file_bin = os.path.join(checkpoint_folder_path, "optimizer.bin")
-                optimizer_file_to_load = None
+                    if os.path.exists(optimizer_file_pt):
+                        optimizer_file_to_load = optimizer_file_pt
+                    elif os.path.exists(optimizer_file_bin):
+                        optimizer_file_to_load = optimizer_file_bin
 
-                if os.path.exists(optimizer_file_pt):
-                    optimizer_file_to_load = optimizer_file_pt
-                elif os.path.exists(optimizer_file_bin):
-                    optimizer_file_to_load = optimizer_file_bin
-
-                if optimizer_file_to_load:
-                    try:
-                        accelerator.print(f"Loading optimizer state from {optimizer_file_to_load}")
-                        optimizer_state = torch.load(optimizer_file_to_load, map_location=accelerator.device)
-                        optimizer.load_state_dict(optimizer_state)
-                        accelerator.print("Optimizer state loaded successfully.")
-                    except Exception as e:
-                        accelerator.print(f"Failed to load optimizer state from {optimizer_file_to_load}: {e}")
-
-                scheduler_file_pt = os.path.join(checkpoint_folder_path, "scheduler.pt")
-                scheduler_file_bin = os.path.join(checkpoint_folder_path, "scheduler.bin")
-                scheduler_file_to_load = None
-
-                if os.path.exists(scheduler_file_pt):
-                    scheduler_file_to_load = scheduler_file_pt
-                elif os.path.exists(scheduler_file_bin):
-                    scheduler_file_to_load = scheduler_file_bin
-
-                if scheduler_file_to_load:
-                    try:
-                        accelerator.print(f"Loading scheduler state from {scheduler_file_to_load}")
-                        scheduler_state = torch.load(scheduler_file_to_load, map_location=accelerator.device)
-                        lr_scheduler.load_state_dict(scheduler_state)
-                        accelerator.print("Scheduler state loaded successfully.")
-                    except Exception as e:
-                        accelerator.print(f"Failed to load scheduler state from {scheduler_file_to_load}: {e}")
-
-                if hasattr(accelerator, 'scaler') and accelerator.scaler is not None:
-                    scaler_file = os.path.join(checkpoint_folder_path, "scaler.pt")
-                    if os.path.exists(scaler_file):
+                    if optimizer_file_to_load:
                         try:
-                            accelerator.print(f"Loading GradScaler state from {scaler_file}")
-                            scaler_state = torch.load(scaler_file, map_location=accelerator.device)
-                            accelerator.scaler.load_state_dict(scaler_state)
-                            accelerator.print("GradScaler state loaded successfully.")
+                            accelerator.print(f"Loading optimizer state from {optimizer_file_to_load}")
+                            optimizer_state = torch.load(optimizer_file_to_load, map_location=accelerator.device)
+                            optimizer.load_state_dict(optimizer_state)
+                            accelerator.print("Optimizer state loaded successfully.")
                         except Exception as e:
-                            accelerator.print(f"Failed to load GradScaler state: {e}")
+                            accelerator.print(f"Failed to load optimizer state from {optimizer_file_to_load}: {e}")
+                    else:
+                        accelerator.print("No optimizer state found, starting with fresh optimizer")
+
+                    scheduler_file_pt = os.path.join(checkpoint_folder_path, "scheduler.pt")
+                    scheduler_file_bin = os.path.join(checkpoint_folder_path, "scheduler.bin")
+                    scheduler_file_to_load = None
+
+                    if os.path.exists(scheduler_file_pt):
+                        scheduler_file_to_load = scheduler_file_pt
+                    elif os.path.exists(scheduler_file_bin):
+                        scheduler_file_to_load = scheduler_file_bin
+
+                    if scheduler_file_to_load:
+                        try:
+                            accelerator.print(f"Loading scheduler state from {scheduler_file_to_load}")
+                            scheduler_state = torch.load(scheduler_file_to_load, map_location=accelerator.device)
+                            lr_scheduler.load_state_dict(scheduler_state)
+                            accelerator.print("Scheduler state loaded successfully.")
+                        except Exception as e:
+                            accelerator.print(f"Failed to load scheduler state from {scheduler_file_to_load}: {e}")
+                    else:
+                        accelerator.print("No scheduler state found, starting with fresh scheduler")
+
+                    if hasattr(accelerator, 'scaler') and accelerator.scaler is not None:
+                        scaler_file = os.path.join(checkpoint_folder_path, "scaler.pt")
+                        if os.path.exists(scaler_file):
+                            try:
+                                accelerator.print(f"Loading GradScaler state from {scaler_file}")
+                                scaler_state = torch.load(scaler_file, map_location=accelerator.device)
+                                accelerator.scaler.load_state_dict(scaler_state)
+                                accelerator.print("GradScaler state loaded successfully.")
+                            except Exception as e:
+                                accelerator.print(f"Failed to load GradScaler state: {e}")
+                else:
+                    accelerator.print("Loading from safetensor file - optimizer/scheduler states not restored, starting fresh")
 
             else:
                 accelerator.load_state(checkpoint_folder_path)
