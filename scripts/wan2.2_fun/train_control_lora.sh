@@ -45,4 +45,5 @@ accelerate launch --gpu-ids 6,7 --num_processes=2 --mixed_precision="bf16" --mai
   --network_alpha=32 \
   --target_name="q,k,v,ffn.0,ffn.2" \
   --use_peft_lora \
-  --low_vram 
+  --low_vram \
+  --resume_from_checkpoint="/mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun/output_dir_wan2.2_fun_control_lora/checkpoint-5500.safetensors"
