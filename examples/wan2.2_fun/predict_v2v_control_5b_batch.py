@@ -293,7 +293,9 @@ for case_idx, case_name in enumerate(tqdm(test_cases, desc="Processing test case
             if not ret:
                 break
             if start_frame <= frame_idx <= end_frame:
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                # Resize frame to target size
+                frame_resized = cv2.resize(frame, (target_w, target_h))
+                frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
                 control_frames.append(frame_rgb)
             frame_idx += 1
             if frame_idx > end_frame:
@@ -304,14 +306,26 @@ for case_idx, case_name in enumerate(tqdm(test_cases, desc="Processing test case
         while len(control_frames) < adjusted_frame_count:
             control_frames.append(control_frames[-1])  # Repeat last frame
         print(f"    [DEBUG] After padding: {len(control_frames)} frames")
+        print(f"    [DEBUG] First frame shape: {control_frames[0].shape}")
         
-        # Use get_video_to_video_latent to process control video (ensure consistent dimensions)
-        input_video, input_video_mask, _, _ = get_video_to_video_latent(
-            control_frames,  # Pass frame list instead of file path
-            video_length=adjusted_frame_count,
-            sample_size=[target_h, target_w]
-        )
+        # Convert to tensor format [1, C, F, H, W] and normalize
+        control_frames_array = np.array(control_frames)  # [F, H, W, C]
+        input_video = torch.from_numpy(control_frames_array).permute(3, 0, 1, 2).unsqueeze(0).float() / 255.0
+        input_video_mask = torch.zeros_like(input_video[:, :1])
+        
+        # Ensure input_video has the same spatial dimensions as inpaint_video
+        if input_video.shape[-2:] != inpaint_video.shape[-2:]:
+            print(f"    [WARNING] Resizing control_video from {input_video.shape[-2:]} to {inpaint_video.shape[-2:]}")
+            input_video = torch.nn.functional.interpolate(
+                input_video, 
+                size=inpaint_video.shape[-2:], 
+                mode='bilinear', 
+                align_corners=False
+            )
+            input_video_mask = torch.zeros_like(input_video[:, :1])
+        
         print(f"    [DEBUG] control_video shape: {input_video.shape}")
+        print(f"    [DEBUG] inpaint_video shape: {inpaint_video.shape}")
         
         # Update frames_per_segment to match actual frame count
         actual_frames_per_segment = len(control_frames)
