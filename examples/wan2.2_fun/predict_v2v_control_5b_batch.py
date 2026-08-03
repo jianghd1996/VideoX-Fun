@@ -57,7 +57,7 @@ output_dir = "samples/background_test_results"
 frames_per_segment = 81  # Number of frames per segment (will be adjusted to multiple of 4)
 target_height = 1080     # 1080P resolution, width will be calculated to maintain aspect ratio
 fps = 24
-num_inference_steps = 50
+num_inference_steps = 8
 guidance_scale = 6.0
 seed = 42
 
@@ -293,7 +293,6 @@ for case_idx, case_name in enumerate(tqdm(test_cases, desc="Processing test case
             if not ret:
                 break
             if start_frame <= frame_idx <= end_frame:
-                frame = cv2.resize(frame, (target_w, target_h))
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 control_frames.append(frame_rgb)
             frame_idx += 1
@@ -306,11 +305,12 @@ for case_idx, case_name in enumerate(tqdm(test_cases, desc="Processing test case
             control_frames.append(control_frames[-1])  # Repeat last frame
         print(f"    [DEBUG] After padding: {len(control_frames)} frames")
         
-        # Convert to tensor format [1, C, F, H, W]
-        control_frames_array = np.array(control_frames)
-        input_video = torch.from_numpy(control_frames_array).permute(3, 0, 1, 2).unsqueeze(0).float() / 255.0
-        input_video_mask = torch.zeros_like(input_video[:, :1])
-        
+        # Use get_video_to_video_latent to process control video (ensure consistent dimensions)
+        input_video, input_video_mask, _, _ = get_video_to_video_latent(
+            control_frames,  # Pass frame list instead of file path
+            video_length=adjusted_frame_count,
+            sample_size=[target_h, target_w]
+        )
         print(f"    [DEBUG] control_video shape: {input_video.shape}")
         
         # Update frames_per_segment to match actual frame count
