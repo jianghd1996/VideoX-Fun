@@ -254,20 +254,20 @@ for case_idx, case_name in enumerate(tqdm(test_cases, desc="Processing test case
         first_frame_pil = Image.fromarray(first_frame_rgb).resize((target_w, target_h))
         last_frame_pil = Image.fromarray(last_frame_rgb).resize((target_w, target_h))
         
-        # Prepare inpaint video (first/last frames as constraints)
-        # Adjust frame count to be multiple of 4
+        # Extract control video segment
+        start_frame = first_frame_idx
+        end_frame = last_frame_idx
+        
+        # Calculate actual frame count (must be multiple of 4)
         actual_frame_count = end_frame - start_frame + 1
         adjusted_frame_count = adjust_frames_to_multiple_of_4(actual_frame_count)
         
+        # Prepare inpaint video (first/last frames as constraints)
         inpaint_video, inpaint_video_mask, clip_image = get_image_to_video_latent(
             [first_frame_pil], [last_frame_pil], 
             video_length=adjusted_frame_count, 
             sample_size=[target_h, target_w]
         )
-        
-        # Extract control video segment
-        start_frame = first_frame_idx
-        end_frame = last_frame_idx
         
         # Calculate actual frame count (must be multiple of 4)
         actual_frame_count = end_frame - start_frame + 1
