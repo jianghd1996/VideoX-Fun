@@ -61,9 +61,14 @@ num_inference_steps = 50
 guidance_scale = 6.0
 seed = 42
 
-def adjust_frames_to_multiple_of_4(num_frames):
-    """Adjust frame count to be a multiple of 4."""
-    return ((num_frames - 1) // 4 + 1) * 4
+def adjust_frames_to_4n_plus_1(num_frames):
+    """Adjust frame count to satisfy (n-1) % 4 == 0, i.e., n % 4 == 1.
+    Valid frame counts: 1, 5, 9, 13, 17, 21, ..., 81, 85, 89, ...
+    """
+    if (num_frames - 1) % 4 == 0:
+        return num_frames
+    # Round up to next valid frame count
+    return ((num_frames - 1) // 4 + 1) * 4 + 1
 
 # Device and dtype
 device = "cuda:0"
@@ -261,9 +266,11 @@ for case_idx, case_name in enumerate(tqdm(test_cases, desc="Processing test case
         start_frame = first_frame_idx
         end_frame = last_frame_idx
         
-        # Calculate actual frame count (must be multiple of 4)
+        # Calculate actual frame count (must satisfy (n-1) % 4 == 0)
         actual_frame_count = end_frame - start_frame + 1
-        adjusted_frame_count = adjust_frames_to_multiple_of_4(actual_frame_count)
+        adjusted_frame_count = adjust_frames_to_4n_plus_1(actual_frame_count)
+        
+        print(f"    [DEBUG] Frame range: {start_frame}-{end_frame}, actual: {actual_frame_count}, adjusted: {adjusted_frame_count}")
         
         # Prepare inpaint video (first/last frames as constraints)
         inpaint_video, inpaint_video_mask, clip_image = get_image_to_video_latent(
@@ -271,6 +278,7 @@ for case_idx, case_name in enumerate(tqdm(test_cases, desc="Processing test case
             video_length=adjusted_frame_count, 
             sample_size=[target_h, target_w]
         )
+        print(f"    [DEBUG] inpaint_video shape: {inpaint_video.shape}")
         
         # Calculate actual frame count (must be multiple of 4)
         actual_frame_count = end_frame - start_frame + 1
@@ -293,14 +301,17 @@ for case_idx, case_name in enumerate(tqdm(test_cases, desc="Processing test case
                 break
         cap.release()
         
-        # Pad frames if necessary to make it a multiple of 4
+        # Pad frames if necessary to satisfy (n-1) % 4 == 0
         while len(control_frames) < adjusted_frame_count:
             control_frames.append(control_frames[-1])  # Repeat last frame
+        print(f"    [DEBUG] After padding: {len(control_frames)} frames")
         
         # Convert to tensor format [1, C, F, H, W]
         control_frames_array = np.array(control_frames)
         input_video = torch.from_numpy(control_frames_array).permute(3, 0, 1, 2).unsqueeze(0).float() / 255.0
         input_video_mask = torch.zeros_like(input_video[:, :1])
+        
+        print(f"    [DEBUG] control_video shape: {input_video.shape}")
         
         # Update frames_per_segment to match actual frame count
         actual_frames_per_segment = len(control_frames)
