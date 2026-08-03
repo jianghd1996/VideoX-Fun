@@ -165,9 +165,11 @@ def get_control_video_dimensions(video_path):
 
 def calculate_target_size(orig_width, orig_height, target_h):
     """Calculate target size maintaining aspect ratio."""
+    # Ensure target_h is divisible by 16
+    target_h = (target_h // 16) * 16
+    
     target_w = int(target_h * orig_width / orig_height)
     target_w = target_w - (target_w % 16)  # Ensure divisible by 16
-    target_h = target_h - (target_h % 16)  # Ensure divisible by 16
     return target_h, target_w
 
 # ==================== Process Test Cases ====================
