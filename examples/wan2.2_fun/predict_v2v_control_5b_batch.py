@@ -280,9 +280,9 @@ for case_idx, case_name in enumerate(tqdm(test_cases, desc="Processing test case
         )
         print(f"    [DEBUG] inpaint_video shape: {inpaint_video.shape}")
         
-        # Calculate actual frame count (must be multiple of 4)
+        # Calculate actual frame count (must satisfy (n-1) % 4 == 0)
         actual_frame_count = end_frame - start_frame + 1
-        adjusted_frame_count = adjust_frames_to_multiple_of_4(actual_frame_count)
+        adjusted_frame_count = adjust_frames_to_4n_plus_1(actual_frame_count)
         
         # Read control video and extract specific frame range
         cap = cv2.VideoCapture(control_video_path)
