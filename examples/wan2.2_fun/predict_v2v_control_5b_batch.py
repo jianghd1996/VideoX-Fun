@@ -185,8 +185,8 @@ for case_idx, case_name in enumerate(tqdm(test_cases, desc="Processing test case
     with open(prompt_path, 'r', encoding='utf-8') as f:
         prompt = f.read().strip()
     
-    # Load gen_index.json
-    gen_index_path = os.path.join(case_dir, "gen_index.json")
+    # Load gen_index.json (located in 3dgs_render directory)
+    gen_index_path = os.path.join(case_dir, "3dgs_render", "gen_index.json")
     if not os.path.exists(gen_index_path):
         print(f"[{case_idx+1}/{len(test_cases)}] gen_index.json not found: {gen_index_path}, skipping...")
         continue
