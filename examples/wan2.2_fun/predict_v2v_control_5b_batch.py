@@ -1,6 +1,19 @@
 """
 Batch inference script for Wan2.2-Fun-5B-Control with LoRA weights.
-Reads a JSON file and generates videos for each entry.
+Reads test data from structured directories and generates videos.
+
+Test data structure:
+    background_test/
+        1/
+            image/           # First and last frame images
+                xxx.png      # First frame
+                yyy.png      # Last frame
+            3dgs_render/     # Control signal video
+                gs_render.mp4
+            gen_index.json   # Generation configuration
+            prompt.txt       # Text prompt
+        2/
+            ...
 """
 import os
 import sys
@@ -34,16 +47,15 @@ model_name = "/mnt/DataPart/jianghongda/VideoX-Fun/models/Diffusion_Transformer/
 lora_path = "/mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun/output_dir_wan2.2_fun_control_lora/checkpoint-25000.safetensors"
 lora_weight = 1.0  # LoRA weight strength
 
-# Input JSON file (same format as training dataset)
-input_json = "/mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun-ori/datasets/dataset1+2.json"
-data_root = "/mnt/DataPart/jianghongda/dataset/livephoto"
+# Test data directory
+test_dir = "/mnt/DataPart/jianghongda/test/background_test"
 
 # Output directory
-output_dir = "samples/batch_inference"
+output_dir = "samples/background_test_results"
 
 # Generation parameters
-video_length = 81  # Number of frames
-sample_size = [960, 960]  # [height, width] - 720P
+frames_per_segment = 81  # Number of frames per segment
+target_height = 1080     # 1080P resolution, width will be calculated to maintain aspect ratio
 fps = 24
 num_inference_steps = 50
 guidance_scale = 6.0
@@ -126,100 +138,177 @@ print("LoRA weights merged.")
 # Note: Mask encoder is not used in inference (only for training)
 # The model has learned to handle black regions in control videos
 
-# ==================== Load Dataset ====================
-print(f"Loading dataset from {input_json}...")
-with open(input_json, 'r') as f:
-    dataset = json.load(f)
-print(f"Loaded {len(dataset)} entries.")
+# ==================== Helper Functions ====================
+def get_control_video_dimensions(video_path):
+    """Get video dimensions and frame count."""
+    cap = cv2.VideoCapture(video_path)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+    return width, height, total_frames
 
-# ==================== Batch Inference ====================
+def calculate_target_size(orig_width, orig_height, target_h):
+    """Calculate target size maintaining aspect ratio."""
+    target_w = int(target_h * orig_width / orig_height)
+    target_w = target_w - (target_w % 16)  # Ensure divisible by 16
+    return target_h, target_w
+
+# ==================== Process Test Cases ====================
 os.makedirs(output_dir, exist_ok=True)
 
-for idx, data_info in enumerate(tqdm(dataset, desc="Processing")):
-    gt_video_path = data_info['file_path']
-    control_video_path = data_info.get('control_file_path', '')
-    prompt = data_info.get('text', '')
+# Get all test case directories (1, 2, 3, 4, 5, 6)
+test_cases = sorted([d for d in os.listdir(test_dir) 
+                     if os.path.isdir(os.path.join(test_dir, d)) and d.isdigit()])
+
+print(f"Found {len(test_cases)} test cases: {test_cases}")
+
+for case_idx, case_name in enumerate(tqdm(test_cases, desc="Processing test cases")):
+    case_dir = os.path.join(test_dir, case_name)
     
-    # Resolve paths
-    if data_root:
-        gt_video_full_path = os.path.join(data_root, gt_video_path)
-        control_video_full_path = os.path.join(data_root, control_video_path) if control_video_path else ''
-    else:
-        gt_video_full_path = gt_video_path
-        control_video_full_path = control_video_path
-    
-    # Check if files exist
-    if not os.path.exists(gt_video_full_path):
-        print(f"[{idx+1}/{len(dataset)}] GT video not found: {gt_video_full_path}, skipping...")
+    # Load prompt
+    prompt_path = os.path.join(case_dir, "prompt.txt")
+    if not os.path.exists(prompt_path):
+        print(f"[{case_idx+1}/{len(test_cases)}] Prompt file not found: {prompt_path}, skipping...")
         continue
-    if control_video_full_path and not os.path.exists(control_video_full_path):
-        print(f"[{idx+1}/{len(dataset)}] Control video not found: {control_video_full_path}, skipping...")
+    with open(prompt_path, 'r', encoding='utf-8') as f:
+        prompt = f.read().strip()
+    
+    # Load gen_index.json
+    gen_index_path = os.path.join(case_dir, "gen_index.json")
+    if not os.path.exists(gen_index_path):
+        print(f"[{case_idx+1}/{len(test_cases)}] gen_index.json not found: {gen_index_path}, skipping...")
         continue
+    with open(gen_index_path, 'r') as f:
+        gen_index = json.load(f)
     
-    # Extract first and last frames from GT video
-    gt_cap = cv2.VideoCapture(gt_video_full_path)
-    gt_total_frames = int(gt_cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    gt_width = int(gt_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    gt_height = int(gt_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    
-    gt_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-    ret_first, first_frame = gt_cap.read()
-    gt_cap.set(cv2.CAP_PROP_POS_FRAMES, gt_total_frames - 1)
-    ret_last, last_frame = gt_cap.read()
-    gt_cap.release()
-    
-    if not ret_first or not ret_last:
-        print(f"[{idx+1}/{len(dataset)}] Failed to read frames from {gt_video_full_path}, skipping...")
+    # Get image files (sorted by name)
+    image_dir = os.path.join(case_dir, "image")
+    if not os.path.exists(image_dir):
+        print(f"[{case_idx+1}/{len(test_cases)}] Image directory not found: {image_dir}, skipping...")
         continue
-    
-    # Convert to RGB
-    first_frame_rgb = cv2.cvtColor(first_frame, cv2.COLOR_BGR2RGB)
-    last_frame_rgb = cv2.cvtColor(last_frame, cv2.COLOR_BGR2RGB)
-    
-    # Calculate target size (maintain aspect ratio)
-    target_h = sample_size[0]
-    target_w = int(target_h * gt_width / gt_height)
-    target_w = target_w - (target_w % 16)  # Ensure divisible by 16
-    
-    # Resize frames
-    first_frame_pil = Image.fromarray(first_frame_rgb).resize((target_w, target_h))
-    last_frame_pil = Image.fromarray(last_frame_rgb).resize((target_w, target_h))
-    
-    # Prepare inpaint video (first/last frames as constraints)
-    inpaint_video, inpaint_video_mask, clip_image = get_image_to_video_latent(
-        [first_frame_pil], [last_frame_pil], video_length=video_length, sample_size=[target_h, target_w]
-    )
+    image_files = sorted([f for f in os.listdir(image_dir) 
+                          if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
+    if len(image_files) < 2:
+        print(f"[{case_idx+1}/{len(test_cases)}] Need at least 2 images, found {len(image_files)}, skipping...")
+        continue
     
     # Load control video
-    input_video, input_video_mask, _, _ = get_video_to_video_latent(
-        control_video_full_path, video_length=video_length, sample_size=[target_h, target_w]
-    )
+    control_video_path = os.path.join(case_dir, "3dgs_render", "gs_render.mp4")
+    if not os.path.exists(control_video_path):
+        print(f"[{case_idx+1}/{len(test_cases)}] Control video not found: {control_video_path}, skipping...")
+        continue
     
-    # Generate video
-    print(f"[{idx+1}/{len(dataset)}] Generating video for: {os.path.basename(gt_video_path)}")
+    # Get control video dimensions
+    ctrl_width, ctrl_height, ctrl_total_frames = get_control_video_dimensions(control_video_path)
+    target_h, target_w = calculate_target_size(ctrl_width, ctrl_height, target_height)
     
-    generator = torch.Generator(device=device).manual_seed(seed + idx)
+    print(f"\n[{case_idx+1}/{len(test_cases)}] Processing case {case_name}")
+    print(f"  Prompt: {prompt[:50]}...")
+    print(f"  Images: {image_files}")
+    print(f"  Control video: {ctrl_total_frames} frames, {ctrl_width}x{ctrl_height}")
+    print(f"  Target size: {target_w}x{target_h}")
+    print(f"  Gen index: {gen_index}")
     
-    with torch.no_grad():
-        sample = pipeline(
-            prompt,
-            num_frames=video_length,
-            negative_prompt="色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走",
-            height=target_h,
-            width=target_w,
-            generator=generator,
-            guidance_scale=guidance_scale,
-            num_inference_steps=num_inference_steps,
-            video=inpaint_video,
-            mask_video=inpaint_video_mask,
-            control_video=input_video,
-            boundary=boundary,
-        ).videos
+    # Parse gen_index to get segments
+    # Format: [[[first_img_idx, first_frame_idx], [last_img_idx, last_frame_idx]], ...]
+    segments = gen_index[:-1]  # Last element is not a segment
+    
+    all_generated_frames = []
+    
+    for seg_idx, segment in enumerate(segments):
+        first_img_idx, first_frame_idx = segment[0]
+        last_img_idx, last_frame_idx = segment[1]
+        
+        # Load first and last frame images
+        first_img_path = os.path.join(image_dir, image_files[first_img_idx])
+        last_img_path = os.path.join(image_dir, image_files[last_img_idx])
+        
+        first_frame = cv2.imread(first_img_path)
+        last_frame = cv2.imread(last_img_path)
+        
+        if first_frame is None or last_frame is None:
+            print(f"  [Segment {seg_idx+1}] Failed to load images, skipping segment...")
+            continue
+        
+        # Convert to RGB
+        first_frame_rgb = cv2.cvtColor(first_frame, cv2.COLOR_BGR2RGB)
+        last_frame_rgb = cv2.cvtColor(last_frame, cv2.COLOR_BGR2RGB)
+        
+        # Resize frames to target size
+        first_frame_pil = Image.fromarray(first_frame_rgb).resize((target_w, target_h))
+        last_frame_pil = Image.fromarray(last_frame_rgb).resize((target_w, target_h))
+        
+        # Prepare inpaint video (first/last frames as constraints)
+        inpaint_video, inpaint_video_mask, clip_image = get_image_to_video_latent(
+            [first_frame_pil], [last_frame_pil], 
+            video_length=frames_per_segment, 
+            sample_size=[target_h, target_w]
+        )
+        
+        # Extract control video segment
+        start_frame = first_frame_idx
+        end_frame = last_frame_idx
+        
+        # Read control video and extract specific frame range
+        cap = cv2.VideoCapture(control_video_path)
+        control_frames = []
+        frame_idx = 0
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            if start_frame <= frame_idx <= end_frame:
+                frame = cv2.resize(frame, (target_w, target_h))
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                control_frames.append(frame_rgb)
+            frame_idx += 1
+            if frame_idx > end_frame:
+                break
+        cap.release()
+        
+        # Convert to tensor format [1, C, F, H, W]
+        control_frames_array = np.array(control_frames)
+        input_video = torch.from_numpy(control_frames_array).permute(3, 0, 1, 2).unsqueeze(0).float() / 255.0
+        input_video_mask = torch.zeros_like(input_video[:, :1])
+        
+        # Generate video segment
+        print(f"  [Segment {seg_idx+1}/{len(segments)}] Generating frames {start_frame}-{end_frame}...")
+        
+        generator = torch.Generator(device=device).manual_seed(seed + case_idx * 100 + seg_idx)
+        
+        with torch.no_grad():
+            sample = pipeline(
+                prompt,
+                num_frames=frames_per_segment,
+                negative_prompt="色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走",
+                height=target_h,
+                width=target_w,
+                generator=generator,
+                guidance_scale=guidance_scale,
+                num_inference_steps=num_inference_steps,
+                video=inpaint_video,
+                mask_video=inpaint_video_mask,
+                control_video=input_video,
+                boundary=boundary,
+            ).videos
+        
+        # Collect frames (sample shape: [1, C, F, H, W])
+        segment_frames = sample[0].permute(1, 0, 2, 3)  # [F, C, H, W]
+        all_generated_frames.append(segment_frames)
+    
+    if not all_generated_frames:
+        print(f"  No segments generated, skipping...")
+        continue
+    
+    # Concatenate all segments
+    final_video = torch.cat(all_generated_frames, dim=0)  # [F_total, C, H, W]
+    final_video = final_video.permute(1, 0, 2, 3).unsqueeze(0)  # [1, C, F_total, H, W]
     
     # Save output
-    output_filename = f"{idx:05d}_{os.path.splitext(os.path.basename(gt_video_path))[0]}.mp4"
+    output_filename = f"{case_name}_generated.mp4"
     output_path = os.path.join(output_dir, output_filename)
-    save_videos_grid(sample, output_path, fps=fps)
-    print(f"Saved to: {output_path}")
+    save_videos_grid(final_video, output_path, fps=fps)
+    print(f"  Saved to: {output_path}")
 
 print(f"\nBatch inference completed! Results saved to: {output_dir}")
