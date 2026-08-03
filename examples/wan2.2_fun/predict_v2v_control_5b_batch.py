@@ -117,7 +117,9 @@ print("Models loaded and moved to device.")
 
 # ==================== Load LoRA Weights ====================
 print(f"Loading LoRA weights from {lora_path}...")
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
+import tempfile
+
 state_dict = load_file(lora_path, device="cpu")
 
 # Separate LoRA and mask encoder weights
@@ -131,9 +133,18 @@ for k, v in state_dict.items():
 
 print(f"Loaded {len(lora_state_dict)} LoRA weights and {len(mask_encoder_state_dict)} mask encoder weights")
 
-# Merge LoRA into pipeline
-pipeline = merge_lora(pipeline, lora_path, lora_weight, device=device, dtype=weight_dtype)
+# Create a temporary file with only LoRA weights (excluding mask encoder)
+with tempfile.NamedTemporaryFile(suffix=".safetensors", delete=False) as tmp:
+    tmp_path = tmp.name
+    save_file(lora_state_dict, tmp_path)
+
+# Merge LoRA into pipeline using the filtered weights
+pipeline = merge_lora(pipeline, tmp_path, lora_weight, device=device, dtype=weight_dtype)
 print("LoRA weights merged.")
+
+# Clean up temporary file
+import os
+os.unlink(tmp_path)
 
 # Note: Mask encoder is not used in inference (only for training)
 # The model has learned to handle black regions in control videos
