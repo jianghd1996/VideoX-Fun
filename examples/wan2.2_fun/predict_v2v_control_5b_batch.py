@@ -54,12 +54,16 @@ test_dir = "/mnt/DataPart/jianghongda/test/background_test"
 output_dir = "samples/background_test_results"
 
 # Generation parameters
-frames_per_segment = 81  # Number of frames per segment
+frames_per_segment = 81  # Number of frames per segment (will be adjusted to multiple of 4)
 target_height = 1080     # 1080P resolution, width will be calculated to maintain aspect ratio
 fps = 24
 num_inference_steps = 50
 guidance_scale = 6.0
 seed = 42
+
+def adjust_frames_to_multiple_of_4(num_frames):
+    """Adjust frame count to be a multiple of 4."""
+    return ((num_frames - 1) // 4 + 1) * 4
 
 # Device and dtype
 device = "cuda:0"
@@ -251,15 +255,23 @@ for case_idx, case_name in enumerate(tqdm(test_cases, desc="Processing test case
         last_frame_pil = Image.fromarray(last_frame_rgb).resize((target_w, target_h))
         
         # Prepare inpaint video (first/last frames as constraints)
+        # Adjust frame count to be multiple of 4
+        actual_frame_count = end_frame - start_frame + 1
+        adjusted_frame_count = adjust_frames_to_multiple_of_4(actual_frame_count)
+        
         inpaint_video, inpaint_video_mask, clip_image = get_image_to_video_latent(
             [first_frame_pil], [last_frame_pil], 
-            video_length=frames_per_segment, 
+            video_length=adjusted_frame_count, 
             sample_size=[target_h, target_w]
         )
         
         # Extract control video segment
         start_frame = first_frame_idx
         end_frame = last_frame_idx
+        
+        # Calculate actual frame count (must be multiple of 4)
+        actual_frame_count = end_frame - start_frame + 1
+        adjusted_frame_count = adjust_frames_to_multiple_of_4(actual_frame_count)
         
         # Read control video and extract specific frame range
         cap = cv2.VideoCapture(control_video_path)
@@ -278,20 +290,27 @@ for case_idx, case_name in enumerate(tqdm(test_cases, desc="Processing test case
                 break
         cap.release()
         
+        # Pad frames if necessary to make it a multiple of 4
+        while len(control_frames) < adjusted_frame_count:
+            control_frames.append(control_frames[-1])  # Repeat last frame
+        
         # Convert to tensor format [1, C, F, H, W]
         control_frames_array = np.array(control_frames)
         input_video = torch.from_numpy(control_frames_array).permute(3, 0, 1, 2).unsqueeze(0).float() / 255.0
         input_video_mask = torch.zeros_like(input_video[:, :1])
         
+        # Update frames_per_segment to match actual frame count
+        actual_frames_per_segment = len(control_frames)
+        
         # Generate video segment
-        print(f"  [Segment {seg_idx+1}/{len(segments)}] Generating frames {start_frame}-{end_frame}...")
+        print(f"  [Segment {seg_idx+1}/{len(segments)}] Generating frames {start_frame}-{end_frame} (adjusted to {actual_frames_per_segment} frames)...")
         
         generator = torch.Generator(device=device).manual_seed(seed + case_idx * 100 + seg_idx)
         
         with torch.no_grad():
             sample = pipeline(
                 prompt,
-                num_frames=frames_per_segment,
+                num_frames=actual_frames_per_segment,
                 negative_prompt="色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走",
                 height=target_h,
                 width=target_w,
