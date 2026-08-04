@@ -678,8 +678,7 @@ class Wan2_2FunControlPipeline(DiffusionPipeline):
                 )
                 mask_condition = mask_condition.view(bs, mask_condition.shape[2] // 4, 4, height, width)
                 mask_condition = mask_condition.transpose(1, 2)
-                # Keep only 1 channel for mask_latents to match training
-                mask_latents = resize_mask(1 - mask_condition[:, :1], masked_video_latents, True).to(device, weight_dtype) 
+                mask_latents = resize_mask(1 - mask_condition, masked_video_latents, True).to(device, weight_dtype) 
 
                 if self.vae.spatial_compression_ratio >= 16:
                     mask = F.interpolate(mask_condition[:, :1], size=latents.size()[-3:], mode='trilinear', align_corners=True).to(device, weight_dtype)
