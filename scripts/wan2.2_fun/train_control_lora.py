@@ -2174,8 +2174,6 @@ def main():
                         mask = mask.transpose(1, 2)
                         mask_conditions = F.interpolate(mask[:, :1], size=latents.size()[-3:], mode='trilinear', align_corners=True).to(accelerator.device, weight_dtype)
                         mask = resize_mask(1 - mask, latents)
-                        # Replicate mask to 4 channels to match inference pipeline
-                        mask = torch.cat([mask] * 4, dim=1)
 
                         # Encode inpaint latents.
                         mask_latents = _batch_encode_vae(mask_pixel_values)
