@@ -1,5 +1,6 @@
 import importlib.util
 
+import torch
 from diffusers import AutoencoderKL
 from transformers import (AutoProcessor, AutoTokenizer, CLIPImageProcessor,
                           CLIPTextModel, CLIPTokenizer,
@@ -11,6 +12,32 @@ from transformers import (AutoProcessor, AutoTokenizer, CLIPImageProcessor,
                           Qwen3Config, Qwen3ForCausalLM, T5EncoderModel,
                           T5Tokenizer, T5TokenizerFast, UMT5EncoderModel,
                           Wav2Vec2FeatureExtractor)
+
+
+class ControlMaskEncoder(torch.nn.Module):
+    """Small 3D conv module that encodes control mask and adds it to control latents.
+    
+    The mask indicates valid (1) vs invalid/black (0) regions in the control video.
+    This encoder maps the 1-channel mask to the same channel dimension as control latents,
+    allowing the model to learn to ignore invalid control regions.
+    """
+    def __init__(self, in_channels=1, out_channels=16, mid_channels=64):
+        super().__init__()
+        self.encoder = torch.nn.Sequential(
+            torch.nn.Conv3d(in_channels, mid_channels, kernel_size=3, padding=1),
+            torch.nn.SiLU(),
+            torch.nn.Conv3d(mid_channels, out_channels, kernel_size=3, padding=1),
+        )
+    
+    def forward(self, mask_latents):
+        """
+        Args:
+            mask_latents: [B, 1, T, H, W] binary mask in latent space
+        
+        Returns:
+            mask_features: [B, out_channels, T, H, W] features to add to control latents
+        """
+        return self.encoder(mask_latents)
 
 try:
     from transformers import (Qwen2_5_VLConfig,
