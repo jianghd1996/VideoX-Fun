@@ -110,6 +110,14 @@ scheduler = FlowMatchEulerDiscreteScheduler(
     **filter_kwargs(FlowMatchEulerDiscreteScheduler, OmegaConf.to_container(config['scheduler_kwargs']))
 )
 
+# Create ControlMaskEncoder
+from videox_fun.models import ControlMaskEncoder
+control_mask_encoder = ControlMaskEncoder(
+    in_channels=1, 
+    out_channels=vae.config.latent_channels, 
+    mid_channels=64
+).to(device, dtype=weight_dtype)
+
 # Create Pipeline
 pipeline = Wan2_2FunControlPipeline(
     transformer=transformer,
@@ -118,6 +126,7 @@ pipeline = Wan2_2FunControlPipeline(
     tokenizer=tokenizer,
     text_encoder=text_encoder,
     scheduler=scheduler,
+    control_mask_encoder=control_mask_encoder,
 )
 
 # Enable sequential CPU offload to save VRAM
@@ -155,8 +164,12 @@ print("LoRA weights merged.")
 import os
 os.unlink(tmp_path)
 
-# Note: Mask encoder is not used in inference (only for training)
-# The model has learned to handle black regions in control videos
+# Load mask encoder weights into pipeline's control_mask_encoder
+if mask_encoder_state_dict:
+    pipeline.control_mask_encoder.load_state_dict(mask_encoder_state_dict)
+    print("Mask encoder weights loaded.")
+else:
+    print("WARNING: No mask encoder weights found in checkpoint!")
 
 # ==================== Helper Functions ====================
 def get_control_video_dimensions(video_path):
@@ -327,6 +340,15 @@ for case_idx, case_name in enumerate(tqdm(test_cases, desc="Processing test case
         print(f"    [DEBUG] control_video shape: {input_video.shape}")
         print(f"    [DEBUG] inpaint_video shape: {inpaint_video.shape}")
         
+        # Extract mask from control video (detect black regions)
+        # input_video is [1, C, F, H, W] in range [0, 1]
+        control_video_np = (input_video[0].permute(1, 2, 3, 0).cpu().numpy() * 255).astype(np.uint8)  # [F, H, W, C]
+        control_mask_np = (control_video_np.max(axis=-1) < 20).astype(np.float32)  # [F, H, W]
+        control_mask = torch.from_numpy(control_mask_np).unsqueeze(0).unsqueeze(0).float()  # [1, 1, F, H, W]
+        control_mask = control_mask.to(device, dtype=weight_dtype)
+        
+        print(f"    [DEBUG] control_mask shape: {control_mask.shape}")
+        
         # Update frames_per_segment to match actual frame count
         actual_frames_per_segment = len(control_frames)
         
@@ -348,6 +370,7 @@ for case_idx, case_name in enumerate(tqdm(test_cases, desc="Processing test case
                 video=inpaint_video,
                 mask_video=inpaint_video_mask,
                 control_video=input_video,
+                control_mask=control_mask,
                 boundary=boundary,
             ).videos
         

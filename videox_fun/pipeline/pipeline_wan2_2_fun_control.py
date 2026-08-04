@@ -174,12 +174,13 @@ class Wan2_2FunControlPipeline(DiffusionPipeline):
         transformer: Wan2_2Transformer3DModel,
         transformer_2: Wan2_2Transformer3DModel = None,
         scheduler: FlowMatchEulerDiscreteScheduler = None,
+        control_mask_encoder: torch.nn.Module = None,  # New parameter for mask encoder
     ):
         super().__init__()
 
         self.register_modules(
             tokenizer=tokenizer, text_encoder=text_encoder, vae=vae, transformer=transformer, 
-            transformer_2=transformer_2, scheduler=scheduler
+            transformer_2=transformer_2, scheduler=scheduler, control_mask_encoder=control_mask_encoder
         )
         self.video_processor = VideoProcessor(vae_scale_factor=self.vae.spatial_compression_ratio)
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae.spatial_compression_ratio)
@@ -512,6 +513,7 @@ class Wan2_2FunControlPipeline(DiffusionPipeline):
         mask_video: Union[torch.FloatTensor] = None,
         control_video: Union[torch.FloatTensor] = None,
         control_camera_video: Union[torch.FloatTensor] = None,
+        control_mask: Union[torch.FloatTensor] = None,  # New parameter for mask encoder
         start_image: Union[torch.FloatTensor] = None,
         ref_image: Union[torch.FloatTensor] = None,
         num_frames: int = 49,
@@ -716,6 +718,20 @@ class Wan2_2FunControlPipeline(DiffusionPipeline):
                 generator,
                 do_classifier_free_guidance
             )[1]
+            
+            # Apply mask encoder if control_mask is provided and control_mask_encoder exists
+            if control_mask is not None and self.control_mask_encoder is not None:
+                # Downsample mask to latent resolution
+                control_mask_latents = F.interpolate(
+                    control_mask, 
+                    size=(control_video_latents.shape[2], control_video_latents.shape[3], control_video_latents.shape[4]), 
+                    mode='trilinear', 
+                    align_corners=False
+                )
+                # Encode mask and add to control_video_latents
+                mask_features = self.control_mask_encoder(control_mask_latents)
+                control_video_latents = control_video_latents + mask_features
+            
             control_camera_latents = None
         else:
             control_video_latents = torch.zeros_like(latents).to(device, weight_dtype)
