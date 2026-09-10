@@ -191,31 +191,42 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
             )
             pipeline = pipeline.to(accelerator.device)
 
-            rank_seed = (args.seed or 42) + accelerator.process_index
+            # Change both generation and case selection on every validation round.
+            base_seed = (args.seed or 42) + global_step
+            rank_seed = base_seed + accelerator.process_index
             generator = torch.Generator(device=accelerator.device).manual_seed(rank_seed)
-            cpu_generator = torch.Generator().manual_seed(rank_seed)
-            logger.info(f"Rank {accelerator.process_index} using seed: {rank_seed}")
+            augmentation_generator = torch.Generator().manual_seed(rank_seed)
+            case_generator = torch.Generator().manual_seed(base_seed)
+            logger.info(
+                f"Rank {accelerator.process_index} using seed: {rank_seed} "
+                f"(global_step={global_step})"
+            )
 
-            num_samples = args.validation_samples_per_gpu
+            # Every rank generates exactly one case. All ranks use the same random
+            # permutation, then take disjoint rank-strided entries.
+            num_samples = 1
             dataset_size = len(train_dataset.dataset)
-            
+            if dataset_size == 0:
+                raise ValueError("Validation dataset is empty")
+            case_order = torch.randperm(dataset_size, generator=case_generator).tolist()
+            candidate_indices = case_order[
+                accelerator.process_index::accelerator.num_processes
+            ]
+            if not candidate_indices:
+                logger.warning(
+                    "Validation dataset has fewer cases than ranks; "
+                    "some ranks must reuse a case."
+                )
+                candidate_indices = [
+                    case_order[accelerator.process_index % dataset_size]
+                ]
+
             video_length = int((args.validation_n_frames - 1) // vae.config.temporal_compression_ratio * vae.config.temporal_compression_ratio) + 1 if args.validation_n_frames != 1 else 1
 
-            # Sample with retry: ensure we get num_samples valid samples
             sampled_count = 0
-            used_indices = set()
-            max_retries = num_samples * 10  # Avoid infinite loop
-            
-            while sampled_count < num_samples and max_retries > 0:
-                max_retries -= 1
-                # Sample a new index
-                data_idx = torch.randint(0, dataset_size, (1,), generator=cpu_generator).item()
-                
-                # Skip if already used
-                if data_idx in used_indices:
-                    continue
-                used_indices.add(data_idx)
-                
+            max_retries = min(len(candidate_indices), 10)
+
+            for data_idx in candidate_indices[:max_retries]:
                 data_info = train_dataset.dataset[data_idx]
                 gt_video_path = data_info['file_path']
                 control_video_path = data_info.get('control_file_path', '')
@@ -235,8 +246,10 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     logger.warning(f"Control video not found: {control_video_full_path}, retrying...")
                     continue
 
-                # Decide temporal reversal (50% probability)
-                do_reverse = random.random() < 0.5
+                # Apply spatial augmentation only; never reverse video time.
+                do_horizontal_flip = (
+                    torch.rand((), generator=augmentation_generator).item() < 0.5
+                )
 
                 gt_cap = cv2.VideoCapture(gt_video_full_path)
                 gt_total_frames = int(gt_cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -256,12 +269,18 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 first_frame_rgb = cv2.cvtColor(first_frame, cv2.COLOR_BGR2RGB)
                 last_frame_rgb = cv2.cvtColor(last_frame, cv2.COLOR_BGR2RGB)
 
-                # If reversing, swap first and last frames
-                if do_reverse:
-                    first_frame_rgb, last_frame_rgb = last_frame_rgb, first_frame_rgb
-                    logger.info(f"Validation sample {sampled_count+1}/{num_samples}: idx={data_idx}, temporal REVERSED")
+                if do_horizontal_flip:
+                    first_frame_rgb = np.ascontiguousarray(first_frame_rgb[:, ::-1])
+                    last_frame_rgb = np.ascontiguousarray(last_frame_rgb[:, ::-1])
+                    logger.info(
+                        f"Validation sample {sampled_count+1}/{num_samples}: "
+                        f"idx={data_idx}, horizontally FLIPPED"
+                    )
                 else:
-                    logger.info(f"Validation sample {sampled_count+1}/{num_samples}: idx={data_idx}, temporal normal")
+                    logger.info(
+                        f"Validation sample {sampled_count+1}/{num_samples}: "
+                        f"idx={data_idx}, horizontal normal"
+                    )
 
                 # Read control video dimensions to compute target_w (ensures control and inpaint latent shapes match)
                 ctrl_cap = cv2.VideoCapture(control_video_full_path)
@@ -294,9 +313,8 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     control_video_full_path, video_length=video_length, sample_size=[target_h, target_w]
                 )
 
-                # Reverse control video if needed
-                if do_reverse:
-                    input_video = torch.flip(input_video, [2])
+                if do_horizontal_flip:
+                    input_video = torch.flip(input_video, [-1])
 
                 sample = pipeline(
                     text, 
@@ -320,10 +338,9 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     control_video_full_path, video_length=video_length, sample_size=[target_h, target_w]
                 )
 
-                # Reverse GT and control videos for concat if needed
-                if do_reverse:
-                    gt_video_for_concat = torch.flip(gt_video_for_concat, [2])
-                    control_video_for_concat = torch.flip(control_video_for_concat, [2])
+                if do_horizontal_flip:
+                    gt_video_for_concat = torch.flip(gt_video_for_concat, [-1])
+                    control_video_for_concat = torch.flip(control_video_for_concat, [-1])
 
                 gt_video_for_concat = gt_video_for_concat.to(sample.device, dtype=sample.dtype)
                 control_video_for_concat = control_video_for_concat.to(sample.device, dtype=sample.dtype)
@@ -342,9 +359,13 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 )
                 
                 sampled_count += 1
-            
-            if max_retries <= 0:
-                logger.warning(f"Validation: reached max retries, only generated {sampled_count}/{num_samples} samples")
+                break
+
+            if sampled_count < num_samples:
+                logger.warning(
+                    f"Validation: exhausted {max_retries} candidate(s), "
+                    f"only generated {sampled_count}/{num_samples} samples"
+                )
 
             del pipeline
             gc.collect()
