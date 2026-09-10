@@ -340,6 +340,10 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 if do_reverse:
                     input_video = torch.flip(input_video, [2])
 
+                # Prepare control_mask for pipeline (same format as training)
+                # control_mask_video_3ch is [1, 3, F, H, W], need to convert to [1, 1, F, H, W] for pipeline
+                control_mask_for_pipeline = control_mask_video_3ch[:, 0:1]  # Take first channel as mask
+                
                 sample = pipeline(
                     text, 
                     num_frames = video_length,
@@ -348,6 +352,7 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     width       = target_w,
                     generator   = generator,
                     control_video   = input_video,
+                    control_mask    = control_mask_for_pipeline,
                     video           = inpaint_video,
                     mask_video      = inpaint_video_mask,
                     num_inference_steps = 8,

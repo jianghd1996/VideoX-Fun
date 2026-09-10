@@ -719,18 +719,33 @@ class Wan2_2FunControlPipeline(DiffusionPipeline):
                 do_classifier_free_guidance
             )[1]
             
-            # Apply mask encoder if control_mask is provided and control_mask_encoder exists
-            if control_mask is not None and self.control_mask_encoder is not None:
-                # Downsample mask to latent resolution
-                control_mask_latents = F.interpolate(
-                    control_mask, 
-                    size=(control_video_latents.shape[2], control_video_latents.shape[3], control_video_latents.shape[4]), 
-                    mode='trilinear', 
-                    align_corners=False
+            # Process control mask the same way as inpaint mask (4 channels)
+            if control_mask is not None:
+                # control_mask: [B, 1, F, H, W] or [B, F, H, W]
+                if control_mask.dim() == 4:
+                    control_mask = control_mask.unsqueeze(1)  # [B, 1, F, H, W]
+                
+                # Repeat first frame 4 times to align with VAE temporal compression
+                control_mask = torch.concat(
+                    [
+                        torch.repeat_interleave(control_mask[:, :, 0:1], repeats=4, dim=2), 
+                        control_mask[:, :, 1:]
+                    ], dim=2
                 )
-                # Encode mask and add to control_video_latents
-                mask_features = self.control_mask_encoder(control_mask_latents)
-                control_video_latents = control_video_latents + mask_features
+                # Group into 4-channel format: [B, T_latent, 4, H, W]
+                control_mask = control_mask.view(
+                    control_mask.shape[0], 
+                    control_mask.shape[2] // 4, 
+                    4, 
+                    control_mask.shape[3], 
+                    control_mask.shape[4]
+                )
+                # Transpose to [B, 4, T_latent, H, W]
+                control_mask = control_mask.transpose(1, 2)
+                # Resize to latent resolution
+                control_mask = resize_mask(control_mask, control_video_latents)
+                # Concat control mask with control latents: [B, C+4, T, H, W]
+                control_video_latents = torch.cat([control_video_latents, control_mask], dim=1)
             
             control_camera_latents = None
         else:
