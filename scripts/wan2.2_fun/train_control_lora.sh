@@ -21,7 +21,7 @@ accelerate launch --gpu-ids 2,3 --num_processes=2 --mixed_precision="bf16" --mai
   --num_train_epochs=100 \
   --checkpointing_steps=500 \
   --validation_steps=500 \
-  --validation_samples_per_gpu=2 \
+  --validation_samples_per_gpu=1 \
   --validation_n_frames=81 \
   --learning_rate=1e-04 \
   --seed=42 \
