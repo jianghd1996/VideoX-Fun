@@ -2412,6 +2412,30 @@ def main():
                     else:
                         timesteps = mask_conditions.new_ones(mask_conditions_bs, seq_len) * timesteps[:, None,]
 
+                # Validate the permanent channel contract before Patchify:
+                # noisy latent | complete legacy condition | trailing mask(4).
+                patch_model = accelerator.unwrap_model(transformer3d)
+                actual_input_channels = (
+                    noisy_latents.shape[1] + control_latents.shape[1]
+                )
+                expected_input_channels = patch_model.patch_embedding.in_channels
+                if actual_input_channels != expected_input_channels:
+                    raise RuntimeError(
+                        "Patchify channel mismatch before training forward: "
+                        f"noisy={noisy_latents.shape[1]}, "
+                        f"condition_with_trailing_mask={control_latents.shape[1]}, "
+                        f"total={actual_input_channels}, "
+                        f"expected={expected_input_channels}."
+                    )
+                if global_step == 0 and step == 0:
+                    logger.info(
+                        "Training Patchify channel contract: "
+                        f"noisy={noisy_latents.shape[1]}, "
+                        f"legacy_condition={control_latents.shape[1] - 4}, "
+                        "trailing_control_mask=4, "
+                        f"total={actual_input_channels}."
+                    )
+
                 # Predict the noise residual
                 with torch.cuda.amp.autocast(dtype=weight_dtype), torch.cuda.device(device=accelerator.device):
                     noise_pred = transformer3d(
