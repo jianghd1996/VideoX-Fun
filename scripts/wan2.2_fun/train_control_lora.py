@@ -230,20 +230,26 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 data_info = train_dataset.dataset[data_idx]
                 gt_video_path = data_info['file_path']
                 control_video_path = data_info.get('control_file_path', '')
+                mask_video_path = data_info.get('mask_file_path', '')
                 text = data_info.get('text', '')
 
                 if train_dataset.data_root is not None:
                     gt_video_full_path = os.path.join(train_dataset.data_root, gt_video_path)
                     control_video_full_path = os.path.join(train_dataset.data_root, control_video_path) if control_video_path else ''
+                    mask_video_full_path = os.path.join(train_dataset.data_root, mask_video_path) if mask_video_path else ''
                 else:
                     gt_video_full_path = gt_video_path
                     control_video_full_path = control_video_path
+                    mask_video_full_path = mask_video_path
 
                 if not os.path.exists(gt_video_full_path):
                     logger.warning(f"GT video not found: {gt_video_full_path}, retrying...")
                     continue
                 if control_video_full_path and not os.path.exists(control_video_full_path):
                     logger.warning(f"Control video not found: {control_video_full_path}, retrying...")
+                    continue
+                if not mask_video_full_path or not os.path.exists(mask_video_full_path):
+                    logger.warning(f"Mask video not found: {mask_video_full_path}, retrying...")
                     continue
 
                 # Apply spatial augmentation only; never reverse video time.
@@ -313,8 +319,19 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     control_video_full_path, video_length=video_length, sample_size=[target_h, target_w]
                 )
 
+                # Read the mask with exactly the same frame count and spatial
+                # preprocessing as the control video. It is visualization-only:
+                # it is deliberately not passed to pipeline().
+                mask_video_for_concat, _, _, _ = get_video_to_video_latent(
+                    mask_video_full_path, video_length=video_length, sample_size=[target_h, target_w]
+                )
+                mask_video_for_concat = mask_video_for_concat.amax(
+                    dim=1, keepdim=True
+                ).expand(-1, 3, -1, -1, -1)
+
                 if do_horizontal_flip:
                     input_video = torch.flip(input_video, [-1])
+                    mask_video_for_concat = torch.flip(mask_video_for_concat, [-1])
 
                 sample = pipeline(
                     text, 
@@ -344,9 +361,14 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
 
                 gt_video_for_concat = gt_video_for_concat.to(sample.device, dtype=sample.dtype)
                 control_video_for_concat = control_video_for_concat.to(sample.device, dtype=sample.dtype)
+                mask_video_for_concat = mask_video_for_concat.to(sample.device, dtype=sample.dtype)
                 sample = sample.clamp(0, 1)
 
-                concat_video = torch.cat([gt_video_for_concat, control_video_for_concat, sample], dim=0)
+                # Four panels: GT | control video | mask video | generated.
+                concat_video = torch.cat(
+                    [gt_video_for_concat, control_video_for_concat, mask_video_for_concat, sample],
+                    dim=0,
+                )
 
                 os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
                 save_videos_grid(
@@ -355,7 +377,7 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                         args.output_dir, 
                         f"sample/sample-{global_step}-rank{accelerator.process_index}-idx{data_idx}.mp4"
                     ),
-                    n_rows=3
+                    n_rows=4
                 )
                 
                 sampled_count += 1
