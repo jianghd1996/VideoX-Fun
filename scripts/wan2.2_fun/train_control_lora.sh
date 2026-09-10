@@ -1,10 +1,10 @@
 export MODEL_NAME="/mnt/DataPart/jianghongda/VideoX-Fun/models/Diffusion_Transformer/Wan2.2-Fun-5B-Control"
 export DATASET_NAME="/mnt/DataPart/jianghongda/dataset/livephoto"
-export DATASET_META_NAME="/mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun-ori/datasets/dataset1+2.json"
+export DATASET_META_NAME="/mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun-mask/datasets/dataset_single.json"
 export TOKENIZERS_PARALLELISM=false
 NCCL_DEBUG=INFO
 
-accelerate launch --gpu-ids 6,7 --num_processes=2 --mixed_precision="bf16" --main_process_port=29501 scripts/wan2.2_fun/train_control_lora.py \
+accelerate launch --gpu-ids 2,3 --num_processes=2 --mixed_precision="bf16" --main_process_port=29501 scripts/wan2.2_fun/train_control_lora.py \
   --config_path="config/wan2.2/wan_civitai_5b.yaml" \
   --pretrained_model_name_or_path=$MODEL_NAME \
   --train_data_dir=$DATASET_NAME \
@@ -17,7 +17,7 @@ accelerate launch --gpu-ids 6,7 --num_processes=2 --mixed_precision="bf16" --mai
   --train_batch_size=1 \
   --video_repeat=1 \
   --gradient_accumulation_steps=1 \
-  --dataloader_num_workers=8 \
+  --dataloader_num_workers=4 \
   --num_train_epochs=100 \
   --checkpointing_steps=500 \
   --validation_steps=500 \
@@ -45,4 +45,4 @@ accelerate launch --gpu-ids 6,7 --num_processes=2 --mixed_precision="bf16" --mai
   --network_alpha=32 \
   --target_name="q,k,v,ffn.0,ffn.2" \
   --use_peft_lora \
-  --low_vram 
+  --low_vram
