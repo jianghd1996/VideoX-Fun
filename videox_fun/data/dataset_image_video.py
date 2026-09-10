@@ -348,6 +348,15 @@ class ImageVideoControlDataset(Dataset):
                 transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True),
             ]
         )
+        self.mask_transforms = transforms.Compose(
+            [
+                transforms.Resize(
+                    min(self.video_sample_size),
+                    interpolation=transforms.InterpolationMode.NEAREST,
+                ),
+                transforms.CenterCrop(self.video_sample_size),
+            ]
+        )
         if self.enable_camera_info:
             # Camera info only needs resize and crop, no normalization
             self.video_transforms_camera = transforms.Compose(
@@ -417,6 +426,10 @@ class ImageVideoControlDataset(Dataset):
             # Release video reader early to free file handles and decode buffers
             del video_reader
 
+            # Extract mask from control video using GT comparison
+            # This will be refined after control video is loaded
+            control_mask = None
+
             # Convert to tensor, normalize to [-1, 1], apply transforms
             if not self.enable_bucket:
                 pixel_values = torch.from_numpy(pixel_values).permute(0, 3, 1, 2).contiguous()
@@ -479,13 +492,63 @@ class ImageVideoControlDataset(Dataset):
                     # Release control video reader early
                     del control_video_reader
 
+                    # Load mask from external mask video file
+                    mask_video_id = data_info.get('mask_file_path', None)
+                    if mask_video_id is not None:
+                        if self.data_root is None:
+                            mask_video_path = mask_video_id
+                        else:
+                            mask_video_path = os.path.join(self.data_root, mask_video_id)
+                        
+                        with VideoReader_contextmanager(mask_video_path, num_threads=2) as mask_video_reader:
+                            try:
+                                mask_sample_args = (mask_video_reader, batch_index)
+                                mask_raw_frames = func_timeout(
+                                    VIDEO_READER_TIMEOUT, get_video_reader_batch, args=mask_sample_args
+                                )
+                                # Resize mask frames to match control video size
+                                resized_mask_frames = []
+                                for i in range(len(mask_raw_frames)):
+                                    resized_mask_frames.append(resize_frame(mask_raw_frames[i], self.larger_side_of_image_and_video))
+                                del mask_raw_frames
+                                mask_frames = np.stack(resized_mask_frames)
+                                del resized_mask_frames
+                                # Convert to grayscale mask: [F, H, W]
+                                if mask_frames.ndim == 4 and mask_frames.shape[-1] >= 1:
+                                    control_mask = mask_frames.max(axis=-1)  # [F, H, W] - take max channel
+                                else:
+                                    control_mask = mask_frames.squeeze(-1) if mask_frames.ndim == 4 else mask_frames
+                            except FunctionTimedOut:
+                                raise ValueError(f"Read mask video {idx} timeout.")
+                            except Exception as e:
+                                raise ValueError(f"Failed to extract frames from mask video. Error is {e}.")
+                        del mask_video_reader
+                    else:
+                        # No mask_file_path provided, use default all ones
+                        control_mask = np.ones((control_pixel_values.shape[0], control_pixel_values.shape[1], control_pixel_values.shape[2]), dtype=np.uint8)
+
                     # Convert to tensor and apply transforms
                     if not self.enable_bucket:
                         control_pixel_values = torch.from_numpy(control_pixel_values).permute(0, 3, 1, 2).contiguous()
                         control_pixel_values = control_pixel_values / 255.
                         control_pixel_values = self.video_transforms(control_pixel_values)
+                        
+                        # Convert to a one-channel 0..1 tensor and apply the
+                        # same resize/center-crop geometry as the control video.
+                        control_mask = torch.from_numpy(control_mask).float().unsqueeze(1)
+                        if control_mask.numel() > 0 and control_mask.max() > 1:
+                            control_mask = control_mask / 255.0
+                        control_mask = self.mask_transforms(control_mask).clamp(0, 1)
+                    else:
+                        # Bucket case: keep mask as numpy, will be converted in collate_fn
+                        pass
                 else:
                     control_pixel_values = torch.zeros_like(pixel_values) if not self.enable_bucket else np.zeros_like(pixel_values)
+                    # Default mask: all ones (valid everywhere)
+                    if not self.enable_bucket:
+                        control_mask = torch.ones(pixel_values.shape[0], 1, pixel_values.shape[2], pixel_values.shape[3])
+                    else:
+                        control_mask = np.ones((pixel_values.shape[0], pixel_values.shape[1], pixel_values.shape[2]), dtype=np.uint8)
                 control_camera_values = None
             
             # Temporal reversal augmentation
@@ -498,6 +561,25 @@ class ImageVideoControlDataset(Dataset):
                     control_pixel_values = control_pixel_values[::-1].copy()
                 elif isinstance(control_pixel_values, torch.Tensor):
                     control_pixel_values = control_pixel_values.flip(0).contiguous()
+                if isinstance(control_mask, np.ndarray):
+                    control_mask = control_mask[::-1].copy()
+                elif isinstance(control_mask, torch.Tensor):
+                    control_mask = control_mask.flip(0).contiguous()
+            
+            # Random horizontal flip augmentation (50% probability)
+            if random.random() < 0.5:
+                if isinstance(pixel_values, np.ndarray):
+                    pixel_values = pixel_values[:, :, ::-1, :].copy()
+                elif isinstance(pixel_values, torch.Tensor):
+                    pixel_values = pixel_values.flip(3).contiguous()
+                if isinstance(control_pixel_values, np.ndarray):
+                    control_pixel_values = control_pixel_values[:, :, ::-1, :].copy()
+                elif isinstance(control_pixel_values, torch.Tensor):
+                    control_pixel_values = control_pixel_values.flip(3).contiguous()
+                if isinstance(control_mask, np.ndarray):
+                    control_mask = control_mask[:, :, ::-1].copy()
+                elif isinstance(control_mask, torch.Tensor):
+                    control_mask = control_mask.flip(3).contiguous()
             
             # Load subject reference images (for subject-driven generation)
             if self.enable_subject_info:
@@ -523,7 +605,7 @@ class ImageVideoControlDataset(Dataset):
             else:
                 subject_image = None
 
-            return pixel_values, control_pixel_values, subject_image, control_camera_values, text, "video"
+            return pixel_values, control_pixel_values, control_mask, subject_image, control_camera_values, text, "video"
         else:
             # Load and preprocess image
             image_path, text = data_info['file_path'], data_info['text']
@@ -576,7 +658,18 @@ class ImageVideoControlDataset(Dataset):
             else:
                 subject_image = None
 
-            return image, control_image, subject_image, None, text, 'image'
+            # Image fallback: a fully valid one-channel mask.
+            if isinstance(image, torch.Tensor):
+                control_mask = torch.ones(
+                    image.shape[0], 1, image.shape[-2], image.shape[-1]
+                )
+            else:
+                control_mask = np.ones(
+                    (image.shape[0], image.shape[1], image.shape[2]),
+                    dtype=np.uint8,
+                )
+
+            return image, control_image, control_mask, subject_image, None, text, 'image'
 
     def __len__(self):
         return self.length
@@ -593,10 +686,11 @@ class ImageVideoControlDataset(Dataset):
                 if data_type_local != data_type:
                     raise ValueError("data_type_local != data_type")
 
-                pixel_values, control_pixel_values, subject_image, control_camera_values, name, data_type = self.get_batch(idx)
+                pixel_values, control_pixel_values, control_mask, subject_image, control_camera_values, name, data_type = self.get_batch(idx)
 
                 sample["pixel_values"] = pixel_values
                 sample["control_pixel_values"] = control_pixel_values
+                sample["control_mask"] = control_mask
                 sample["subject_image"] = subject_image
                 sample["text"] = name
                 sample["data_type"] = data_type
