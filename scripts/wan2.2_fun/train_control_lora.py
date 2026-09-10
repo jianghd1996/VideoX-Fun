@@ -328,10 +328,17 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 gt_total_frames = int(gt_cap.get(cv2.CAP_PROP_FRAME_COUNT))
                 gt_width = int(gt_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 gt_height = int(gt_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                gt_fps = gt_cap.get(cv2.CAP_PROP_FPS)
 
-                gt_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                validation_stride = max(args.video_sample_stride, 1)
+                first_frame_idx = 0
+                last_frame_idx = min(
+                    first_frame_idx + (video_length - 1) * validation_stride,
+                    gt_total_frames - 1,
+                )
+                gt_cap.set(cv2.CAP_PROP_POS_FRAMES, first_frame_idx)
                 ret_first, first_frame = gt_cap.read()
-                gt_cap.set(cv2.CAP_PROP_POS_FRAMES, gt_total_frames - 1)
+                gt_cap.set(cv2.CAP_PROP_POS_FRAMES, last_frame_idx)
                 ret_last, last_frame = gt_cap.read()
                 gt_cap.release()
 
@@ -353,7 +360,19 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 ctrl_cap = cv2.VideoCapture(control_video_full_path)
                 ctrl_width = int(ctrl_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 ctrl_height = int(ctrl_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                ctrl_fps = ctrl_cap.get(cv2.CAP_PROP_FPS)
                 ctrl_cap.release()
+
+                validation_gt_fps = (
+                    gt_fps / validation_stride if gt_fps > 0 else None
+                )
+                validation_ctrl_fps = (
+                    ctrl_fps / validation_stride if ctrl_fps > 0 else None
+                )
+                logger.info(
+                    f"Validation frame range: {first_frame_idx}..{last_frame_idx} "
+                    f"(stride={validation_stride}, frames={video_length})"
+                )
 
                 target_h = 960  # Validation height
                 target_w = int(target_h * ctrl_width / ctrl_height)
@@ -377,7 +396,10 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 )
 
                 input_video, input_video_mask, _, _ = get_video_to_video_latent(
-                    control_video_full_path, video_length=video_length, sample_size=[target_h, target_w]
+                    control_video_full_path,
+                    video_length=video_length,
+                    sample_size=[target_h, target_w],
+                    fps=validation_ctrl_fps,
                 )
 
                 # Flip the control video spatially, keeping time order intact.
@@ -390,11 +412,14 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 mask_frames = []
                 if mask_video_full_path and os.path.exists(mask_video_full_path):
                     mask_cap = cv2.VideoCapture(mask_video_full_path)
+                    mask_frame_idx = 0
                     while len(mask_frames) < video_length:
                         ret, frame = mask_cap.read()
                         if not ret:
                             break
-                        mask_frames.append(frame.max(axis=-1))
+                        if mask_frame_idx % validation_stride == 0:
+                            mask_frames.append(frame.max(axis=-1))
+                        mask_frame_idx += 1
                     mask_cap.release()
 
                 if mask_frames:
@@ -452,16 +477,22 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     control_mask    = control_mask_for_pipeline,
                     video           = inpaint_video,
                     mask_video      = inpaint_video_mask,
-                    num_inference_steps = 8,
+                    num_inference_steps = args.validation_num_inference_steps,
                     guidance_scale      = 4.5,
                     boundary            = config['transformer_additional_kwargs'].get('boundary', 0.900)
                 ).videos
 
                 gt_video_for_concat, _, _, _ = get_video_to_video_latent(
-                    gt_video_full_path, video_length=video_length, sample_size=[target_h, target_w]
+                    gt_video_full_path,
+                    video_length=video_length,
+                    sample_size=[target_h, target_w],
+                    fps=validation_gt_fps,
                 )
                 control_video_for_concat, _, _, _ = get_video_to_video_latent(
-                    control_video_full_path, video_length=video_length, sample_size=[target_h, target_w]
+                    control_video_full_path,
+                    video_length=video_length,
+                    sample_size=[target_h, target_w],
+                    fps=validation_ctrl_fps,
                 )
 
                 # Apply the same spatial flip for visualization.
@@ -782,6 +813,12 @@ def parse_args():
         type=int,
         default=21,
         help="Number of frames for validation video.",
+    )
+    parser.add_argument(
+        "--validation_num_inference_steps",
+        type=int,
+        default=50,
+        help="Number of denoising steps used for validation generation.",
     )
     parser.add_argument(
         "--validation_disable_control_mask",
