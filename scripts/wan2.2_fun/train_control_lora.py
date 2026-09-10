@@ -147,59 +147,8 @@ check_min_version("0.18.0.dev0")
 
 logger = get_logger(__name__, log_level="INFO")
 
-
-def expand_patch_embedding_for_validation(transformer):
-    """Temporarily append four zero-initialized mask channels to Patchify."""
-    old_patch_embedding = transformer.patch_embedding
-    if not isinstance(old_patch_embedding, torch.nn.Conv3d):
-        raise TypeError(
-            "Expected transformer.patch_embedding to be torch.nn.Conv3d, "
-            f"got {type(old_patch_embedding).__name__}."
-        )
-
-    old_in_channels = old_patch_embedding.in_channels
-    new_patch_embedding = torch.nn.Conv3d(
-        old_in_channels + 4,
-        old_patch_embedding.out_channels,
-        kernel_size=old_patch_embedding.kernel_size,
-        stride=old_patch_embedding.stride,
-        padding=old_patch_embedding.padding,
-        dilation=old_patch_embedding.dilation,
-        groups=old_patch_embedding.groups,
-        bias=old_patch_embedding.bias is not None,
-        padding_mode=old_patch_embedding.padding_mode,
-        device=old_patch_embedding.weight.device,
-        dtype=old_patch_embedding.weight.dtype,
-    )
-    with torch.no_grad():
-        new_patch_embedding.weight.zero_()
-        new_patch_embedding.weight[:, :old_in_channels].copy_(
-            old_patch_embedding.weight
-        )
-        if old_patch_embedding.bias is not None:
-            new_patch_embedding.bias.copy_(old_patch_embedding.bias)
-
-    new_patch_embedding.requires_grad_(False)
-    transformer.patch_embedding = new_patch_embedding
-    old_in_dim = getattr(transformer, "in_dim", None)
-    if old_in_dim is not None:
-        transformer.in_dim = old_in_channels + 4
-
-    if torch.count_nonzero(
-        new_patch_embedding.weight[:, old_in_channels:]
-    ).item() != 0:
-        raise RuntimeError("Validation mask channels were not zero initialized.")
-
-    logger.info(
-        "Temporarily expanded validation patch_embedding: "
-        f"{old_in_channels} -> {old_in_channels + 4}; new mask weights are zero."
-    )
-    return old_patch_embedding, old_in_dim
-
-
 def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, config, accelerator, weight_dtype, global_step, train_dataset):
     import cv2
-    patch_embedding_backups = []
     try:
         is_deepspeed = type(transformer3d).__name__ == 'DeepSpeedEngine'
         if is_deepspeed:
@@ -231,23 +180,6 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     ).to(weight_dtype)
 
                     transformer3d_2 = accelerator.unwrap_model(transformer3d) if type(transformer3d).__name__ == 'DistributedDataParallel' else transformer3d
-
-            # Expand every transformer that may run during validation. Keep a
-            # backup so training resumes with the untouched pretrained shape.
-            seen_transformers = set()
-            for validation_transformer in (transformer3d_1, transformer3d_2):
-                if validation_transformer is None:
-                    continue
-                patch_transformer = accelerator.unwrap_model(validation_transformer)
-                if id(patch_transformer) in seen_transformers:
-                    continue
-                seen_transformers.add(id(patch_transformer))
-                old_patch_embedding, old_in_dim = (
-                    expand_patch_embedding_for_validation(patch_transformer)
-                )
-                patch_embedding_backups.append(
-                    (patch_transformer, old_patch_embedding, old_in_dim)
-                )
 
             pipeline = Wan2_2FunControlPipeline(
                 vae=vae, 
@@ -409,7 +341,6 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     width       = target_w,
                     generator   = generator,
                     control_video   = input_video,
-                    control_mask    = mask_video_for_concat[:, :1],
                     video           = inpaint_video,
                     mask_video      = inpaint_video_mask,
                     num_inference_steps = 8,
@@ -478,15 +409,6 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
         transformer3d.to(accelerator.device, dtype=weight_dtype)
         if not args.enable_text_encoder_in_dataloader:
             text_encoder.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
-    finally:
-        # This stage is validation-only. Restore the original Patchify layer so
-        # the existing training forward remains completely unchanged.
-        for patch_transformer, old_patch_embedding, old_in_dim in reversed(
-            patch_embedding_backups
-        ):
-            patch_transformer.patch_embedding = old_patch_embedding
-            if old_in_dim is not None:
-                patch_transformer.in_dim = old_in_dim
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
