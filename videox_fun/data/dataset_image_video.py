@@ -348,6 +348,15 @@ class ImageVideoControlDataset(Dataset):
                 transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True),
             ]
         )
+        self.mask_transforms = transforms.Compose(
+            [
+                transforms.Resize(
+                    min(self.video_sample_size),
+                    interpolation=transforms.InterpolationMode.NEAREST,
+                ),
+                transforms.CenterCrop(self.video_sample_size),
+            ]
+        )
         if self.enable_camera_info:
             # Camera info only needs resize and crop, no normalization
             self.video_transforms_camera = transforms.Compose(
@@ -524,10 +533,12 @@ class ImageVideoControlDataset(Dataset):
                         control_pixel_values = control_pixel_values / 255.
                         control_pixel_values = self.video_transforms(control_pixel_values)
                         
-                        # control_mask is [F, Hc, Wc] uint8, convert to [F, 1, Hc, Wc] float
-                        control_mask = control_mask.float().unsqueeze(1)  # [F, 1, Hc, Wc]
-                        # Resize mask to match control_pixel_values size after transform
-                        control_mask = F.interpolate(control_mask.unsqueeze(0), size=control_pixel_values.shape[-2:], mode='nearest').squeeze(0)
+                        # Convert to a one-channel 0..1 tensor and apply the
+                        # same resize/center-crop geometry as the control video.
+                        control_mask = torch.from_numpy(control_mask).float().unsqueeze(1)
+                        if control_mask.numel() > 0 and control_mask.max() > 1:
+                            control_mask = control_mask / 255.0
+                        control_mask = self.mask_transforms(control_mask).clamp(0, 1)
                     else:
                         # Bucket case: keep mask as numpy, will be converted in collate_fn
                         pass
