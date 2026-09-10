@@ -173,7 +173,7 @@ check_min_version("0.18.0.dev0")
 
 logger = get_logger(__name__, log_level="INFO")
 
-def log_validation(vae, text_encoder, tokenizer, transformer3d, control_mask_encoder, network, args, config, accelerator, weight_dtype, global_step, train_dataset):
+def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, config, accelerator, weight_dtype, global_step, train_dataset):
     import cv2
     try:
         is_deepspeed = type(transformer3d).__name__ == 'DeepSpeedEngine'
@@ -246,14 +246,17 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, control_mask_enc
                 data_info = train_dataset.dataset[data_idx]
                 gt_video_path = data_info['file_path']
                 control_video_path = data_info.get('control_file_path', '')
+                mask_video_path = data_info.get('mask_file_path', '')
                 text = data_info.get('text', '')
 
                 if train_dataset.data_root is not None:
                     gt_video_full_path = os.path.join(train_dataset.data_root, gt_video_path)
                     control_video_full_path = os.path.join(train_dataset.data_root, control_video_path) if control_video_path else ''
+                    mask_video_full_path = os.path.join(train_dataset.data_root, mask_video_path) if mask_video_path else ''
                 else:
                     gt_video_full_path = gt_video_path
                     control_video_full_path = control_video_path
+                    mask_video_full_path = mask_video_path
 
                 if not os.path.exists(gt_video_full_path):
                     logger.warning(f"GT video not found: {gt_video_full_path}, retrying...")
@@ -337,19 +340,26 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, control_mask_enc
                     control_video_full_path, video_length=video_length, sample_size=[target_h, target_w]
                 )
 
-                # Extract GT-aware mask from control video
-                # control_video_for_concat and gt_video_for_concat are [1, C, F, H, W] in range [0, 1]
-                control_video_np = (control_video_for_concat[0].permute(1, 2, 3, 0).cpu().numpy() * 255).astype(np.uint8)  # [F, H, W, C]
-                gt_video_np = (gt_video_for_concat[0].permute(1, 2, 3, 0).cpu().numpy() * 255).astype(np.uint8)  # [F, H, W, C]
-                
-                # Mask = (control black) AND (GT not black) = background hole
-                control_black = control_video_np.max(axis=-1) < 20  # [F, H, W] bool
-                gt_black = gt_video_np.max(axis=-1) < 20  # [F, H, W] bool
-                control_mask_np = (control_black & ~gt_black).astype(np.float32)  # [F, H, W]
-                
-                control_mask_video = torch.from_numpy(control_mask_np).unsqueeze(0).unsqueeze(0).float()  # [1, 1, F, H, W]
-                # Expand to 3 channels for visualization
-                control_mask_video_3ch = control_mask_video.expand(-1, 3, -1, -1, -1)  # [1, 3, F, H, W]
+                # Load mask from external mask video file
+                if mask_video_full_path and os.path.exists(mask_video_full_path):
+                    mask_cap = cv2.VideoCapture(mask_video_full_path)
+                    mask_frames = []
+                    while True:
+                        ret, frame = mask_cap.read()
+                        if not ret:
+                            break
+                        # Convert to grayscale: take max channel as mask value
+                        mask_gray = frame.max(axis=-1)  # [H, W]
+                        mask_frames.append(mask_gray)
+                    mask_cap.release()
+                    mask_frames = np.stack(mask_frames)  # [F, H, W]
+                    # Resize to match target dimensions
+                    mask_tensor = torch.from_numpy(mask_frames).float().unsqueeze(0).unsqueeze(0)  # [1, 1, F, H, W]
+                    mask_tensor = F.interpolate(mask_tensor, size=(video_length, target_h, target_w), mode='trilinear', align_corners=False)
+                    control_mask_video_3ch = mask_tensor.expand(-1, 3, -1, -1, -1)  # [1, 3, F, H, W]
+                else:
+                    # Fallback: use ones (no mask)
+                    control_mask_video_3ch = torch.ones(1, 3, video_length, target_h, target_w)
 
                 # Reverse GT and control videos for concat if needed
                 if do_reverse:
@@ -1072,12 +1082,33 @@ def main():
         transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs']),
     ).to(weight_dtype)
 
-    # Initialize ControlMaskEncoder for mask-aware control
-    control_mask_encoder = ControlMaskEncoder(
-        in_channels=1, 
-        out_channels=vae.config.latent_channels, 
-        mid_channels=64
-    ).to(accelerator.device, dtype=weight_dtype)
+    # Expand patch_embedding input channels by 4 for control mask
+    # Get current in_dim from the loaded model
+    current_in_dim = transformer3d.patch_embedding.in_channels
+    new_in_dim = current_in_dim + 4  # +4 for control mask (same as inpaint mask)
+    
+    # Create new patch_embedding with expanded input channels
+    old_patch_embedding = transformer3d.patch_embedding
+    new_patch_embedding = torch.nn.Conv3d(
+        new_in_dim,
+        old_patch_embedding.out_channels,
+        kernel_size=old_patch_embedding.kernel_size,
+        stride=old_patch_embedding.stride,
+        padding=old_patch_embedding.padding,
+        bias=old_patch_embedding.bias is not None
+    ).to(device=old_patch_embedding.weight.device, dtype=old_patch_embedding.weight.dtype)
+    
+    # Copy old weights, zero initialize new channels
+    with torch.no_grad():
+        new_patch_embedding.weight[:, :current_in_dim] = old_patch_embedding.weight
+        new_patch_embedding.weight[:, current_in_dim:] = 0  # Zero init new channels
+        if old_patch_embedding.bias is not None:
+            new_patch_embedding.bias.copy_(old_patch_embedding.bias)
+    
+    transformer3d.patch_embedding = new_patch_embedding
+    transformer3d.in_dim = new_in_dim
+    
+    logging.info(f"Expanded patch_embedding in_channels: {current_in_dim} -> {new_in_dim} (+4 for control mask)")
 
     # Freeze vae and text_encoder and set transformer3d to trainable
     vae.requires_grad_(False)
@@ -1237,14 +1268,9 @@ def main():
         trainable_params = list(filter(lambda p: p.requires_grad, network.parameters()))
         trainable_params_optim = network.prepare_optimizer_params(args.learning_rate / 2, args.learning_rate, args.learning_rate)
 
-    # Add control_mask_encoder parameters (trained fully, not with LoRA)
-    mask_encoder_params = list(control_mask_encoder.parameters())
-    trainable_params.extend(mask_encoder_params)
-    logging.info(f"Added {len(mask_encoder_params)} control_mask_encoder parameters")
-
     if args.use_came:
         optimizer = optimizer_cls(
-            [{'params': trainable_params_optim}, {'params': mask_encoder_params, 'lr': args.learning_rate * 10}],
+            [{'params': trainable_params_optim}],
             lr=args.learning_rate,
             # weight_decay=args.adam_weight_decay,
             betas=(0.9, 0.999, 0.9999), 
@@ -1658,14 +1684,14 @@ def main():
 
     # Prepare everything with our `accelerator`.
     if args.use_peft_lora:
-        transformer3d, control_mask_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-            transformer3d, control_mask_encoder, optimizer, train_dataloader, lr_scheduler
+        transformer3d, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            transformer3d, optimizer, train_dataloader, lr_scheduler
         )
     else:
         transformer3d.network = network
         transformer3d = transformer3d.to(dtype=weight_dtype)
-        transformer3d, control_mask_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-            transformer3d, control_mask_encoder, optimizer, train_dataloader, lr_scheduler
+        transformer3d, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            transformer3d, optimizer, train_dataloader, lr_scheduler
         )
 
     if fsdp_stage != 0 or zero_stage != 0:
@@ -1678,7 +1704,6 @@ def main():
     # Move text_encode and vae to gpu and cast to weight_dtype
     vae.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
     transformer3d.to(accelerator.device, dtype=weight_dtype)
-    control_mask_encoder.to(accelerator.device, dtype=weight_dtype)
     if not args.enable_text_encoder_in_dataloader:
         text_encoder.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
 
@@ -1774,12 +1799,12 @@ def main():
                     # Load from directory
                     state_dict = load_file(os.path.join(checkpoint_folder_path, "lora_diffusion_pytorch_model.safetensors"), device=str(accelerator.device))
                 
-                # Separate mask encoder state dict if it exists
-                mask_encoder_state_dict = {}
+                # Separate mask encoder state dict if it exists (legacy compatibility)
                 lora_state_dict = {}
                 for k, v in state_dict.items():
                     if k.startswith("control_mask_encoder."):
-                        mask_encoder_state_dict[k.replace("control_mask_encoder.", "")] = v
+                        # Skip legacy mask encoder weights
+                        continue
                     else:
                         lora_state_dict[k] = v
                 
@@ -1791,12 +1816,6 @@ def main():
                     # Load into network for kohya-style
                     m, u = accelerator.unwrap_model(network).load_state_dict(lora_state_dict, strict=False)
                 print(f"missing keys: {len(m)}, unexpected keys: {len(u)}")
-                
-                # Load mask encoder state dict if it exists
-                if mask_encoder_state_dict:
-                    m, u = accelerator.unwrap_model(control_mask_encoder).load_state_dict(mask_encoder_state_dict, strict=False)
-                    print(f"Mask encoder - missing keys: {len(m)}, unexpected keys: {len(u)}")
-                else:
                     print("No mask encoder state dict found in checkpoint, using random initialization")
                 
                 # Only load optimizer/scheduler state if loading from directory (not safetensor file)
@@ -1913,7 +1932,6 @@ def main():
                 text_encoder,
                 tokenizer,
                 transformer3d,
-                control_mask_encoder,
                 network,
                 args,
                 config,
@@ -2091,19 +2109,24 @@ def main():
                     if args.train_mode != "control_camera_ref":
                         control_latents = _batch_encode_vae(control_pixel_values)
                         
-                        # Apply control mask encoder BEFORE concatenation (control_latents has vae.latent_channels here)
+                        # Process control mask the same way as inpaint mask (4 channels)
                         control_mask = batch["control_mask"].to(accelerator.device, dtype=weight_dtype)  # [B, F, 1, H, W]
                         control_mask = rearrange(control_mask, "b f c h w -> b c f h w")  # [B, 1, F, H, W]
-                        # Downsample mask to latent resolution
-                        control_mask_latents = F.interpolate(
-                            control_mask, 
-                            size=(control_latents.shape[2], control_latents.shape[3], control_latents.shape[4]), 
-                            mode='trilinear', 
-                            align_corners=False
+                        # Repeat first frame 4 times to align with VAE temporal compression
+                        control_mask = torch.concat(
+                            [
+                                torch.repeat_interleave(control_mask[:, :, 0:1], repeats=4, dim=2), 
+                                control_mask[:, :, 1:]
+                            ], dim=2
                         )
-                        # Encode mask and add to control_latents (both have vae.latent_channels)
-                        mask_features = control_mask_encoder(control_mask_latents)
-                        control_latents = control_latents + mask_features
+                        # Group into 4-channel format: [B, T_latent, 4, H, W]
+                        control_mask = control_mask.view(control_mask.shape[0], control_mask.shape[2] // 4, 4, control_mask.shape[3], control_mask.shape[4])
+                        # Transpose to [B, 4, T_latent, H, W]
+                        control_mask = control_mask.transpose(1, 2)
+                        # Resize to latent resolution
+                        control_mask = resize_mask(control_mask, control_latents)
+                        # Concat control mask with control latents: [B, 16+4, T, H, W]
+                        control_latents = torch.cat([control_latents, control_mask], dim=1)
                         
                         # Make control latents to zero
                         for bs_index in range(control_latents.size()[0]):
@@ -2379,28 +2402,16 @@ def main():
                             if args.use_peft_lora:
                                 safetensor_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}.safetensors")
                                 network_state_dict = get_peft_model_state_dict(accelerator.unwrap_model(transformer3d))
-                                # Add mask encoder state dict
-                                mask_encoder_state_dict = accelerator.unwrap_model(control_mask_encoder).state_dict()
-                                for k, v in mask_encoder_state_dict.items():
-                                    network_state_dict[f"control_mask_encoder.{k}"] = v
                                 save_model(safetensor_save_path, network_state_dict)
                                 logger.info(f"Saved safetensor to {safetensor_save_path}")
                             else:
                                 safetensor_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}.safetensors")
                                 network_state_dict = accelerator.unwrap_model(network).state_dict()
-                                # Add mask encoder state dict
-                                mask_encoder_state_dict = accelerator.unwrap_model(control_mask_encoder).state_dict()
-                                for k, v in mask_encoder_state_dict.items():
-                                    network_state_dict[f"control_mask_encoder.{k}"] = v
                                 save_model(safetensor_save_path, network_state_dict)
                                 logger.info(f"Saved safetensor to {safetensor_save_path}")
                         else:
                             accelerator_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
                             accelerator.save_state(accelerator_save_path)
-                            # Also save mask encoder
-                            if accelerator.is_main_process:
-                                mask_encoder_save_path = os.path.join(accelerator_save_path, "control_mask_encoder.safetensors")
-                                save_model(mask_encoder_save_path, accelerator.unwrap_model(control_mask_encoder).state_dict())
                             logger.info(f"Saved state to {accelerator_save_path}")
 
                 if global_step % args.validation_steps == 0:
@@ -2409,7 +2420,6 @@ def main():
                         text_encoder,
                         tokenizer,
                         transformer3d,
-                        control_mask_encoder,
                         network,
                         args,
                         config,
@@ -2431,7 +2441,6 @@ def main():
                 text_encoder,
                 tokenizer,
                 transformer3d,
-                control_mask_encoder,
                 network,
                 args,
                 config,
@@ -2451,28 +2460,16 @@ def main():
             if args.use_peft_lora:
                 safetensor_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}.safetensors")
                 network_state_dict = get_peft_model_state_dict(accelerator.unwrap_model(transformer3d))
-                # Add mask encoder state dict
-                mask_encoder_state_dict = accelerator.unwrap_model(control_mask_encoder).state_dict()
-                for k, v in mask_encoder_state_dict.items():
-                    network_state_dict[f"control_mask_encoder.{k}"] = v
                 save_model(safetensor_save_path, network_state_dict)
                 logger.info(f"Saved safetensor to {safetensor_save_path}")
             else:
                 safetensor_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}.safetensors")
                 network_state_dict = accelerator.unwrap_model(network).state_dict()
-                # Add mask encoder state dict
-                mask_encoder_state_dict = accelerator.unwrap_model(control_mask_encoder).state_dict()
-                for k, v in mask_encoder_state_dict.items():
-                    network_state_dict[f"control_mask_encoder.{k}"] = v
                 save_model(safetensor_save_path, network_state_dict)
                 logger.info(f"Saved safetensor to {safetensor_save_path}")
         else:
             accelerator_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
             accelerator.save_state(accelerator_save_path)
-            # Also save mask encoder
-            if accelerator.is_main_process:
-                mask_encoder_save_path = os.path.join(accelerator_save_path, "control_mask_encoder.safetensors")
-                save_model(mask_encoder_save_path, accelerator.unwrap_model(control_mask_encoder).state_dict())
             logger.info(f"Saved state to {accelerator_save_path}")
 
     accelerator.end_training()

@@ -483,20 +483,40 @@ class ImageVideoControlDataset(Dataset):
                     # Release control video reader early
                     del control_video_reader
 
-                    # Extract mask: control black AND GT not black = background hole
-                    # control black AND GT black = foreground (don't mask)
-                    # GT and control may have different spatial dims, so compute separately
-                    control_black = control_pixel_values.max(axis=-1) < 20  # [F, Hc, Wc] bool
-                    gt_black = pixel_values.max(axis=-1) < 20  # [F, Hg, Wg] bool (numpy)
-                    
-                    # Convert to tensors and resize GT mask to control's spatial dims
-                    control_black_t = torch.from_numpy(control_black.astype(np.uint8)).unsqueeze(1).float()  # [F, 1, Hc, Wc]
-                    gt_black_t = torch.from_numpy(gt_black.astype(np.uint8)).unsqueeze(1).float()  # [F, 1, Hg, Wg]
-                    # Resize GT mask to match control resolution
-                    gt_black_t = F.interpolate(gt_black_t, size=control_black_t.shape[-2:], mode='nearest')
-                    # Background hole = control is black AND GT is not black
-                    control_mask_t = (control_black_t * (1 - gt_black_t)).to(torch.uint8)  # [F, 1, Hc, Wc]
-                    control_mask = control_mask_t.squeeze(1)  # [F, Hc, Wc] uint8
+                    # Load mask from external mask video file
+                    mask_video_id = data_info.get('mask_file_path', None)
+                    if mask_video_id is not None:
+                        if self.data_root is None:
+                            mask_video_path = mask_video_id
+                        else:
+                            mask_video_path = os.path.join(self.data_root, mask_video_id)
+                        
+                        with VideoReader_contextmanager(mask_video_path, num_threads=2) as mask_video_reader:
+                            try:
+                                mask_sample_args = (mask_video_reader, batch_index)
+                                mask_raw_frames = func_timeout(
+                                    VIDEO_READER_TIMEOUT, get_video_reader_batch, args=mask_sample_args
+                                )
+                                # Resize mask frames to match control video size
+                                resized_mask_frames = []
+                                for i in range(len(mask_raw_frames)):
+                                    resized_mask_frames.append(resize_frame(mask_raw_frames[i], self.larger_side_of_image_and_video))
+                                del mask_raw_frames
+                                mask_frames = np.stack(resized_mask_frames)
+                                del resized_mask_frames
+                                # Convert to grayscale mask: [F, H, W]
+                                if mask_frames.ndim == 4 and mask_frames.shape[-1] >= 1:
+                                    control_mask = mask_frames.max(axis=-1)  # [F, H, W] - take max channel
+                                else:
+                                    control_mask = mask_frames.squeeze(-1) if mask_frames.ndim == 4 else mask_frames
+                            except FunctionTimedOut:
+                                raise ValueError(f"Read mask video {idx} timeout.")
+                            except Exception as e:
+                                raise ValueError(f"Failed to extract frames from mask video. Error is {e}.")
+                        del mask_video_reader
+                    else:
+                        # No mask_file_path provided, use default all ones
+                        control_mask = np.ones((control_pixel_values.shape[0], control_pixel_values.shape[1], control_pixel_values.shape[2]), dtype=np.uint8)
 
                     # Convert to tensor and apply transforms
                     if not self.enable_bucket:
