@@ -354,31 +354,41 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 if do_horizontal_flip:
                     input_video = torch.flip(input_video, [-1])
 
-                # Load mask from external mask video file
+                # Load exactly the same first N timestamps as control_video.
+                # Do not temporally resize the full mask clip: that compresses
+                # its motion and makes it appear faster than control/GT.
+                mask_frames = []
                 if mask_video_full_path and os.path.exists(mask_video_full_path):
                     mask_cap = cv2.VideoCapture(mask_video_full_path)
-                    mask_frames = []
-                    while True:
+                    while len(mask_frames) < video_length:
                         ret, frame = mask_cap.read()
                         if not ret:
                             break
-                        # Convert to grayscale: take max channel as mask value
-                        mask_gray = frame.max(axis=-1)  # [H, W]
-                        mask_frames.append(mask_gray)
+                        mask_frames.append(frame.max(axis=-1))
                     mask_cap.release()
-                    mask_frames = np.stack(mask_frames)  # [F, H, W]
-                    # Normalize before visualization/model input. Use nearest
-                    # interpolation to preserve binary mask boundaries.
-                    mask_tensor = torch.from_numpy(mask_frames).float().div_(255.0).unsqueeze(0).unsqueeze(0)
+
+                if mask_frames:
+                    # Pad a short mask clip with its last frame, matching the
+                    # requested validation length without changing its speed.
+                    if len(mask_frames) < video_length:
+                        mask_frames.extend(
+                            [mask_frames[-1]] * (video_length - len(mask_frames))
+                        )
+                    mask_tensor = torch.from_numpy(np.stack(mask_frames)).float()
+                    if mask_tensor.max() > 1:
+                        mask_tensor = mask_tensor / 255.0
+                    # [F, H, W] -> resize only H/W -> [1, 1, F, H, W]
                     mask_tensor = F.interpolate(
-                        mask_tensor,
-                        size=(video_length, target_h, target_w),
+                        mask_tensor.unsqueeze(1),
+                        size=(target_h, target_w),
                         mode='nearest',
-                    )
-                    control_mask_video_3ch = mask_tensor.expand(-1, 3, -1, -1, -1)  # [1, 3, F, H, W]
+                    ).permute(1, 0, 2, 3).unsqueeze(0)
+                    control_mask_video_3ch = mask_tensor.expand(-1, 3, -1, -1, -1)
                 else:
-                    # Fallback: use ones (no mask)
-                    control_mask_video_3ch = torch.ones(1, 3, video_length, target_h, target_w)
+                    # Fallback: use ones (valid control everywhere).
+                    control_mask_video_3ch = torch.ones(
+                        1, 3, video_length, target_h, target_w
+                    )
 
                 # Apply the same spatial flip as GT/control video.
                 if do_horizontal_flip:
@@ -386,9 +396,17 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
 
                 control_mask_video_3ch = control_mask_video_3ch.to(input_video.device, dtype=input_video.dtype)
 
-                # Prepare control_mask for pipeline (same format as training)
-                # control_mask_video_3ch is [1, 3, F, H, W], need to convert to [1, 1, F, H, W] for pipeline
-                control_mask_for_pipeline = control_mask_video_3ch[:, 0:1]  # Take first channel as mask
+                # Keep the four packed mask channels present for Patchify,
+                # but allow an all-zero mask ablation during validation.
+                control_mask_for_pipeline = control_mask_video_3ch[:, 0:1]
+                if args.validation_disable_control_mask:
+                    control_mask_for_pipeline = torch.zeros_like(
+                        control_mask_for_pipeline
+                    )
+                    logger.info("Validation control-mask input disabled (zero ablation).")
+                mask_mode_suffix = (
+                    "-nomask" if args.validation_disable_control_mask else ""
+                )
                 
                 sample = pipeline(
                     text, 
@@ -431,7 +449,7 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     concat_video, 
                     os.path.join(
                         args.output_dir, 
-                        f"sample/sample-{global_step}-rank{accelerator.process_index}-idx{data_idx}.mp4"
+                        f"sample/sample-{global_step}-rank{accelerator.process_index}-idx{data_idx}{mask_mode_suffix}.mp4"
                     ),
                     n_rows=4
                 )
@@ -729,6 +747,14 @@ def parse_args():
         type=int,
         default=21,
         help="Number of frames for validation video.",
+    )
+    parser.add_argument(
+        "--validation_disable_control_mask",
+        action="store_true",
+        help=(
+            "Disable the control-mask signal during validation by passing an "
+            "all-zero mask while preserving Patchify input channels."
+        ),
     )
     parser.add_argument(
         "--tracker_project_name",
