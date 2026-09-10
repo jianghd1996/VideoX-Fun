@@ -173,6 +173,28 @@ check_min_version("0.18.0.dev0")
 
 logger = get_logger(__name__, log_level="INFO")
 
+def save_patch_embedding(transformer3d, save_path):
+    """Save expanded patch_embedding weights alongside checkpoint."""
+    pe_state_dict = {f"patch_embedding.{k}": v for k, v in transformer3d.patch_embedding.state_dict().items()}
+    # Load existing safetensors, merge, and re-save
+    if os.path.exists(save_path):
+        from safetensors.torch import load_file as sf_load_file
+        existing = sf_load(save_path)
+        existing.update(pe_state_dict)
+        save_model(save_path, existing)
+    else:
+        save_model(save_path, pe_state_dict)
+
+def load_patch_embedding(transformer3d, state_dict):
+    """Load patch_embedding weights from checkpoint state dict."""
+    pe_keys = [k for k in state_dict if k.startswith("patch_embedding.")]
+    if pe_keys:
+        pe_state_dict = {k.replace("patch_embedding.", ""): state_dict[k] for k in pe_keys}
+        m, u = transformer3d.patch_embedding.load_state_dict(pe_state_dict, strict=False)
+        logging.info(f"Loaded patch_embedding - missing: {len(m)}, unexpected: {len(u)}")
+        return True
+    return False
+
 def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, config, accelerator, weight_dtype, global_step, train_dataset):
     import cv2
     try:
@@ -1114,6 +1136,10 @@ def main():
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
     transformer3d.requires_grad_(False)
+    
+    # Make patch_embedding trainable (new +4 channels need to learn from zero init)
+    for param in transformer3d.patch_embedding.parameters():
+        param.requires_grad_(True)
 
     # Lora will work with this...
     if args.use_peft_lora:
@@ -1267,6 +1293,11 @@ def main():
         logging.info("Add network parameters")
         trainable_params = list(filter(lambda p: p.requires_grad, network.parameters()))
         trainable_params_optim = network.prepare_optimizer_params(args.learning_rate / 2, args.learning_rate, args.learning_rate)
+        # Add patch_embedding params (not part of kohya network)
+        patch_embedding_params = list(filter(lambda p: p.requires_grad, transformer3d.patch_embedding.parameters()))
+        trainable_params.extend(patch_embedding_params)
+        trainable_params_optim.append({'params': patch_embedding_params, 'lr': args.learning_rate})
+        logging.info(f"Added {len(patch_embedding_params)} patch_embedding parameters for training")
 
     if args.use_came:
         optimizer = optimizer_cls(
@@ -1278,7 +1309,7 @@ def main():
         )
     else:
         optimizer = optimizer_cls(
-            [{'params': trainable_params_optim}, {'params': mask_encoder_params, 'lr': args.learning_rate * 10}],
+            [{'params': trainable_params_optim}],
             lr=args.learning_rate,
             betas=(args.adam_beta1, args.adam_beta2),
             weight_decay=args.adam_weight_decay,
@@ -1801,10 +1832,13 @@ def main():
                 
                 # Separate mask encoder state dict if it exists (legacy compatibility)
                 lora_state_dict = {}
+                patch_embedding_state_dict = {}
                 for k, v in state_dict.items():
                     if k.startswith("control_mask_encoder."):
                         # Skip legacy mask encoder weights
                         continue
+                    elif k.startswith("patch_embedding."):
+                        patch_embedding_state_dict[k.replace("patch_embedding.", "")] = v
                     else:
                         lora_state_dict[k] = v
                 
@@ -1816,7 +1850,13 @@ def main():
                     # Load into network for kohya-style
                     m, u = accelerator.unwrap_model(network).load_state_dict(lora_state_dict, strict=False)
                 print(f"missing keys: {len(m)}, unexpected keys: {len(u)}")
-                    print("No mask encoder state dict found in checkpoint, using random initialization")
+                
+                # Load patch_embedding state dict if it exists
+                if patch_embedding_state_dict:
+                    m, u = accelerator.unwrap_model(transformer3d).patch_embedding.load_state_dict(patch_embedding_state_dict, strict=False)
+                    print(f"Loaded patch_embedding - missing: {len(m)}, unexpected: {len(u)}")
+                else:
+                    print("No patch_embedding state dict found in checkpoint, using zero-initialized weights")
                 
                 # Only load optimizer/scheduler state if loading from directory (not safetensor file)
                 if not is_safetensor_file:
@@ -2402,11 +2442,17 @@ def main():
                             if args.use_peft_lora:
                                 safetensor_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}.safetensors")
                                 network_state_dict = get_peft_model_state_dict(accelerator.unwrap_model(transformer3d))
+                                # Include patch_embedding weights
+                                for k, v in accelerator.unwrap_model(transformer3d).patch_embedding.state_dict().items():
+                                    network_state_dict[f"patch_embedding.{k}"] = v
                                 save_model(safetensor_save_path, network_state_dict)
                                 logger.info(f"Saved safetensor to {safetensor_save_path}")
                             else:
                                 safetensor_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}.safetensors")
                                 network_state_dict = accelerator.unwrap_model(network).state_dict()
+                                # Include patch_embedding weights
+                                for k, v in accelerator.unwrap_model(transformer3d).patch_embedding.state_dict().items():
+                                    network_state_dict[f"patch_embedding.{k}"] = v
                                 save_model(safetensor_save_path, network_state_dict)
                                 logger.info(f"Saved safetensor to {safetensor_save_path}")
                         else:
@@ -2460,11 +2506,17 @@ def main():
             if args.use_peft_lora:
                 safetensor_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}.safetensors")
                 network_state_dict = get_peft_model_state_dict(accelerator.unwrap_model(transformer3d))
+                # Include patch_embedding weights
+                for k, v in accelerator.unwrap_model(transformer3d).patch_embedding.state_dict().items():
+                    network_state_dict[f"patch_embedding.{k}"] = v
                 save_model(safetensor_save_path, network_state_dict)
                 logger.info(f"Saved safetensor to {safetensor_save_path}")
             else:
                 safetensor_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}.safetensors")
                 network_state_dict = accelerator.unwrap_model(network).state_dict()
+                # Include patch_embedding weights
+                for k, v in accelerator.unwrap_model(transformer3d).patch_embedding.state_dict().items():
+                    network_state_dict[f"patch_embedding.{k}"] = v
                 save_model(safetensor_save_path, network_state_dict)
                 logger.info(f"Saved safetensor to {safetensor_save_path}")
         else:
