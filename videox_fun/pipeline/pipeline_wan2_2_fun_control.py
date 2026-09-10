@@ -512,7 +512,6 @@ class Wan2_2FunControlPipeline(DiffusionPipeline):
         mask_video: Union[torch.FloatTensor] = None,
         control_video: Union[torch.FloatTensor] = None,
         control_camera_video: Union[torch.FloatTensor] = None,
-        control_mask: Union[torch.FloatTensor] = None,
         start_image: Union[torch.FloatTensor] = None,
         ref_image: Union[torch.FloatTensor] = None,
         num_frames: int = 49,
@@ -717,42 +716,6 @@ class Wan2_2FunControlPipeline(DiffusionPipeline):
                 generator,
                 do_classifier_free_guidance
             )[1]
-
-            # Pack the per-frame mask exactly like the native inpaint mask:
-            # repeat frame 0 four times, group every four frames into channels,
-            # then resize to the control latent grid.
-            if control_mask is not None:
-                if control_mask.dim() == 4:
-                    control_mask = control_mask.unsqueeze(1)
-                control_mask = control_mask.to(
-                    device=control_video_latents.device,
-                    dtype=control_video_latents.dtype,
-                )
-                control_mask = torch.cat(
-                    [
-                        torch.repeat_interleave(
-                            control_mask[:, :, 0:1], repeats=4, dim=2
-                        ),
-                        control_mask[:, :, 1:],
-                    ],
-                    dim=2,
-                )
-                batch, _, packed_frames, mask_h, mask_w = control_mask.shape
-                if packed_frames % 4 != 0:
-                    raise ValueError(
-                        f"Packed control mask has {packed_frames} frames, "
-                        "which is not divisible by 4."
-                    )
-                control_mask = control_mask.view(
-                    batch, 1, packed_frames // 4, 4, mask_h, mask_w
-                ).squeeze(1).transpose(1, 2).contiguous()
-                control_mask = resize_mask(
-                    control_mask, control_video_latents
-                )
-                control_video_latents = torch.cat(
-                    [control_video_latents, control_mask], dim=1
-                )
-
             control_camera_latents = None
         else:
             control_video_latents = torch.zeros_like(latents).to(device, weight_dtype)
