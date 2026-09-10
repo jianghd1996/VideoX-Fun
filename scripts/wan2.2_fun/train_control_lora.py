@@ -321,9 +321,19 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 ctrl_height = int(ctrl_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 ctrl_cap.release()
 
-                target_h = 960  # 720P
+                target_h = 960  # Validation height
                 target_w = int(target_h * ctrl_width / ctrl_height)
-                target_w = target_w - (target_w % 16)
+
+                # The VAE latent size must be divisible by the transformer's
+                # spatial patch size. For a 16x VAE and 2x2 patches this means
+                # that pixel-space height and width must be divisible by 32.
+                spatial_ratio = pipeline.vae.spatial_compression_ratio
+                patch_h = pipeline.transformer.config.patch_size[1]
+                patch_w = pipeline.transformer.config.patch_size[2]
+                height_multiple = spatial_ratio * patch_h
+                width_multiple = spatial_ratio * patch_w
+                target_h = target_h - (target_h % height_multiple)
+                target_w = target_w - (target_w % width_multiple)
 
                 first_frame_pil = Image.fromarray(first_frame_rgb).resize((target_w, target_h))
                 last_frame_pil = Image.fromarray(last_frame_rgb).resize((target_w, target_h))
@@ -354,7 +364,7 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     mask_cap.release()
                     mask_frames = np.stack(mask_frames)  # [F, H, W]
                     # Resize to match target dimensions
-                    mask_tensor = torch.from_numpy(mask_frames).float().unsqueeze(0).unsqueeze(0)  # [1, 1, F, H, W]
+                    mask_tensor = torch.from_numpy(mask_frames).float().div_(255.0).unsqueeze(0).unsqueeze(0)  # [1, 1, F, H, W]
                     mask_tensor = F.interpolate(mask_tensor, size=(video_length, target_h, target_w), mode='trilinear', align_corners=False)
                     control_mask_video_3ch = mask_tensor.expand(-1, 3, -1, -1, -1)  # [1, 3, F, H, W]
                 else:
@@ -1546,6 +1556,16 @@ def main():
                             control_mask = control_mask.unsqueeze(1).float()
                         # Already 4D, keep as is
 
+                    control_mask = control_mask.float()
+                    # Dataset masks may be stored as uint8 0..255 images.
+                    if control_mask.numel() > 0 and control_mask.max() > 1:
+                        control_mask = control_mask / 255.0
+                    # The transformer expects one mask channel before temporal
+                    # packing. Collapse RGB masks in the same way as validation.
+                    if control_mask.shape[1] > 1:
+                        control_mask = control_mask.max(dim=1, keepdim=True).values
+                    control_mask = control_mask.clamp(0, 1)
+
                 if args.fix_sample_size is not None:
                     # Get adapt hw for resize
                     fix_sample_size = list(map(lambda x: int(x), fix_sample_size))
@@ -1557,6 +1577,10 @@ def main():
 
                     transform_no_normalize = transforms.Compose([
                         transforms.Resize(fix_sample_size, interpolation=transforms.InterpolationMode.BILINEAR),  # Image.BICUBIC
+                        transforms.CenterCrop(fix_sample_size),
+                    ])
+                    mask_transform = transforms.Compose([
+                        transforms.Resize(fix_sample_size, interpolation=transforms.InterpolationMode.NEAREST),
                         transforms.CenterCrop(fix_sample_size),
                     ])
                 elif args.random_ratio_crop:
@@ -1580,6 +1604,10 @@ def main():
                         transforms.Resize([nh, nw]),
                         transforms.CenterCrop([int(x) for x in random_sample_size]),
                     ])
+                    mask_transform = transforms.Compose([
+                        transforms.Resize([nh, nw], interpolation=transforms.InterpolationMode.NEAREST),
+                        transforms.CenterCrop([int(x) for x in random_sample_size]),
+                    ])
                 else:
                     # Get adapt hw for resize
                     closest_size = list(map(lambda x: int(x), closest_size))
@@ -1598,21 +1626,28 @@ def main():
                         transforms.Resize(resize_size, interpolation=transforms.InterpolationMode.BILINEAR),  # Image.BICUBIC
                         transforms.CenterCrop(closest_size),
                     ])
+                    mask_transform = transforms.Compose([
+                        transforms.Resize(resize_size, interpolation=transforms.InterpolationMode.NEAREST),
+                        transforms.CenterCrop(closest_size),
+                    ])
 
                 new_examples["pixel_values"].append(transform(pixel_values)[:batch_video_length])
                 new_examples["control_pixel_values"].append(transform(control_pixel_values))
                 
-                # Process and append control mask
+                # Apply exactly the same spatial resize/crop as the videos.
+                # Nearest-neighbor interpolation preserves binary mask values.
                 if control_mask is not None:
-                    # control_mask is [F, H, W] uint8, convert to [F, 1, H, W] float
-                    if isinstance(control_mask, np.ndarray):
-                        control_mask = torch.from_numpy(control_mask).unsqueeze(1).float()  # [F, 1, H, W]
-                    elif isinstance(control_mask, torch.Tensor) and control_mask.dim() == 3:
-                        control_mask = control_mask.unsqueeze(1).float()  # [F, 1, H, W]
-                    new_examples["control_mask"].append(control_mask[:batch_video_length])
+                    transformed_control_mask = mask_transform(control_mask)
+                    new_examples["control_mask"].append(transformed_control_mask[:batch_video_length])
                 else:
-                    # Default: all ones (no mask)
-                    mask_shape = (control_pixel_values.shape[0], 1, control_pixel_values.shape[2], control_pixel_values.shape[3])
+                    # Default: all ones (no mask), already at the transformed size.
+                    transformed_control = new_examples["control_pixel_values"][-1]
+                    mask_shape = (
+                        transformed_control.shape[0],
+                        1,
+                        transformed_control.shape[-2],
+                        transformed_control.shape[-1],
+                    )
                     new_examples["control_mask"].append(torch.ones(mask_shape))
             
                 if args.train_mode == "control_camera_ref":
