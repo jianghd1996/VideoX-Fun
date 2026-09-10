@@ -197,7 +197,37 @@ def load_patch_embedding(transformer3d, state_dict):
 
 def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, config, accelerator, weight_dtype, global_step, train_dataset):
     import cv2
+
+    original_lora_multiplier = None
+    disabled_peft_modules = []
+
+    def restore_validation_lora():
+        if original_lora_multiplier is not None:
+            network.set_multiplier(original_lora_multiplier)
+        for module in disabled_peft_modules:
+            module.enable_adapters(True)
+
     try:
+        if args.validation_disable_lora:
+            if network is not None:
+                original_lora_multiplier = network.multiplier
+                network.set_multiplier(0.0)
+                logger.info("Validation LoRA disabled: Kohya multiplier set to 0.")
+            else:
+                unwrapped_transformer = accelerator.unwrap_model(transformer3d)
+                for module in unwrapped_transformer.modules():
+                    if hasattr(module, "enable_adapters"):
+                        module.enable_adapters(False)
+                        disabled_peft_modules.append(module)
+                if not disabled_peft_modules:
+                    raise RuntimeError(
+                        "--validation_disable_lora was requested, but no "
+                        "Kohya network or PEFT adapter modules were found."
+                    )
+                logger.info(
+                    f"Validation LoRA disabled: turned off adapters in "
+                    f"{len(disabled_peft_modules)} PEFT modules."
+                )
         is_deepspeed = type(transformer3d).__name__ == 'DeepSpeedEngine'
         if is_deepspeed:
             origin_config = transformer3d.config
@@ -407,6 +437,9 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 mask_mode_suffix = (
                     "-nomask" if args.validation_disable_control_mask else ""
                 )
+                lora_mode_suffix = (
+                    "-nolora" if args.validation_disable_lora else ""
+                )
                 
                 sample = pipeline(
                     text, 
@@ -449,7 +482,7 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     concat_video, 
                     os.path.join(
                         args.output_dir, 
-                        f"sample/sample-{global_step}-rank{accelerator.process_index}-idx{data_idx}{mask_mode_suffix}.mp4"
+                        f"sample/sample-{global_step}-rank{accelerator.process_index}-idx{data_idx}{mask_mode_suffix}{lora_mode_suffix}.mp4"
                     ),
                     n_rows=4
                 )
@@ -459,6 +492,7 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
             if sampled_count < num_samples:
                 logger.warning(f"Validation: reached max retries, only generated {sampled_count}/{num_samples} samples")
 
+            restore_validation_lora()
             del pipeline
             gc.collect()
             torch.cuda.empty_cache()
@@ -470,6 +504,7 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
         if is_deepspeed:
             transformer3d.config = origin_config
     except Exception as e:
+        restore_validation_lora()
         import traceback
         logger.error(f"Validation error on rank {accelerator.process_index}: {e}\n{traceback.format_exc()}")
         gc.collect()
@@ -754,6 +789,14 @@ def parse_args():
         help=(
             "Disable the control-mask signal during validation by passing an "
             "all-zero mask while preserving Patchify input channels."
+        ),
+    )
+    parser.add_argument(
+        "--validation_disable_lora",
+        action="store_true",
+        help=(
+            "Disable Kohya-style or PEFT LoRA adapters only during validation "
+            "to compare against the pretrained-model path."
         ),
     )
     parser.add_argument(
