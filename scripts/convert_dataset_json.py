@@ -35,10 +35,14 @@ def convert_dataset(input_path: str, output_path: str):
         relative_path = item.get('relative_path', '')
         caption = item.get('caption', '')
         
+        # Mask files have '_mask' suffix before extension: xxx.mp4 -> xxx_mask.mp4
+        p = Path(relative_path)
+        mask_relative_path = str(p.parent / f"{p.stem}_mask{p.suffix}")
+        
         new_item = {
             "file_path": f"static/{relative_path}",
             "control_file_path": f"static_gs_render_single_image/{relative_path}",
-            "mask_file_path": f"static_gs_render_single_image_masks/{relative_path}",
+            "mask_file_path": f"static_gs_render_single_image_masks/{mask_relative_path}",
             "text": caption,
             "type": "video"
         }
