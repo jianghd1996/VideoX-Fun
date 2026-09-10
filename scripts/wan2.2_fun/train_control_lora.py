@@ -1519,14 +1519,22 @@ def main():
                 control_pixel_values = torch.from_numpy(example["control_pixel_values"]).permute(0, 3, 1, 2).contiguous()
                 control_pixel_values = control_pixel_values / 255.
                 
-                # Control mask: [F, 1, H, W] -> already processed in dataset
+                # Control mask from dataset
                 control_mask = example.get("control_mask", None)
                 if control_mask is not None:
                     if isinstance(control_mask, np.ndarray):
-                        control_mask = torch.from_numpy(control_mask).permute(0, 3, 1, 2).contiguous()  # [F, 1, H, W]
-                    elif isinstance(control_mask, torch.Tensor) and control_mask.dim() == 4:
-                        # Already [F, 1, H, W]
-                        pass
+                        if control_mask.ndim == 3:
+                            # [F, H, W] -> [F, 1, H, W]
+                            control_mask = torch.from_numpy(control_mask).unsqueeze(1).float()
+                        elif control_mask.ndim == 4:
+                            # [F, H, W, C] -> [F, C, H, W]
+                            control_mask = torch.from_numpy(control_mask).permute(0, 3, 1, 2).contiguous()
+                        else:
+                            control_mask = torch.from_numpy(control_mask).float()
+                    elif isinstance(control_mask, torch.Tensor):
+                        if control_mask.dim() == 3:
+                            control_mask = control_mask.unsqueeze(1).float()
+                        # Already 4D, keep as is
 
                 if args.fix_sample_size is not None:
                     # Get adapt hw for resize
