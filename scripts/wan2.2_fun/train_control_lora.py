@@ -148,8 +148,8 @@ check_min_version("0.18.0.dev0")
 logger = get_logger(__name__, log_level="INFO")
 
 
-def expand_patch_embedding_for_validation(transformer):
-    """Temporarily append four zero-initialized mask channels to Patchify."""
+def expand_patch_embedding_for_control_mask(transformer):
+    """Permanently append four zero-initialized mask channels to Patchify."""
     old_patch_embedding = transformer.patch_embedding
     if not isinstance(old_patch_embedding, torch.nn.Conv3d):
         raise TypeError(
@@ -200,9 +200,10 @@ def expand_patch_embedding_for_validation(transformer):
     old_in_dim = getattr(transformer, "in_dim", None)
     if old_in_dim is not None:
         transformer.in_dim = old_in_channels + 4
+    transformer._control_mask_channels = 4
 
     logger.info(
-        "Temporarily expanded validation patch_embedding at the channel tail: "
+        "Expanded training patch_embedding at the channel tail: "
         f"{old_in_channels} -> {old_in_channels + 4}; "
         "pretrained channel order preserved and mask weights are zero."
     )
@@ -211,7 +212,6 @@ def expand_patch_embedding_for_validation(transformer):
 
 def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, config, accelerator, weight_dtype, global_step, train_dataset):
     import cv2
-    patch_embedding_backups = []
     try:
         is_deepspeed = type(transformer3d).__name__ == 'DeepSpeedEngine'
         if is_deepspeed:
@@ -244,22 +244,13 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
 
                     transformer3d_2 = accelerator.unwrap_model(transformer3d) if type(transformer3d).__name__ == 'DistributedDataParallel' else transformer3d
 
-            # Both low/high-noise transformers must accept the same trailing
-            # mask channels when boundary switching is enabled.
-            seen_transformers = set()
+            # Separately loaded boundary models need the same trailing channels.
             for validation_transformer in (transformer3d_1, transformer3d_2):
                 if validation_transformer is None:
                     continue
                 patch_transformer = accelerator.unwrap_model(validation_transformer)
-                if id(patch_transformer) in seen_transformers:
-                    continue
-                seen_transformers.add(id(patch_transformer))
-                old_patch_embedding, old_in_dim = (
-                    expand_patch_embedding_for_validation(patch_transformer)
-                )
-                patch_embedding_backups.append(
-                    (patch_transformer, old_patch_embedding, old_in_dim)
-                )
+                if getattr(patch_transformer, "_control_mask_channels", 0) == 0:
+                    expand_patch_embedding_for_control_mask(patch_transformer)
 
             pipeline = Wan2_2FunControlPipeline(
                 vae=vae, 
@@ -490,16 +481,6 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
         transformer3d.to(accelerator.device, dtype=weight_dtype)
         if not args.enable_text_encoder_in_dataloader:
             text_encoder.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
-    finally:
-        # The experiment is validation-only; preserve the existing training
-        # graph and channel count after every successful or failed validation.
-        for patch_transformer, old_patch_embedding, old_in_dim in reversed(
-            patch_embedding_backups
-        ):
-            patch_transformer.patch_embedding = old_patch_embedding
-            if old_in_dim is not None:
-                patch_transformer.in_dim = old_in_dim
-
 def parse_args():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
     parser.add_argument(
@@ -1171,10 +1152,17 @@ def main():
         transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs']),
     ).to(weight_dtype)
 
+    # Append the four new inputs after every pretrained channel.
+    expand_patch_embedding_for_control_mask(transformer3d)
+
     # Freeze vae and text_encoder and set transformer3d to trainable
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
     transformer3d.requires_grad_(False)
+
+    # Patchify is optimized together with LoRA. Its four trailing mask-channel
+    # weights start at zero, so step-0 behavior matches the pretrained model.
+    transformer3d.patch_embedding.requires_grad_(True)
 
     # Lora will work with this...
     if args.use_peft_lora:
@@ -1241,6 +1229,11 @@ def main():
                         for key in accelerate_state_dict:
                             if "network" in key:
                                 network_state_dict[key.replace("network.", "")] = accelerate_state_dict[key].to(weight_dtype)
+                    patch_model = accelerator.unwrap_model(transformer3d)
+                    network_state_dict.update({
+                        f"patch_embedding.{key}": value.detach().to("cpu")
+                        for key, value in patch_model.patch_embedding.state_dict().items()
+                    })
                     save_file(network_state_dict, safetensor_save_path, metadata={"format": "pt"})
 
                     with open(os.path.join(output_dir, "sampler_pos_start.pkl"), 'wb') as file:
@@ -1271,6 +1264,11 @@ def main():
                         for key in accelerate_state_dict:
                             if "network" in key:
                                 network_state_dict[key.replace("network.", "")] = accelerate_state_dict[key].to(weight_dtype)
+                    patch_model = accelerator.unwrap_model(transformer3d)
+                    network_state_dict.update({
+                        f"patch_embedding.{key}": value.detach().to("cpu")
+                        for key, value in patch_model.patch_embedding.state_dict().items()
+                    })
                     save_file(network_state_dict, safetensor_save_path, metadata={"format": "pt"})
 
                     if not args.use_deepspeed:
@@ -1370,7 +1368,7 @@ def main():
         image_sample_size=args.image_sample_size,
         enable_bucket=args.enable_bucket, 
         enable_camera_info=args.train_mode == "control_camera_ref",
-        temporal_reverse_prob=0.5
+        temporal_reverse_prob=0.0
     )
 
     def worker_init_fn(_seed):
@@ -1449,6 +1447,7 @@ def main():
             new_examples["text"]         = []
             # Used in Control Mode
             new_examples["control_pixel_values"] = []
+            new_examples["control_mask"] = []
             # Used in Control Ref Mode
             if args.train_mode != "control":
                 new_examples["ref_pixel_values"] = []
@@ -1553,6 +1552,28 @@ def main():
 
                 control_pixel_values = torch.from_numpy(example["control_pixel_values"]).permute(0, 3, 1, 2).contiguous()
                 control_pixel_values = control_pixel_values / 255.
+                
+                # Control mask from dataset
+                control_mask = example.get("control_mask", None)
+                if control_mask is not None:
+                    if isinstance(control_mask, np.ndarray):
+                        if control_mask.ndim == 3:
+                            # [F, H, W] -> [F, 1, H, W]
+                            control_mask = torch.from_numpy(control_mask).unsqueeze(1).float()
+                        elif control_mask.ndim == 4:
+                            # [F, H, W, C] -> [F, C, H, W]
+                            control_mask = torch.from_numpy(control_mask).permute(0, 3, 1, 2).contiguous()
+                        else:
+                            control_mask = torch.from_numpy(control_mask).float()
+                    elif isinstance(control_mask, torch.Tensor):
+                        if control_mask.dim() == 3:
+                            control_mask = control_mask.unsqueeze(1).float()
+                        # Already 4D, keep as is
+
+                    control_mask = control_mask.float()
+                    if control_mask.numel() > 0 and control_mask.max() > 1:
+                        control_mask = control_mask / 255.0
+                    control_mask = control_mask.clamp(0, 1)
 
                 if args.fix_sample_size is not None:
                     # Get adapt hw for resize
@@ -1565,6 +1586,10 @@ def main():
 
                     transform_no_normalize = transforms.Compose([
                         transforms.Resize(fix_sample_size, interpolation=transforms.InterpolationMode.BILINEAR),  # Image.BICUBIC
+                        transforms.CenterCrop(fix_sample_size),
+                    ])
+                    mask_transform = transforms.Compose([
+                        transforms.Resize(fix_sample_size, interpolation=transforms.InterpolationMode.NEAREST),
                         transforms.CenterCrop(fix_sample_size),
                     ])
                 elif args.random_ratio_crop:
@@ -1588,6 +1613,10 @@ def main():
                         transforms.Resize([nh, nw]),
                         transforms.CenterCrop([int(x) for x in random_sample_size]),
                     ])
+                    mask_transform = transforms.Compose([
+                        transforms.Resize([nh, nw], interpolation=transforms.InterpolationMode.NEAREST),
+                        transforms.CenterCrop([int(x) for x in random_sample_size]),
+                    ])
                 else:
                     # Get adapt hw for resize
                     closest_size = list(map(lambda x: int(x), closest_size))
@@ -1606,9 +1635,28 @@ def main():
                         transforms.Resize(resize_size, interpolation=transforms.InterpolationMode.BILINEAR),  # Image.BICUBIC
                         transforms.CenterCrop(closest_size),
                     ])
+                    mask_transform = transforms.Compose([
+                        transforms.Resize(resize_size, interpolation=transforms.InterpolationMode.NEAREST),
+                        transforms.CenterCrop(closest_size),
+                    ])
 
                 new_examples["pixel_values"].append(transform(pixel_values)[:batch_video_length])
                 new_examples["control_pixel_values"].append(transform(control_pixel_values))
+                
+                # Apply the same resize/crop geometry as GT and control
+                # video, using nearest interpolation for the binary mask.
+                if control_mask is not None:
+                    transformed_control_mask = mask_transform(control_mask)
+                    new_examples["control_mask"].append(transformed_control_mask[:batch_video_length])
+                else:
+                    transformed_control = new_examples["control_pixel_values"][-1]
+                    mask_shape = (
+                        transformed_control.shape[0],
+                        1,
+                        transformed_control.shape[-2],
+                        transformed_control.shape[-1],
+                    )
+                    new_examples["control_mask"].append(torch.ones(mask_shape))
             
                 if args.train_mode == "control_camera_ref":
                     control_camera_values = example.get("control_camera_values", None)
@@ -1662,6 +1710,7 @@ def main():
             # Limit the number of frames to the same
             new_examples["pixel_values"] = torch.stack([example for example in new_examples["pixel_values"]])
             new_examples["control_pixel_values"] = torch.stack([example[:batch_video_length] for example in new_examples["control_pixel_values"]])
+            new_examples["control_mask"] = torch.stack([example[:batch_video_length] for example in new_examples["control_mask"]])
             if args.train_mode != "control":
                 new_examples["ref_pixel_values"] = torch.stack([example for example in new_examples["ref_pixel_values"]])
                 new_examples["clip_pixel_values"] = torch.stack([example for example in new_examples["clip_pixel_values"]])
@@ -1820,7 +1869,26 @@ def main():
             if zero_stage != 3 and not args.use_fsdp:
                 from safetensors.torch import load_file
                 state_dict = load_file(os.path.join(checkpoint_folder_path, "lora_diffusion_pytorch_model.safetensors"), device=str(accelerator.device))
-                m, u = accelerator.unwrap_model(network).load_state_dict(state_dict, strict=False)
+                patch_embedding_state_dict = {
+                    key.replace("patch_embedding.", ""): state_dict.pop(key)
+                    for key in list(state_dict.keys())
+                    if key.startswith("patch_embedding.")
+                }
+                patch_model = accelerator.unwrap_model(transformer3d)
+                if patch_embedding_state_dict:
+                    m_patch, u_patch = patch_model.patch_embedding.load_state_dict(
+                        patch_embedding_state_dict, strict=True
+                    )
+                    print(
+                        f"Loaded patch_embedding: missing={len(m_patch)}, "
+                        f"unexpected={len(u_patch)}"
+                    )
+                if args.use_peft_lora:
+                    m, u = patch_model.load_state_dict(state_dict, strict=False)
+                else:
+                    m, u = accelerator.unwrap_model(network).load_state_dict(
+                        state_dict, strict=False
+                    )
                 print(f"missing keys: {len(m)}, unexpected keys: {len(u)}")
 
                 optimizer_file_pt = os.path.join(checkpoint_folder_path, "optimizer.pt")
@@ -1978,6 +2046,7 @@ def main():
                 # Convert images to latent space
                 pixel_values = batch["pixel_values"].to(weight_dtype)
                 control_pixel_values = batch["control_pixel_values"].to(weight_dtype)
+                control_mask_values = batch["control_mask"].to(weight_dtype)
                 if args.train_mode == "control_camera_ref":
                     control_camera_values = batch["control_camera_values"].to(weight_dtype)
 
@@ -1986,6 +2055,7 @@ def main():
                     if args.video_sample_n_frames * args.token_sample_size * args.token_sample_size // 16 >= pixel_values.size()[1] * pixel_values.size()[3] * pixel_values.size()[4]:
                         pixel_values = torch.tile(pixel_values, (4, 1, 1, 1, 1))
                         control_pixel_values = torch.tile(control_pixel_values, (4, 1, 1, 1, 1))
+                        control_mask_values = torch.tile(control_mask_values, (4, 1, 1, 1, 1))
                         if args.train_mode == "control_camera_ref":
                             control_camera_values = torch.tile(control_camera_values, (4, 1, 1, 1, 1))
                         if args.enable_text_encoder_in_dataloader:
@@ -1996,6 +2066,7 @@ def main():
                     elif args.video_sample_n_frames * args.token_sample_size * args.token_sample_size // 4 >= pixel_values.size()[1] * pixel_values.size()[3] * pixel_values.size()[4]:
                         pixel_values = torch.tile(pixel_values, (2, 1, 1, 1, 1))
                         control_pixel_values = torch.tile(control_pixel_values, (2, 1, 1, 1, 1))
+                        control_mask_values = torch.tile(control_mask_values, (2, 1, 1, 1, 1))
                         if args.train_mode == "control_camera_ref":
                             control_camera_values = torch.tile(control_camera_values, (2, 1, 1, 1, 1))
                         if args.enable_text_encoder_in_dataloader:
@@ -2054,6 +2125,7 @@ def main():
 
                     pixel_values = pixel_values[:, :temp_n_frames, :, :]
                     control_pixel_values = control_pixel_values[:, :temp_n_frames, :, :]
+                    control_mask_values = control_mask_values[:, :temp_n_frames, :, :]
                     
                 # Keep all node same token length to accelerate the traning when resolution grows.
                 if args.keep_all_node_same_token_length:
@@ -2077,6 +2149,7 @@ def main():
 
                     pixel_values = pixel_values[:, :actual_video_length, :, :]
                     control_pixel_values = control_pixel_values[:, :actual_video_length, :, :]
+                    control_mask_values = control_mask_values[:, :actual_video_length, :, :]
 
                 if args.low_vram:
                     torch.cuda.empty_cache()
@@ -2105,6 +2178,41 @@ def main():
 
                     if args.train_mode != "control_camera_ref":
                         control_latents = _batch_encode_vae(control_pixel_values)
+
+                        # Pack the mask into four channels using the same temporal
+                        # convention as the native inpaint mask. Keep it separate
+                        # until all legacy conditioning channels are assembled.
+                        control_mask_latents = rearrange(
+                            control_mask_values, "b f c h w -> b c f h w"
+                        )
+                        control_mask_latents = torch.cat(
+                            [
+                                torch.repeat_interleave(
+                                    control_mask_latents[:, :, 0:1],
+                                    repeats=4,
+                                    dim=2,
+                                ),
+                                control_mask_latents[:, :, 1:],
+                            ],
+                            dim=2,
+                        )
+                        packed_frames = control_mask_latents.shape[2]
+                        if packed_frames % 4 != 0:
+                            raise ValueError(
+                                f"Packed training mask has {packed_frames} frames, "
+                                "which is not divisible by 4."
+                            )
+                        control_mask_latents = control_mask_latents.view(
+                            control_mask_latents.shape[0],
+                            packed_frames // 4,
+                            4,
+                            control_mask_latents.shape[3],
+                            control_mask_latents.shape[4],
+                        ).transpose(1, 2).contiguous()
+                        control_mask_latents = resize_mask(
+                            control_mask_latents, control_latents
+                        )
+
                         # Make control latents to zero
                         for bs_index in range(control_latents.size()[0]):
                             if rng is None:
@@ -2114,9 +2222,13 @@ def main():
 
                             if zero_init_control_latents_conv_in:
                                 control_latents[bs_index] = control_latents[bs_index] * 0
+                                control_mask_latents[bs_index] = (
+                                    control_mask_latents[bs_index] * 0
+                                )
                         control_camera_latents = None
                     else:
                         control_latents = None
+                        control_mask_latents = None
                         control_camera_latents = rearrange(control_camera_values, "b f c h w -> b c f h w")
                         control_camera_latents = torch.concat(
                             [
@@ -2193,6 +2305,22 @@ def main():
                             control_latents = torch.cat([control_latents, ref_latents_conv_in], dim = 1)
                         else:
                             control_latents = torch.cat([control_latents, inpaint_latents], dim = 1)
+
+                    # Preserve the complete pretrained channel prefix and append
+                    # the four new mask channels strictly at the end.
+                    if control_mask_latents is None:
+                        control_mask_latents = torch.zeros(
+                            control_latents.shape[0],
+                            4,
+                            control_latents.shape[2],
+                            control_latents.shape[3],
+                            control_latents.shape[4],
+                            device=control_latents.device,
+                            dtype=control_latents.dtype,
+                        )
+                    control_latents = torch.cat(
+                        [control_latents, control_mask_latents], dim=1
+                    )
                                 
                 # wait for latents = vae.encode(pixel_values) to complete
                 if vae_stream_1 is not None:
@@ -2365,10 +2493,15 @@ def main():
                             if args.use_peft_lora:
                                 safetensor_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}.safetensors")
                                 network_state_dict = get_peft_model_state_dict(accelerator.unwrap_model(transformer3d))
+                                network_state_dict_kohya = convert_peft_lora_to_kohya_lora(network_state_dict)
+                                patch_model = accelerator.unwrap_model(transformer3d)
+                                network_state_dict.update({
+                                    f"patch_embedding.{key}": value.detach().to("cpu")
+                                    for key, value in patch_model.patch_embedding.state_dict().items()
+                                })
                                 save_model(safetensor_save_path, network_state_dict)
 
                                 safetensor_kohya_format_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}-compatible_with_comfyui.safetensors")
-                                network_state_dict_kohya = convert_peft_lora_to_kohya_lora(network_state_dict)
                                 save_model(safetensor_kohya_format_save_path, network_state_dict_kohya)
                                 logger.info(f"Saved safetensor to {safetensor_save_path}")
                             else:
@@ -2426,10 +2559,15 @@ def main():
             if args.use_peft_lora:
                 safetensor_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}.safetensors")
                 network_state_dict = get_peft_model_state_dict(accelerator.unwrap_model(transformer3d))
+                network_state_dict_kohya = convert_peft_lora_to_kohya_lora(network_state_dict)
+                patch_model = accelerator.unwrap_model(transformer3d)
+                network_state_dict.update({
+                    f"patch_embedding.{key}": value.detach().to("cpu")
+                    for key, value in patch_model.patch_embedding.state_dict().items()
+                })
                 save_model(safetensor_save_path, network_state_dict)
 
                 safetensor_kohya_format_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}-compatible_with_comfyui.safetensors")
-                network_state_dict_kohya = convert_peft_lora_to_kohya_lora(network_state_dict)
                 save_model(safetensor_kohya_format_save_path, network_state_dict_kohya)
                 logger.info(f"Saved safetensor to {safetensor_save_path}")
             else:
