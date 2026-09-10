@@ -245,25 +245,28 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
             cpu_generator = torch.Generator().manual_seed(rank_seed)
             logger.info(f"Rank {accelerator.process_index} using seed: {rank_seed} (global_step={global_step})")
 
-            num_samples = args.validation_samples_per_gpu
+            # Run exactly one validation case per rank. Cases are assigned
+            # deterministically so ranks do not duplicate one another, and the
+            # assignment advances on every step-based validation round.
+            num_samples = 1
             dataset_size = len(train_dataset.dataset)
+            validation_round = global_step // max(args.validation_steps, 1)
+            first_data_idx = (
+                validation_round * accelerator.num_processes + accelerator.process_index
+            ) % dataset_size
             
             video_length = int((args.validation_n_frames - 1) // vae.config.temporal_compression_ratio * vae.config.temporal_compression_ratio) + 1 if args.validation_n_frames != 1 else 1
 
-            # Sample with retry: ensure we get num_samples valid samples
+            # Retry subsequent rank-strided cases if a dataset path is invalid.
             sampled_count = 0
-            used_indices = set()
-            max_retries = num_samples * 10  # Avoid infinite loop
+            retry_count = 0
+            max_retries = min(dataset_size, 10)
             
-            while sampled_count < num_samples and max_retries > 0:
-                max_retries -= 1
-                # Sample a new index
-                data_idx = torch.randint(0, dataset_size, (1,), generator=cpu_generator).item()
-                
-                # Skip if already used
-                if data_idx in used_indices:
-                    continue
-                used_indices.add(data_idx)
+            while sampled_count < num_samples and retry_count < max_retries:
+                data_idx = (
+                    first_data_idx + retry_count * accelerator.num_processes
+                ) % dataset_size
+                retry_count += 1
                 
                 data_info = train_dataset.dataset[data_idx]
                 gt_video_path = data_info['file_path']
@@ -287,8 +290,9 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     logger.warning(f"Control video not found: {control_video_full_path}, retrying...")
                     continue
 
-                # Decide temporal reversal (50% probability)
-                do_reverse = random.random() < 0.5
+                # Apply horizontal flip augmentation during validation
+                # (replaces the previous temporal reversal).
+                do_horizontal_flip = torch.rand((), generator=cpu_generator).item() < 0.5
 
                 gt_cap = cv2.VideoCapture(gt_video_full_path)
                 gt_total_frames = int(gt_cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -308,12 +312,12 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 first_frame_rgb = cv2.cvtColor(first_frame, cv2.COLOR_BGR2RGB)
                 last_frame_rgb = cv2.cvtColor(last_frame, cv2.COLOR_BGR2RGB)
 
-                # If reversing, swap first and last frames
-                if do_reverse:
-                    first_frame_rgb, last_frame_rgb = last_frame_rgb, first_frame_rgb
-                    logger.info(f"Validation sample {sampled_count+1}/{num_samples}: idx={data_idx}, temporal REVERSED")
+                if do_horizontal_flip:
+                    first_frame_rgb = np.ascontiguousarray(first_frame_rgb[:, ::-1])
+                    last_frame_rgb = np.ascontiguousarray(last_frame_rgb[:, ::-1])
+                    logger.info(f"Validation sample {sampled_count+1}/{num_samples}: idx={data_idx}, horizontally FLIPPED")
                 else:
-                    logger.info(f"Validation sample {sampled_count+1}/{num_samples}: idx={data_idx}, temporal normal")
+                    logger.info(f"Validation sample {sampled_count+1}/{num_samples}: idx={data_idx}, horizontal normal")
 
                 # Read control video dimensions to compute target_w (ensures control and inpaint latent shapes match)
                 ctrl_cap = cv2.VideoCapture(control_video_full_path)
@@ -346,9 +350,9 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     control_video_full_path, video_length=video_length, sample_size=[target_h, target_w]
                 )
 
-                # Reverse control video if needed
-                if do_reverse:
-                    input_video = torch.flip(input_video, [2])
+                # Flip the control video spatially, keeping time order intact.
+                if do_horizontal_flip:
+                    input_video = torch.flip(input_video, [-1])
 
                 # Load mask from external mask video file
                 if mask_video_full_path and os.path.exists(mask_video_full_path):
@@ -363,17 +367,22 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                         mask_frames.append(mask_gray)
                     mask_cap.release()
                     mask_frames = np.stack(mask_frames)  # [F, H, W]
-                    # Resize to match target dimensions
-                    mask_tensor = torch.from_numpy(mask_frames).float().unsqueeze(0).unsqueeze(0)  # [1, 1, F, H, W]
-                    mask_tensor = F.interpolate(mask_tensor, size=(video_length, target_h, target_w), mode='trilinear', align_corners=False)
+                    # Normalize before visualization/model input. Use nearest
+                    # interpolation to preserve binary mask boundaries.
+                    mask_tensor = torch.from_numpy(mask_frames).float().div_(255.0).unsqueeze(0).unsqueeze(0)
+                    mask_tensor = F.interpolate(
+                        mask_tensor,
+                        size=(video_length, target_h, target_w),
+                        mode='nearest',
+                    )
                     control_mask_video_3ch = mask_tensor.expand(-1, 3, -1, -1, -1)  # [1, 3, F, H, W]
                 else:
                     # Fallback: use ones (no mask)
                     control_mask_video_3ch = torch.ones(1, 3, video_length, target_h, target_w)
 
-                # Reverse mask if needed
-                if do_reverse:
-                    control_mask_video_3ch = torch.flip(control_mask_video_3ch, [2])
+                # Apply the same spatial flip as GT/control video.
+                if do_horizontal_flip:
+                    control_mask_video_3ch = torch.flip(control_mask_video_3ch, [-1])
 
                 control_mask_video_3ch = control_mask_video_3ch.to(input_video.device, dtype=input_video.dtype)
 
@@ -404,10 +413,10 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     control_video_full_path, video_length=video_length, sample_size=[target_h, target_w]
                 )
 
-                # Reverse GT and control videos for concat if needed
-                if do_reverse:
-                    gt_video_for_concat = torch.flip(gt_video_for_concat, [2])
-                    control_video_for_concat = torch.flip(control_video_for_concat, [2])
+                # Apply the same spatial flip for visualization.
+                if do_horizontal_flip:
+                    gt_video_for_concat = torch.flip(gt_video_for_concat, [-1])
+                    control_video_for_concat = torch.flip(control_video_for_concat, [-1])
 
                 gt_video_for_concat = gt_video_for_concat.to(sample.device, dtype=sample.dtype)
                 control_video_for_concat = control_video_for_concat.to(sample.device, dtype=sample.dtype)
@@ -429,7 +438,7 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 
                 sampled_count += 1
             
-            if max_retries <= 0:
+            if sampled_count < num_samples:
                 logger.warning(f"Validation: reached max retries, only generated {sampled_count}/{num_samples} samples")
 
             del pipeline
@@ -1143,14 +1152,22 @@ def main():
     # Copy old weights, zero initialize new channels
     with torch.no_grad():
         new_patch_embedding.weight[:, :current_in_dim] = old_patch_embedding.weight
-        new_patch_embedding.weight[:, current_in_dim:] = 0  # Zero init new channels
+        new_patch_embedding.weight[:, current_in_dim:].zero_()
         if old_patch_embedding.bias is not None:
             new_patch_embedding.bias.copy_(old_patch_embedding.bias)
+
+        # The expanded layer must be functionally identical to the pretrained
+        # layer before mask-channel training starts.
+        if torch.count_nonzero(new_patch_embedding.weight[:, current_in_dim:]).item() != 0:
+            raise RuntimeError("Control-mask patch embedding channels were not zero initialized.")
     
     transformer3d.patch_embedding = new_patch_embedding
     transformer3d.in_dim = new_in_dim
     
-    logging.info(f"Expanded patch_embedding in_channels: {current_in_dim} -> {new_in_dim} (+4 for control mask)")
+    logging.info(
+        f"Expanded patch_embedding in_channels: {current_in_dim} -> {new_in_dim}; "
+        "copied pretrained channels and zero-initialized the 4 mask channels"
+    )
 
     # Freeze vae and text_encoder and set transformer3d to trainable
     vae.requires_grad_(False)
@@ -1555,6 +1572,11 @@ def main():
                         if control_mask.dim() == 3:
                             control_mask = control_mask.unsqueeze(1).float()
                         # Already 4D, keep as is
+
+                    control_mask = control_mask.float()
+                    if control_mask.numel() > 0 and control_mask.max() > 1:
+                        control_mask = control_mask / 255.0
+                    control_mask = control_mask.clamp(0, 1)
 
                 if args.fix_sample_size is not None:
                     # Get adapt hw for resize
