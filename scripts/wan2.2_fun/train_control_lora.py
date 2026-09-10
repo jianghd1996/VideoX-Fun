@@ -1591,6 +1591,10 @@ def main():
                         transforms.Resize(fix_sample_size, interpolation=transforms.InterpolationMode.BILINEAR),  # Image.BICUBIC
                         transforms.CenterCrop(fix_sample_size),
                     ])
+                    mask_transform = transforms.Compose([
+                        transforms.Resize(fix_sample_size, interpolation=transforms.InterpolationMode.NEAREST),
+                        transforms.CenterCrop(fix_sample_size),
+                    ])
                 elif args.random_ratio_crop:
                     # Get adapt hw for resize
                     b, c, h, w = pixel_values.size()
@@ -1612,6 +1616,10 @@ def main():
                         transforms.Resize([nh, nw]),
                         transforms.CenterCrop([int(x) for x in random_sample_size]),
                     ])
+                    mask_transform = transforms.Compose([
+                        transforms.Resize([nh, nw], interpolation=transforms.InterpolationMode.NEAREST),
+                        transforms.CenterCrop([int(x) for x in random_sample_size]),
+                    ])
                 else:
                     # Get adapt hw for resize
                     closest_size = list(map(lambda x: int(x), closest_size))
@@ -1630,21 +1638,27 @@ def main():
                         transforms.Resize(resize_size, interpolation=transforms.InterpolationMode.BILINEAR),  # Image.BICUBIC
                         transforms.CenterCrop(closest_size),
                     ])
+                    mask_transform = transforms.Compose([
+                        transforms.Resize(resize_size, interpolation=transforms.InterpolationMode.NEAREST),
+                        transforms.CenterCrop(closest_size),
+                    ])
 
                 new_examples["pixel_values"].append(transform(pixel_values)[:batch_video_length])
                 new_examples["control_pixel_values"].append(transform(control_pixel_values))
                 
-                # Process and append control mask
+                # Apply the same resize/crop geometry as GT and control
+                # video, using nearest interpolation for the binary mask.
                 if control_mask is not None:
-                    # control_mask is [F, H, W] uint8, convert to [F, 1, H, W] float
-                    if isinstance(control_mask, np.ndarray):
-                        control_mask = torch.from_numpy(control_mask).unsqueeze(1).float()  # [F, 1, H, W]
-                    elif isinstance(control_mask, torch.Tensor) and control_mask.dim() == 3:
-                        control_mask = control_mask.unsqueeze(1).float()  # [F, 1, H, W]
-                    new_examples["control_mask"].append(control_mask[:batch_video_length])
+                    transformed_control_mask = mask_transform(control_mask)
+                    new_examples["control_mask"].append(transformed_control_mask[:batch_video_length])
                 else:
-                    # Default: all ones (no mask)
-                    mask_shape = (control_pixel_values.shape[0], 1, control_pixel_values.shape[2], control_pixel_values.shape[3])
+                    transformed_control = new_examples["control_pixel_values"][-1]
+                    mask_shape = (
+                        transformed_control.shape[0],
+                        1,
+                        transformed_control.shape[-2],
+                        transformed_control.shape[-1],
+                    )
                     new_examples["control_mask"].append(torch.ones(mask_shape))
             
                 if args.train_mode == "control_camera_ref":
