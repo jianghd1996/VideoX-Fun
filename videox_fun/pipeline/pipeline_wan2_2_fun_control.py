@@ -725,6 +725,9 @@ class Wan2_2FunControlPipeline(DiffusionPipeline):
                 if control_mask.dim() == 4:
                     control_mask = control_mask.unsqueeze(1)  # [B, 1, F, H, W]
                 
+                # Move to same device and dtype as control_video_latents
+                control_mask = control_mask.to(device=control_video_latents.device, dtype=control_video_latents.dtype)
+                
                 # Repeat first frame 4 times to align with VAE temporal compression
                 control_mask = torch.concat(
                     [
