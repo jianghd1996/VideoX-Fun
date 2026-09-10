@@ -340,6 +340,33 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 if do_reverse:
                     input_video = torch.flip(input_video, [2])
 
+                # Load mask from external mask video file
+                if mask_video_full_path and os.path.exists(mask_video_full_path):
+                    mask_cap = cv2.VideoCapture(mask_video_full_path)
+                    mask_frames = []
+                    while True:
+                        ret, frame = mask_cap.read()
+                        if not ret:
+                            break
+                        # Convert to grayscale: take max channel as mask value
+                        mask_gray = frame.max(axis=-1)  # [H, W]
+                        mask_frames.append(mask_gray)
+                    mask_cap.release()
+                    mask_frames = np.stack(mask_frames)  # [F, H, W]
+                    # Resize to match target dimensions
+                    mask_tensor = torch.from_numpy(mask_frames).float().unsqueeze(0).unsqueeze(0)  # [1, 1, F, H, W]
+                    mask_tensor = F.interpolate(mask_tensor, size=(video_length, target_h, target_w), mode='trilinear', align_corners=False)
+                    control_mask_video_3ch = mask_tensor.expand(-1, 3, -1, -1, -1)  # [1, 3, F, H, W]
+                else:
+                    # Fallback: use ones (no mask)
+                    control_mask_video_3ch = torch.ones(1, 3, video_length, target_h, target_w)
+
+                # Reverse mask if needed
+                if do_reverse:
+                    control_mask_video_3ch = torch.flip(control_mask_video_3ch, [2])
+
+                control_mask_video_3ch = control_mask_video_3ch.to(input_video.device, dtype=input_video.dtype)
+
                 # Prepare control_mask for pipeline (same format as training)
                 # control_mask_video_3ch is [1, 3, F, H, W], need to convert to [1, 1, F, H, W] for pipeline
                 control_mask_for_pipeline = control_mask_video_3ch[:, 0:1]  # Take first channel as mask
@@ -367,32 +394,10 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     control_video_full_path, video_length=video_length, sample_size=[target_h, target_w]
                 )
 
-                # Load mask from external mask video file
-                if mask_video_full_path and os.path.exists(mask_video_full_path):
-                    mask_cap = cv2.VideoCapture(mask_video_full_path)
-                    mask_frames = []
-                    while True:
-                        ret, frame = mask_cap.read()
-                        if not ret:
-                            break
-                        # Convert to grayscale: take max channel as mask value
-                        mask_gray = frame.max(axis=-1)  # [H, W]
-                        mask_frames.append(mask_gray)
-                    mask_cap.release()
-                    mask_frames = np.stack(mask_frames)  # [F, H, W]
-                    # Resize to match target dimensions
-                    mask_tensor = torch.from_numpy(mask_frames).float().unsqueeze(0).unsqueeze(0)  # [1, 1, F, H, W]
-                    mask_tensor = F.interpolate(mask_tensor, size=(video_length, target_h, target_w), mode='trilinear', align_corners=False)
-                    control_mask_video_3ch = mask_tensor.expand(-1, 3, -1, -1, -1)  # [1, 3, F, H, W]
-                else:
-                    # Fallback: use ones (no mask)
-                    control_mask_video_3ch = torch.ones(1, 3, video_length, target_h, target_w)
-
                 # Reverse GT and control videos for concat if needed
                 if do_reverse:
                     gt_video_for_concat = torch.flip(gt_video_for_concat, [2])
                     control_video_for_concat = torch.flip(control_video_for_concat, [2])
-                    control_mask_video_3ch = torch.flip(control_mask_video_3ch, [2])
 
                 gt_video_for_concat = gt_video_for_concat.to(sample.device, dtype=sample.dtype)
                 control_video_for_concat = control_video_for_concat.to(sample.device, dtype=sample.dtype)
