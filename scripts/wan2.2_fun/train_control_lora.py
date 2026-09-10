@@ -269,9 +269,19 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 ctrl_height = int(ctrl_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 ctrl_cap.release()
 
-                target_h = 960  # 720P
+                target_h = 960  # Validation height
                 target_w = int(target_h * ctrl_width / ctrl_height)
-                target_w = target_w - (target_w % 16)
+
+                # Keep the VAE latent grid divisible by the transformer's
+                # spatial patch size. For a 16x VAE with 2x2 patches, the
+                # pixel-space dimensions must be divisible by 32.
+                spatial_ratio = pipeline.vae.config.spatial_compression_ratio
+                patch_h = pipeline.transformer.config.patch_size[1]
+                patch_w = pipeline.transformer.config.patch_size[2]
+                height_multiple = spatial_ratio * patch_h
+                width_multiple = spatial_ratio * patch_w
+                target_h = target_h - (target_h % height_multiple)
+                target_w = target_w - (target_w % width_multiple)
 
                 first_frame_pil = Image.fromarray(first_frame_rgb).resize((target_w, target_h))
                 last_frame_pil = Image.fromarray(last_frame_rgb).resize((target_w, target_h))
