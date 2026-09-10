@@ -555,6 +555,21 @@ class ImageVideoControlDataset(Dataset):
                 elif isinstance(control_mask, torch.Tensor):
                     control_mask = control_mask.flip(0).contiguous()
             
+            # Random horizontal flip augmentation (50% probability)
+            if random.random() < 0.5:
+                if isinstance(pixel_values, np.ndarray):
+                    pixel_values = pixel_values[:, :, ::-1, :].copy()
+                elif isinstance(pixel_values, torch.Tensor):
+                    pixel_values = pixel_values.flip(3).contiguous()
+                if isinstance(control_pixel_values, np.ndarray):
+                    control_pixel_values = control_pixel_values[:, :, ::-1, :].copy()
+                elif isinstance(control_pixel_values, torch.Tensor):
+                    control_pixel_values = control_pixel_values.flip(3).contiguous()
+                if isinstance(control_mask, np.ndarray):
+                    control_mask = control_mask[:, :, ::-1].copy()
+                elif isinstance(control_mask, torch.Tensor):
+                    control_mask = control_mask.flip(3).contiguous()
+            
             # Load subject reference images (for subject-driven generation)
             if self.enable_subject_info:
                 visual_height, visual_width = pixel_values.shape[-2:] if not self.enable_bucket else pixel_values.shape[1:3]
