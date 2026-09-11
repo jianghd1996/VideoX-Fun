@@ -1986,7 +1986,7 @@ def main():
                 accelerator.load_state(checkpoint_folder_path)
                 accelerator.print("accelerator.load_state() completed for zero_stage 3.")
 
-    else:
+    elif resume_weights_file is None:
         initial_global_step = 0
 
     # function for saving/removing
