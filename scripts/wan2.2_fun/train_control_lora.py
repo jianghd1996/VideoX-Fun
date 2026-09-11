@@ -390,10 +390,6 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 first_frame_pil = Image.fromarray(first_frame_rgb).resize((target_w, target_h))
                 last_frame_pil = Image.fromarray(last_frame_rgb).resize((target_w, target_h))
 
-                inpaint_video, inpaint_video_mask, clip_image = get_image_to_video_latent(
-                    [first_frame_pil], [last_frame_pil], video_length=video_length, sample_size=[target_h, target_w]
-                )
-
                 input_video, input_video_mask, _, _ = get_video_to_video_latent(
                     control_video_full_path, video_length=video_length, sample_size=[target_h, target_w]
                 )
@@ -412,22 +408,6 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     input_video = torch.flip(input_video, [-1])
                     mask_video_for_concat = torch.flip(mask_video_for_concat, [-1])
 
-                sample = pipeline(
-                    text, 
-                    num_frames = video_length,
-                    negative_prompt = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走",
-                    height      = target_h,
-                    width       = target_w,
-                    generator   = generator,
-                    control_video   = input_video,
-                    control_mask    = mask_video_for_concat[:, :1],
-                    video           = inpaint_video,
-                    mask_video      = inpaint_video_mask,
-                    num_inference_steps = 8,
-                    guidance_scale      = 4.5,
-                    boundary            = config['transformer_additional_kwargs'].get('boundary', 0.900)
-                ).videos
-
                 gt_video_for_concat, _, _, _ = get_video_to_video_latent(
                     gt_video_full_path, video_length=video_length, sample_size=[target_h, target_w]
                 )
@@ -439,26 +419,72 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     gt_video_for_concat = torch.flip(gt_video_for_concat, [-1])
                     control_video_for_concat = torch.flip(control_video_for_concat, [-1])
 
-                gt_video_for_concat = gt_video_for_concat.to(sample.device, dtype=sample.dtype)
-                control_video_for_concat = control_video_for_concat.to(sample.device, dtype=sample.dtype)
-                mask_video_for_concat = mask_video_for_concat.to(sample.device, dtype=sample.dtype)
-                sample = sample.clamp(0, 1)
-
-                # Four panels: GT | control video | mask video | generated.
-                concat_video = torch.cat(
-                    [gt_video_for_concat, control_video_for_concat, mask_video_for_concat, sample],
-                    dim=0,
+                # Generate a paired comparison for the same case. Resetting the
+                # generator for each variant guarantees identical initial noise.
+                validation_variants = (
+                    ("w_last", [last_frame_pil]),
+                    ("wo_last", None),
                 )
+                for variant_name, end_frames in validation_variants:
+                    inpaint_video, inpaint_video_mask, clip_image = (
+                        get_image_to_video_latent(
+                            [first_frame_pil],
+                            end_frames,
+                            video_length=video_length,
+                            sample_size=[target_h, target_w],
+                        )
+                    )
+                    variant_generator = torch.Generator(
+                        device=accelerator.device
+                    ).manual_seed(rank_seed)
 
-                os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
-                save_videos_grid(
-                    concat_video, 
-                    os.path.join(
-                        args.output_dir, 
-                        f"sample/sample-{global_step}-rank{accelerator.process_index}-idx{data_idx}.mp4"
-                    ),
-                    n_rows=4
-                )
+                    sample = pipeline(
+                        text,
+                        num_frames=video_length,
+                        negative_prompt="色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走",
+                        height=target_h,
+                        width=target_w,
+                        generator=variant_generator,
+                        control_video=input_video,
+                        control_mask=mask_video_for_concat[:, :1],
+                        video=inpaint_video,
+                        mask_video=inpaint_video_mask,
+                        num_inference_steps=8,
+                        guidance_scale=4.5,
+                        boundary=config['transformer_additional_kwargs'].get(
+                            'boundary', 0.900
+                        ),
+                    ).videos
+
+                    gt_panel = gt_video_for_concat.to(
+                        sample.device, dtype=sample.dtype
+                    )
+                    control_panel = control_video_for_concat.to(
+                        sample.device, dtype=sample.dtype
+                    )
+                    mask_panel = mask_video_for_concat.to(
+                        sample.device, dtype=sample.dtype
+                    )
+                    sample = sample.clamp(0, 1)
+
+                    # Four panels: GT | control video | mask video | generated.
+                    concat_video = torch.cat(
+                        [gt_panel, control_panel, mask_panel, sample], dim=0
+                    )
+
+                    os.makedirs(
+                        os.path.join(args.output_dir, "sample"), exist_ok=True
+                    )
+                    save_videos_grid(
+                        concat_video,
+                        os.path.join(
+                            args.output_dir,
+                            f"sample/sample-{global_step}-"
+                            f"rank{accelerator.process_index}-idx{data_idx}-"
+                            f"{variant_name}.mp4",
+                        ),
+                        n_rows=4,
+                    )
                 
                 sampled_count += 1
                 break
