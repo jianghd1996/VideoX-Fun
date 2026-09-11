@@ -335,7 +335,15 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
 
                 gt_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 ret_first, first_frame = gt_cap.read()
-                gt_cap.set(cv2.CAP_PROP_POS_FRAMES, gt_total_frames - 1)
+                # Match the end constraint to the validation clip instead of
+                # using the end of the entire source video. For 81 frames this
+                # reads zero-based frame index 80 (the 81st frame).
+                validation_last_frame_idx = min(
+                    video_length - 1, gt_total_frames - 1
+                )
+                gt_cap.set(
+                    cv2.CAP_PROP_POS_FRAMES, validation_last_frame_idx
+                )
                 ret_last, last_frame = gt_cap.read()
                 gt_cap.release()
 
@@ -1835,8 +1843,44 @@ def main():
     global_step = 0
     first_epoch = 0
 
-    # Potentially load in the weights and states from a previous save
-    if args.resume_from_checkpoint:
+    # A standalone checkpoint-STEP.safetensors contains LoRA and the
+    # expanded Patchify weights, but not optimizer/scheduler state.
+    resume_weights_file = None
+    if (
+        args.resume_from_checkpoint
+        and args.resume_from_checkpoint.endswith(".safetensors")
+        and os.path.isfile(args.resume_from_checkpoint)
+    ):
+        resume_weights_file = args.resume_from_checkpoint
+        checkpoint_name = os.path.basename(resume_weights_file)
+        try:
+            global_step = int(
+                os.path.splitext(checkpoint_name)[0].split("-")[-1]
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "Could not parse training step from standalone checkpoint "
+                f"name: {checkpoint_name}"
+            ) from exc
+
+        from safetensors.torch import load_file
+        state_dict = load_file(
+            resume_weights_file, device=str(accelerator.device)
+        )
+        resume_model = accelerator.unwrap_model(transformer3d)
+        missing, unexpected = resume_model.load_state_dict(
+            state_dict, strict=False
+        )
+        initial_global_step = global_step
+        first_epoch = global_step // num_update_steps_per_epoch
+        logger.info(
+            f"Resumed LoRA and Patchify weights from {resume_weights_file} "
+            f"at global_step={global_step}. Optimizer and scheduler start fresh. "
+            f"missing={len(missing)}, unexpected={len(unexpected)}"
+        )
+
+    # Potentially load full weights and states from a save-state directory.
+    if args.resume_from_checkpoint and resume_weights_file is None:
         if args.resume_from_checkpoint != "latest":
             path = os.path.basename(args.resume_from_checkpoint)
         else:
