@@ -7,6 +7,7 @@ NCCL_DEBUG=INFO
 accelerate launch --gpu-ids 2,3 --num_processes=2 --mixed_precision="bf16" --main_process_port=29501 scripts/wan2.2_fun/train_control_lora.py \
   --config_path="config/wan2.2/wan_civitai_5b.yaml" \
   --pretrained_model_name_or_path=$MODEL_NAME \
+  --resume_from_checkpoint="/mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun-mask/output_dir_wan2.2_fun_control_lora/checkpoint-4000.safetensors" \
   --train_data_dir=$DATASET_NAME \
   --train_data_meta=$DATASET_META_NAME \
   --image_sample_size=640 \
