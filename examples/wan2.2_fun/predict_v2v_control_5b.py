@@ -91,7 +91,13 @@ def parse_args():
     parser.add_argument("--frames_per_segment", type=int, default=81)
     parser.add_argument("--height", type=int, default=960)
     parser.add_argument("--steps", type=int, default=40)
-    parser.add_argument("--guidance_scale", type=float, default=4.5)
+    parser.add_argument("--guidance_scale", type=float, default=6.0)
+    parser.add_argument(
+        "--lora_weight",
+        type=float,
+        default=0.55,
+        help="Extra multiplier applied to the loaded PEFT LoRA output.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--threshold", type=int, default=10)
     parser.add_argument("--mask_crf", type=int, default=18)
@@ -181,7 +187,9 @@ def expand_patch_embedding(transformer):
     return old_channels
 
 
-def load_mask_aware_checkpoint(transformer, checkpoint_path: Path):
+def load_mask_aware_checkpoint(
+    transformer, checkpoint_path: Path, lora_weight: float
+):
     old_channels = expand_patch_embedding(transformer)
     state_dict = load_file(str(checkpoint_path), device="cpu")
 
@@ -210,6 +218,17 @@ def load_mask_aware_checkpoint(transformer, checkpoint_path: Path):
     result = set_peft_model_state_dict(
         transformer, state_dict, adapter_name="default"
     )
+
+    # Match merge_lora(..., multiplier=lora_weight) from the original example.
+    scaled_layers = 0
+    for module in transformer.modules():
+        scaling = getattr(module, "scaling", None)
+        if isinstance(scaling, dict) and "default" in scaling:
+            scaling["default"] *= lora_weight
+            scaled_layers += 1
+    if scaled_layers == 0:
+        raise RuntimeError("No active PEFT LoRA layers were found to scale.")
+
     unexpected = list(getattr(result, "unexpected_keys", []))
     if unexpected:
         raise RuntimeError(
@@ -219,7 +238,8 @@ def load_mask_aware_checkpoint(transformer, checkpoint_path: Path):
 
     print(
         f"Loaded {checkpoint_path}: Patchify {old_channels} -> "
-        f"{old_channels + 4}, LoRA tensors={len(lora_keys)}"
+        f"{old_channels + 4}, LoRA tensors={len(lora_keys)}, "
+        f"LoRA weight={lora_weight}, scaled layers={scaled_layers}"
     )
 
 
@@ -323,7 +343,9 @@ def build_pipeline(args, device):
         target_modules=["q", "k", "v", "ffn.0", "ffn.2"],
     )
     transformer = inject_adapter_in_model(lora_config, transformer)
-    load_mask_aware_checkpoint(transformer, args.checkpoint_path)
+    load_mask_aware_checkpoint(
+        transformer, args.checkpoint_path, args.lora_weight
+    )
     transformer.eval()
 
     vae_cls = {
