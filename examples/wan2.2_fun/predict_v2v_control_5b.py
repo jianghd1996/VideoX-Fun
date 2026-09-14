@@ -99,7 +99,7 @@ def parse_args():
             "<VideoX-Fun>/inference_results."
         ),
     )
-    parser.add_argument("--steps", type=int, default=40)
+    parser.add_argument("--steps", type=int, default=8)
     parser.add_argument(
         "--guidance_scales",
         type=float,
@@ -576,7 +576,6 @@ def run_case(
                 ).videos
             save_videos_grid(sample, str(segment_path), fps=output_fps)
             del sample
-            torch.cuda.empty_cache()
 
     for _, tag in cfg_variants:
         final_path = run_dir / f"{case_dir.name}_{tag}.mp4"
