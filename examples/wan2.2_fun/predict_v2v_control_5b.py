@@ -100,7 +100,13 @@ def parse_args():
         ),
     )
     parser.add_argument("--steps", type=int, default=40)
-    parser.add_argument("--guidance_scale", type=float, default=6.0)
+    parser.add_argument(
+        "--guidance_scales",
+        type=float,
+        nargs="+",
+        default=[6.0, 0.0],
+        help="CFG values generated for every case (default: 6.0 0.0).",
+    )
     parser.add_argument(
         "--lora_weight",
         type=float,
@@ -509,19 +515,15 @@ def run_case(
     )
     ref_image = get_image_latent(str(image_path), sample_size=sample_size)
 
-    segment_dir = run_dir / "segments" / case_dir.name
-    segment_dir.mkdir(parents=True, exist_ok=True)
-    segment_paths = []
+    def cfg_tag(value):
+        return f"cfg{value:.1f}".replace(".", "p").replace("-", "m")
+
+    cfg_variants = [(value, cfg_tag(value)) for value in args.guidance_scales]
+    segment_paths_by_cfg = {tag: [] for _, tag in cfg_variants}
 
     for segment_index, control_frames, mask_frames in iter_aligned_segments(
         control_path, mask_path, args.frames_per_segment
     ):
-        segment_path = segment_dir / f"segment_{segment_index:04d}.mp4"
-        segment_paths.append(segment_path)
-        if segment_path.exists() and not args.overwrite_output:
-            print(f"[{case_dir.name}] skip segment {segment_index}")
-            continue
-
         control_video, _, _, _ = get_video_to_video_latent(
             control_frames,
             video_length=args.frames_per_segment,
@@ -533,38 +535,55 @@ def run_case(
             sample_size=sample_size,
         )
         control_mask = mask_video.amax(dim=1, keepdim=True)
-        generator = torch.Generator(device=device).manual_seed(
-            args.seed + case_index * 10000 + segment_index
-        )
+        segment_seed = args.seed + case_index * 10000 + segment_index
 
-        print(
-            f"[{case_dir.name}] generating segment {segment_index}, "
-            f"size={target_w}x{target_h}, frames={args.frames_per_segment}"
-        )
-        with torch.no_grad():
-            sample = pipeline(
-                prompt,
-                num_frames=args.frames_per_segment,
-                negative_prompt=NEGATIVE_PROMPT,
-                height=target_h,
-                width=target_w,
-                generator=generator,
-                guidance_scale=args.guidance_scale,
-                num_inference_steps=args.steps,
-                video=start_end_video,
-                mask_video=start_end_mask,
-                control_video=control_video,
-                control_mask=control_mask,
-                ref_image=ref_image,
-                boundary=boundary,
-            ).videos
-        save_videos_grid(sample, str(segment_path), fps=output_fps)
-        del sample
-        torch.cuda.empty_cache()
+        for guidance_scale, tag in cfg_variants:
+            segment_dir = run_dir / "segments" / case_dir.name / tag
+            segment_dir.mkdir(parents=True, exist_ok=True)
+            segment_path = segment_dir / f"segment_{segment_index:04d}.mp4"
+            segment_paths_by_cfg[tag].append(segment_path)
+            if segment_path.exists() and not args.overwrite_output:
+                print(
+                    f"[{case_dir.name}] skip segment {segment_index} {tag}"
+                )
+                continue
 
-    final_path = run_dir / f"{case_dir.name}.mp4"
-    concatenate_segments(segment_paths, final_path, args.overwrite_output)
-    print(f"[{case_dir.name}] done: {final_path}")
+            # Use identical initial noise for the CFG comparison.
+            generator = torch.Generator(device=device).manual_seed(
+                segment_seed
+            )
+            print(
+                f"[{case_dir.name}] generating segment {segment_index}, "
+                f"{tag}, size={target_w}x{target_h}, "
+                f"frames={args.frames_per_segment}"
+            )
+            with torch.no_grad():
+                sample = pipeline(
+                    prompt,
+                    num_frames=args.frames_per_segment,
+                    negative_prompt=NEGATIVE_PROMPT,
+                    height=target_h,
+                    width=target_w,
+                    generator=generator,
+                    guidance_scale=guidance_scale,
+                    num_inference_steps=args.steps,
+                    video=start_end_video,
+                    mask_video=start_end_mask,
+                    control_video=control_video,
+                    control_mask=control_mask,
+                    ref_image=ref_image,
+                    boundary=boundary,
+                ).videos
+            save_videos_grid(sample, str(segment_path), fps=output_fps)
+            del sample
+            torch.cuda.empty_cache()
+
+    for _, tag in cfg_variants:
+        final_path = run_dir / f"{case_dir.name}_{tag}.mp4"
+        concatenate_segments(
+            segment_paths_by_cfg[tag], final_path, args.overwrite_output
+        )
+        print(f"[{case_dir.name}] done: {final_path}")
 
 
 def main():
