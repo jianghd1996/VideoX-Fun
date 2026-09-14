@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 import cv2
@@ -89,7 +90,15 @@ def parse_args():
         default=Path("config/wan2.2/wan_civitai_5b.yaml"),
     )
     parser.add_argument("--frames_per_segment", type=int, default=81)
-    parser.add_argument("--height", type=int, default=960)
+    parser.add_argument(
+        "--output_root",
+        type=Path,
+        default=None,
+        help=(
+            "Parent output directory. Default: "
+            "<VideoX-Fun>/inference_results."
+        ),
+    )
     parser.add_argument("--steps", type=int, default=40)
     parser.add_argument("--guidance_scale", type=float, default=6.0)
     parser.add_argument(
@@ -257,6 +266,32 @@ def read_video_info(video_path: Path):
     return frame_count, width, height, fps
 
 
+def select_sample_size(source_width: int, source_height: int):
+    """Return [height, width] using the requested aspect-ratio buckets."""
+    img_size = [source_width, source_height]
+    ratio = min(img_size) / max(img_size)
+
+    if img_size[0] <= img_size[1]:  # portrait: width <= height
+        if ratio > 0.7:
+            sample_size = [1440, 1088]
+        elif ratio > 0.65:
+            sample_size = [1600, 1088]
+        else:
+            sample_size = [1920, 1088]
+    else:  # landscape
+        if ratio > 0.7:
+            sample_size = [1088, 1440]
+        elif ratio > 0.65:
+            sample_size = [1088, 1600]
+        else:
+            sample_size = [1088, 1920]
+
+    if img_size[0] == img_size[1]:
+        sample_size = [1280, 1280]
+
+    return sample_size
+
+
 def iter_aligned_segments(
     control_path: Path, mask_path: Path, frames_per_segment: int
 ):
@@ -393,7 +428,8 @@ def build_pipeline(args, device):
         text_encoder=text_encoder,
         scheduler=scheduler,
     )
-    pipeline.enable_sequential_cpu_offload(device=device)
+    # Full-load mode: keep all modules resident on the selected GPU.
+    pipeline.to(device=device)
     return pipeline, vae, config
 
 
@@ -405,6 +441,7 @@ def run_case(
     vae,
     config,
     device,
+    run_dir: Path,
 ):
     image_path = case_dir / "image.jpg"
     prompt_path = case_dir / "prompt.txt"
@@ -417,7 +454,7 @@ def run_case(
     if not prompt:
         raise ValueError(f"Empty prompt: {prompt_path}")
 
-    mask_path = case_dir / "gs_render_mask.mp4"
+    mask_path = run_dir / f"{case_dir.name}_mask.mp4"
     status, _, elapsed, detail = make_mask(
         control_path,
         mask_path,
@@ -443,15 +480,21 @@ def run_case(
             f"of {args.frames_per_segment}."
         )
 
+    sample_size = select_sample_size(source_w, source_h)
+    target_h, target_w = sample_size
+
+    # All configured buckets are expected to align with VAE compression and
+    # Transformer patches; fail loudly if a future bucket violates this.
     spatial_ratio = vae.config.spatial_compression_ratio
     patch_h = pipeline.transformer.config.patch_size[1]
     patch_w = pipeline.transformer.config.patch_size[2]
-    target_h = args.height - (
-        args.height % (spatial_ratio * patch_h)
-    )
-    raw_w = int(target_h * source_w / source_h)
-    target_w = raw_w - (raw_w % (spatial_ratio * patch_w))
-    sample_size = [target_h, target_w]
+    if (
+        target_h % (spatial_ratio * patch_h) != 0
+        or target_w % (spatial_ratio * patch_w) != 0
+    ):
+        raise RuntimeError(
+            f"Sample size {sample_size} is not aligned with VAE/patch sizes."
+        )
     output_fps = args.fps or source_fps
     boundary = config["transformer_additional_kwargs"].get(
         "boundary", 0.900
@@ -466,7 +509,7 @@ def run_case(
     )
     ref_image = get_image_latent(str(image_path), sample_size=sample_size)
 
-    segment_dir = case_dir / "generated_step20000_segments"
+    segment_dir = run_dir / "segments" / case_dir.name
     segment_dir.mkdir(parents=True, exist_ok=True)
     segment_paths = []
 
@@ -519,7 +562,7 @@ def run_case(
         del sample
         torch.cuda.empty_cache()
 
-    final_path = case_dir / "generated_step20000.mp4"
+    final_path = run_dir / f"{case_dir.name}.mp4"
     concatenate_segments(segment_paths, final_path, args.overwrite_output)
     print(f"[{case_dir.name}] done: {final_path}")
 
@@ -539,13 +582,30 @@ def main():
     if not case_dirs:
         raise RuntimeError(f"No case directories found in {args.cases_dir}")
 
+    project_root = Path(__file__).resolve().parents[2]
+    output_root = (
+        args.output_root
+        if args.output_root is not None
+        else project_root / "inference_results"
+    )
+    run_dir = output_root / datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir.mkdir(parents=True, exist_ok=False)
+    print(f"Inference results: {run_dir}")
+
     device = set_multi_gpus_devices(1, 1)
     pipeline, vae, config = build_pipeline(args, device)
     failures = []
     for case_index, case_dir in enumerate(case_dirs):
         try:
             run_case(
-                case_dir, case_index, args, pipeline, vae, config, device
+                case_dir,
+                case_index,
+                args,
+                pipeline,
+                vae,
+                config,
+                device,
+                run_dir,
             )
         except Exception as exc:
             failures.append((case_dir.name, str(exc)))
