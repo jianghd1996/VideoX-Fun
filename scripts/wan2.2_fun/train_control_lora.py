@@ -521,6 +521,30 @@ def parse_args():
         "--input_perturbation", type=float, default=0, help="The scale of input perturbation. Recommended 0.1."
     )
     parser.add_argument(
+        "--control_mask_perturb_prob",
+        type=float,
+        default=0.0,
+        help=(
+            "Per-sample probability of replacing control-video pixels outside "
+            "the control mask with uniform random noise in [-1, 1]."
+        ),
+    )
+    parser.add_argument(
+        "--control_mask_edge_loss_weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Additional flow-matching loss weight on the spatial boundary of "
+            "the control mask. 0 disables boundary weighting."
+        ),
+    )
+    parser.add_argument(
+        "--control_mask_edge_width",
+        type=int,
+        default=1,
+        help="Control-mask boundary radius in latent pixels.",
+    )
+    parser.add_argument(
         "--pretrained_model_name_or_path",
         type=str,
         default=None,
@@ -2221,6 +2245,46 @@ def main():
                     control_pixel_values = control_pixel_values[:, :actual_video_length, :, :]
                     control_mask_values = control_mask_values[:, :actual_video_length, :, :]
 
+                # Make the mask indispensable instead of allowing the model to
+                # infer validity solely from the usually-black rendered
+                # background. The mask convention is 1=valid control and
+                # 0=invalid/background. Perturbation is applied per sample,
+                # after all temporal cropping and before VAE encoding.
+                if args.control_mask_perturb_prob > 0:
+                    if not 0.0 <= args.control_mask_perturb_prob <= 1.0:
+                        raise ValueError(
+                            "--control_mask_perturb_prob must be in [0, 1], "
+                            f"got {args.control_mask_perturb_prob}."
+                        )
+                    valid_control_mask = (
+                        control_mask_values.clamp(0, 1) > 0.5
+                    ).to(control_pixel_values.dtype)
+                    perturb_sample = (
+                        torch.rand(
+                            (
+                                control_pixel_values.shape[0],
+                                1,
+                                1,
+                                1,
+                                1,
+                            ),
+                            device=control_pixel_values.device,
+                        )
+                        < args.control_mask_perturb_prob
+                    ).to(control_pixel_values.dtype)
+                    random_control_background = (
+                        torch.rand_like(control_pixel_values) * 2.0 - 1.0
+                    )
+                    invalid_control_mask = 1.0 - valid_control_mask
+                    perturbed_control = (
+                        control_pixel_values * valid_control_mask
+                        + random_control_background * invalid_control_mask
+                    )
+                    control_pixel_values = (
+                        control_pixel_values * (1.0 - perturb_sample)
+                        + perturbed_control * perturb_sample
+                    )
+
                 if args.low_vram:
                     torch.cuda.empty_cache()
                     vae.to(accelerator.device)
@@ -2295,10 +2359,41 @@ def main():
                                 control_mask_latents[bs_index] = (
                                     control_mask_latents[bs_index] * 0
                                 )
+                        # Build a latent-resolution spatial boundary band from
+                        # all four temporal mask phases. This remains detached
+                        # conditioning metadata and adds no model parameters.
+                        control_mask_edge_map = None
+                        if args.control_mask_edge_loss_weight > 0:
+                            if args.control_mask_edge_width < 1:
+                                raise ValueError(
+                                    "--control_mask_edge_width must be >= 1 "
+                                    "when boundary loss weighting is enabled."
+                                )
+                            edge_radius = args.control_mask_edge_width
+                            edge_kernel = 2 * edge_radius + 1
+                            binary_control_mask = (
+                                control_mask_latents > 0.5
+                            ).float()
+                            dilated_control_mask = F.max_pool3d(
+                                binary_control_mask,
+                                kernel_size=(1, edge_kernel, edge_kernel),
+                                stride=1,
+                                padding=(0, edge_radius, edge_radius),
+                            )
+                            eroded_control_mask = 1.0 - F.max_pool3d(
+                                1.0 - binary_control_mask,
+                                kernel_size=(1, edge_kernel, edge_kernel),
+                                stride=1,
+                                padding=(0, edge_radius, edge_radius),
+                            )
+                            control_mask_edge_map = (
+                                dilated_control_mask - eroded_control_mask
+                            ).clamp_(0, 1).amax(dim=1, keepdim=True)
                         control_camera_latents = None
                     else:
                         control_latents = None
                         control_mask_latents = None
+                        control_mask_edge_map = None
                         control_camera_latents = rearrange(control_camera_values, "b f c h w -> b c f h w")
                         control_camera_latents = torch.concat(
                             [
@@ -2518,7 +2613,13 @@ def main():
                         full_ref=full_ref if args.add_full_ref_image_in_self_attention else None,
                     )
                 
-                def custom_mse_loss(noise_pred, target, weighting=None, threshold=50):
+                def custom_mse_loss(
+                    noise_pred,
+                    target,
+                    weighting=None,
+                    threshold=50,
+                    spatial_weight=None,
+                ):
                     noise_pred = noise_pred.float()
                     target = target.float()
                     diff = noise_pred - target
@@ -2527,11 +2628,31 @@ def main():
                     masked_loss = mse_loss * mask
                     if weighting is not None:
                         masked_loss = masked_loss * weighting
+                    if spatial_weight is not None:
+                        masked_loss = masked_loss * spatial_weight
                     final_loss = masked_loss.mean()
                     return final_loss
-                
+
                 weighting = compute_loss_weighting_for_sd3(weighting_scheme=args.weighting_scheme, sigmas=sigmas)
-                loss = custom_mse_loss(noise_pred.float(), target.float(), weighting.float())
+                edge_loss_weight = None
+                if (
+                    control_mask_edge_map is not None
+                    and args.control_mask_edge_loss_weight > 0
+                ):
+                    edge_loss_weight = (
+                        1.0
+                        + args.control_mask_edge_loss_weight
+                        * control_mask_edge_map.to(
+                            device=noise_pred.device,
+                            dtype=torch.float32,
+                        )
+                    )
+                loss = custom_mse_loss(
+                    noise_pred.float(),
+                    target.float(),
+                    weighting.float(),
+                    spatial_weight=edge_loss_weight,
+                )
                 loss = loss.mean()
 
                 if args.motion_sub_loss and noise_pred.size()[2] > 2:
