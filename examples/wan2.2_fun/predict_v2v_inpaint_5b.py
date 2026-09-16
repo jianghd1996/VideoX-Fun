@@ -34,11 +34,10 @@ from videox_fun.utils.utils import filter_kwargs, save_videos_grid
 # =============================================================================
 # User settings
 # =============================================================================
-model_name = "models/Diffusion_Transformer/Wan2.2-Fun-5B-InP"
+model_name = "/mnt/DataPart/jianghongda/VideoX-Fun/models/Diffusion_Transformer/Wan2.2-Fun-5B-InP"
 
-# Fill in these two paths before running.
-input_video_path = "path/to/input_video.mp4"
-input_mask_path = "path/to/input_mask.mp4"
+input_video_path = "/mnt/DataPart/jianghongda/related_work/LanPaint/gs_render.mp4"
+input_mask_path = "/mnt/DataPart/jianghongda/related_work/LanPaint/mask.mp4"
 
 save_path = "samples/wan2.2-fun-5b-video-inpaint"
 
@@ -46,7 +45,9 @@ save_path = "samples/wan2.2-fun-5b-video-inpaint"
 # `video_length` decoded frames from both files are used.
 video_length = 121
 fps = 24
-sample_size = [704, 1280]  # [height, width], both should be divisible by 16.
+# Automatically use 1280x704 for landscape videos and 704x1280 for portrait videos.
+# Set this to [height, width] to force a specific resolution instead.
+sample_size = None
 
 # Mask convention for this script:
 #   True:  black pixels are generated, non-black pixels are preserved.
@@ -79,7 +80,7 @@ shift = 5
 config_path = "config/wan2.2/wan_civitai_5b.yaml"
 
 
-def validate_settings():
+def validate_settings(target_sample_size):
     if not os.path.isfile(input_video_path):
         raise FileNotFoundError(f"Input video does not exist: {input_video_path}")
     if not os.path.isfile(input_mask_path):
@@ -88,8 +89,33 @@ def validate_settings():
         raise FileNotFoundError(f"Model directory does not exist: {model_name}")
     if video_length != 1 and (video_length - 1) % 4 != 0:
         raise ValueError("video_length must satisfy 4n+1 for the Wan VAE, for example 121.")
-    if sample_size[0] % 16 != 0 or sample_size[1] % 16 != 0:
-        raise ValueError(f"sample_size must be divisible by 16, got {sample_size}.")
+    if target_sample_size[0] % 16 != 0 or target_sample_size[1] % 16 != 0:
+        raise ValueError(
+            f"sample_size must be divisible by 16, got {target_sample_size}."
+        )
+
+
+def resolve_sample_size(video_path):
+    if sample_size is not None:
+        return list(sample_size)
+
+    video_capture = cv2.VideoCapture(video_path)
+    if not video_capture.isOpened():
+        raise RuntimeError(f"Failed to open input video: {video_path}")
+    width = int(video_capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(video_capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    video_capture.release()
+    if width <= 0 or height <= 0:
+        raise RuntimeError(
+            f"Failed to read input video dimensions: width={width}, height={height}."
+        )
+
+    target_sample_size = [1280, 704] if height > width else [704, 1280]
+    print(
+        f"Input resolution: {width}x{height}; selected inference resolution: "
+        f"{target_sample_size[1]}x{target_sample_size[0]}"
+    )
+    return target_sample_size
 
 
 def load_video_and_mask(video_path, mask_path, length, size):
@@ -285,13 +311,14 @@ def save_results(input_video, mask_video, generated_video):
 
 
 def main():
-    validate_settings()
+    target_sample_size = resolve_sample_size(input_video_path)
+    validate_settings(target_sample_size)
     device = set_multi_gpus_devices(1, 1)
     input_video, input_mask = load_video_and_mask(
         input_video_path,
         input_mask_path,
         video_length,
-        sample_size,
+        target_sample_size,
     )
     pipeline, boundary = load_pipeline(device)
     generator = torch.Generator(device=device).manual_seed(seed)
@@ -301,8 +328,8 @@ def main():
             prompt,
             num_frames=video_length,
             negative_prompt=negative_prompt,
-            height=sample_size[0],
-            width=sample_size[1],
+            height=target_sample_size[0],
+            width=target_sample_size[1],
             generator=generator,
             guidance_scale=guidance_scale,
             num_inference_steps=num_inference_steps,
