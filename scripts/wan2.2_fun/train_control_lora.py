@@ -265,120 +265,117 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
             # Change both generation and case selection on every validation round.
             base_seed = (args.seed or 42) + global_step
             rank_seed = base_seed + accelerator.process_index
-            generator = torch.Generator(device=accelerator.device).manual_seed(rank_seed)
-            augmentation_generator = torch.Generator().manual_seed(rank_seed)
             case_generator = torch.Generator().manual_seed(base_seed)
+            augmentation_generator = torch.Generator().manual_seed(rank_seed)
             logger.info(
-                f"Rank {accelerator.process_index} using seed: {rank_seed} "
-                f"(global_step={global_step})"
+                f"Rank {accelerator.process_index} using validation seed: "
+                f"{rank_seed} (global_step={global_step})"
             )
 
-            # Every rank generates exactly one case. All ranks use the same random
-            # permutation, then take disjoint rank-strided entries.
-            num_samples = 1
-            dataset_size = len(train_dataset.dataset)
-            if dataset_size == 0:
-                raise ValueError("Validation dataset is empty")
-            case_order = torch.randperm(dataset_size, generator=case_generator).tolist()
+            if not args.validation_data_dir:
+                raise ValueError(
+                    "--validation_data_dir is required for folder-based validation."
+                )
+            if not os.path.isdir(args.validation_data_dir):
+                raise ValueError(
+                    f"Validation data directory does not exist: "
+                    f"{args.validation_data_dir}"
+                )
+
+            # A case is a direct child directory containing all three inputs.
+            case_dirs = sorted(
+                os.path.join(args.validation_data_dir, name)
+                for name in os.listdir(args.validation_data_dir)
+                if os.path.isdir(os.path.join(args.validation_data_dir, name))
+            )
+            case_dirs = [
+                case_dir
+                for case_dir in case_dirs
+                if all(
+                    os.path.isfile(os.path.join(case_dir, filename))
+                    for filename in ("gs_render.mp4", "image.jpg", "prompt.txt")
+                )
+            ]
+            if not case_dirs:
+                raise ValueError(
+                    "No valid validation cases found under "
+                    f"{args.validation_data_dir}. Each case needs "
+                    "gs_render.mp4, image.jpg, and prompt.txt."
+                )
+
+            # All ranks share one permutation and select disjoint rank-strided
+            # candidates. Each rank emits exactly one case when possible.
+            case_order = torch.randperm(
+                len(case_dirs), generator=case_generator
+            ).tolist()
             candidate_indices = case_order[
                 accelerator.process_index::accelerator.num_processes
             ]
             if not candidate_indices:
                 logger.warning(
-                    "Validation dataset has fewer cases than ranks; "
-                    "some ranks must reuse a case."
+                    "Validation has fewer cases than ranks; some ranks reuse a case."
                 )
                 candidate_indices = [
-                    case_order[accelerator.process_index % dataset_size]
+                    case_order[accelerator.process_index % len(case_dirs)]
                 ]
 
-            video_length = int((args.validation_n_frames - 1) // vae.config.temporal_compression_ratio * vae.config.temporal_compression_ratio) + 1 if args.validation_n_frames != 1 else 1
-
+            video_length = (
+                int(
+                    (args.validation_n_frames - 1)
+                    // vae.config.temporal_compression_ratio
+                    * vae.config.temporal_compression_ratio
+                )
+                + 1
+                if args.validation_n_frames != 1
+                else 1
+            )
             sampled_count = 0
             max_retries = min(len(candidate_indices), 10)
 
             for data_idx in candidate_indices[:max_retries]:
-                data_info = train_dataset.dataset[data_idx]
-                gt_video_path = data_info['file_path']
-                control_video_path = data_info.get('control_file_path', '')
-                mask_video_path = data_info.get('mask_file_path', '')
-                text = data_info.get('text', '')
-
-                if train_dataset.data_root is not None:
-                    gt_video_full_path = os.path.join(train_dataset.data_root, gt_video_path)
-                    control_video_full_path = os.path.join(train_dataset.data_root, control_video_path) if control_video_path else ''
-                    mask_video_full_path = os.path.join(train_dataset.data_root, mask_video_path) if mask_video_path else ''
-                else:
-                    gt_video_full_path = gt_video_path
-                    control_video_full_path = control_video_path
-                    mask_video_full_path = mask_video_path
-
-                if not os.path.exists(gt_video_full_path):
-                    logger.warning(f"GT video not found: {gt_video_full_path}, retrying...")
-                    continue
-                if control_video_full_path and not os.path.exists(control_video_full_path):
-                    logger.warning(f"Control video not found: {control_video_full_path}, retrying...")
-                    continue
-                if not mask_video_full_path or not os.path.exists(mask_video_full_path):
-                    logger.warning(f"Mask video not found: {mask_video_full_path}, retrying...")
-                    continue
-
-                # Apply spatial augmentation only; never reverse video time.
-                do_horizontal_flip = (
-                    torch.rand((), generator=augmentation_generator).item() < 0.5
+                case_dir = case_dirs[data_idx]
+                case_name = os.path.basename(os.path.normpath(case_dir))
+                control_video_full_path = os.path.join(
+                    case_dir, "gs_render.mp4"
                 )
+                image_path = os.path.join(case_dir, "image.jpg")
+                prompt_path = os.path.join(case_dir, "prompt.txt")
 
-                gt_cap = cv2.VideoCapture(gt_video_full_path)
-                gt_total_frames = int(gt_cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                gt_width = int(gt_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                gt_height = int(gt_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                with open(prompt_path, "r", encoding="utf-8") as prompt_file:
+                    text = prompt_file.read().strip()
 
-                gt_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                ret_first, first_frame = gt_cap.read()
-                # Match the end constraint to the validation clip instead of
-                # using the end of the entire source video. For 81 frames this
-                # reads zero-based frame index 80 (the 81st frame).
-                validation_last_frame_idx = min(
-                    video_length - 1, gt_total_frames - 1
-                )
-                gt_cap.set(
-                    cv2.CAP_PROP_POS_FRAMES, validation_last_frame_idx
-                )
-                ret_last, last_frame = gt_cap.read()
-                gt_cap.release()
-
-                if not ret_first or not ret_last:
-                    logger.warning(f"Failed to read first/last frames from {gt_video_full_path}, retrying...")
-                    continue
-
-                first_frame_rgb = cv2.cvtColor(first_frame, cv2.COLOR_BGR2RGB)
-                last_frame_rgb = cv2.cvtColor(last_frame, cv2.COLOR_BGR2RGB)
-
-                if do_horizontal_flip:
-                    first_frame_rgb = np.ascontiguousarray(first_frame_rgb[:, ::-1])
-                    last_frame_rgb = np.ascontiguousarray(last_frame_rgb[:, ::-1])
-                    logger.info(
-                        f"Validation sample {sampled_count+1}/{num_samples}: "
-                        f"idx={data_idx}, horizontally FLIPPED"
-                    )
-                else:
-                    logger.info(
-                        f"Validation sample {sampled_count+1}/{num_samples}: "
-                        f"idx={data_idx}, horizontal normal"
-                    )
-
-                # Read control video dimensions to compute target_w (ensures control and inpaint latent shapes match)
                 ctrl_cap = cv2.VideoCapture(control_video_full_path)
+                ctrl_total_frames = int(
+                    ctrl_cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                )
                 ctrl_width = int(ctrl_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 ctrl_height = int(ctrl_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 ctrl_cap.release()
+                if ctrl_total_frames < video_length:
+                    logger.warning(
+                        f"Validation case {case_name} only has "
+                        f"{ctrl_total_frames} frames, fewer than required "
+                        f"{video_length}; retrying another case."
+                    )
+                    continue
+                if ctrl_width <= 0 or ctrl_height <= 0:
+                    logger.warning(
+                        f"Cannot read dimensions from {control_video_full_path}; "
+                        "retrying another case."
+                    )
+                    continue
 
-                target_h = 960  # Validation height
+                do_horizontal_flip = (
+                    torch.rand(
+                        (), generator=augmentation_generator
+                    ).item()
+                    < 0.5
+                )
+
+                # Preserve the control video's aspect ratio while keeping the
+                # VAE latent grid divisible by the transformer patch size.
+                target_h = 960
                 target_w = int(target_h * ctrl_width / ctrl_height)
-
-                # Keep the VAE latent grid divisible by the transformer's
-                # spatial patch size. For a 16x VAE with 2x2 patches, the
-                # pixel-space dimensions must be divisible by 32.
                 spatial_ratio = pipeline.vae.config.spatial_compression_ratio
                 patch_h = pipeline.transformer.config.patch_size[1]
                 patch_w = pipeline.transformer.config.patch_size[2]
@@ -387,48 +384,67 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                 target_h = target_h - (target_h % height_multiple)
                 target_w = target_w - (target_w % width_multiple)
 
-                first_frame_pil = Image.fromarray(first_frame_rgb).resize((target_w, target_h))
-                last_frame_pil = Image.fromarray(last_frame_rgb).resize((target_w, target_h))
+                reference_image = Image.open(image_path).convert("RGB")
+                reference_image = reference_image.resize((target_w, target_h))
+                if do_horizontal_flip:
+                    reference_image = reference_image.transpose(
+                        Image.Transpose.FLIP_LEFT_RIGHT
+                    )
 
-                input_video, input_video_mask, _, _ = get_video_to_video_latent(
-                    control_video_full_path, video_length=video_length, sample_size=[target_h, target_w]
+                input_video, _, _, _ = get_video_to_video_latent(
+                    control_video_full_path,
+                    video_length=video_length,
+                    sample_size=[target_h, target_w],
                 )
+                if input_video.shape[2] != video_length:
+                    logger.warning(
+                        f"Decoded {input_video.shape[2]} frames instead of "
+                        f"{video_length} for {case_name}; retrying."
+                    )
+                    continue
 
-                # Read the mask with exactly the same frame count and spatial
-                # preprocessing as the control video. It is visualization-only:
-                # it is deliberately not passed to pipeline().
-                mask_video_for_concat, _, _, _ = get_video_to_video_latent(
-                    mask_video_full_path, video_length=video_length, sample_size=[target_h, target_w]
-                )
-                mask_video_for_concat = mask_video_for_concat.amax(
-                    dim=1, keepdim=True
-                ).expand(-1, 3, -1, -1, -1)
-
+                # get_video_to_video_latent returns RGB in [0, 1]. A pixel is
+                # valid when any RGB channel is above the near-black threshold.
+                control_mask = (
+                    input_video.amax(dim=1, keepdim=True)
+                    > (args.validation_mask_threshold / 255.0)
+                ).to(input_video.dtype)
                 if do_horizontal_flip:
                     input_video = torch.flip(input_video, [-1])
-                    mask_video_for_concat = torch.flip(mask_video_for_concat, [-1])
+                    control_mask = torch.flip(control_mask, [-1])
 
-                gt_video_for_concat, _, _, _ = get_video_to_video_latent(
-                    gt_video_full_path, video_length=video_length, sample_size=[target_h, target_w]
+                reference_tensor = (
+                    torch.from_numpy(
+                        np.asarray(reference_image, dtype=np.float32).copy()
+                    )
+                    .permute(2, 0, 1)
+                    .unsqueeze(0)
+                    .unsqueeze(2)
+                    / 255.0
                 )
-                control_video_for_concat, _, _, _ = get_video_to_video_latent(
-                    control_video_full_path, video_length=video_length, sample_size=[target_h, target_w]
+                reference_panel = reference_tensor.repeat(
+                    1, 1, video_length, 1, 1
+                )
+                control_panel = input_video
+                mask_panel = control_mask.expand(-1, 3, -1, -1, -1)
+
+                logger.info(
+                    f"Validation case={case_name}, rank="
+                    f"{accelerator.process_index}, frames={video_length}, "
+                    f"horizontal_flip={do_horizontal_flip}, "
+                    f"valid_mask_ratio={control_mask.float().mean().item():.4f}"
                 )
 
-                if do_horizontal_flip:
-                    gt_video_for_concat = torch.flip(gt_video_for_concat, [-1])
-                    control_video_for_concat = torch.flip(control_video_for_concat, [-1])
-
-                # Generate a paired comparison for the same case. Resetting the
-                # generator for each variant guarantees identical initial noise.
+                # Same case and initial noise, once with image.jpg as the final
+                # frame and once without a final-frame constraint.
                 validation_variants = (
-                    ("w_last", [last_frame_pil]),
+                    ("w_last", [reference_image]),
                     ("wo_last", None),
                 )
                 for variant_name, end_frames in validation_variants:
                     inpaint_video, inpaint_video_mask, clip_image = (
                         get_image_to_video_latent(
-                            [first_frame_pil],
+                            [reference_image],
                             end_frames,
                             video_length=video_length,
                             sample_size=[target_h, target_w],
@@ -441,58 +457,67 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     sample = pipeline(
                         text,
                         num_frames=video_length,
-                        negative_prompt="色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走",
+                        negative_prompt=(
+                            "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，"
+                            "作品，画作，画面，静止，整体发灰，最差质量，低质量，"
+                            "JPEG压缩残留，丑陋的，残缺的，多余的手指，"
+                            "画得不好的手部，画得不好的脸部，畸形的，毁容的，"
+                            "形态畸形的肢体，手指融合，静止不动的画面，"
+                            "杂乱的背景，三条腿，背景人很多，倒着走"
+                        ),
                         height=target_h,
                         width=target_w,
                         generator=variant_generator,
                         control_video=input_video,
-                        control_mask=mask_video_for_concat[:, :1],
+                        control_mask=control_mask,
                         video=inpaint_video,
                         mask_video=inpaint_video_mask,
+                        ref_image=clip_image,
                         num_inference_steps=8,
                         guidance_scale=4.5,
-                        boundary=config['transformer_additional_kwargs'].get(
-                            'boundary', 0.900
+                        boundary=config["transformer_additional_kwargs"].get(
+                            "boundary", 0.900
                         ),
                     ).videos
 
-                    gt_panel = gt_video_for_concat.to(
-                        sample.device, dtype=sample.dtype
-                    )
-                    control_panel = control_video_for_concat.to(
-                        sample.device, dtype=sample.dtype
-                    )
-                    mask_panel = mask_video_for_concat.to(
-                        sample.device, dtype=sample.dtype
-                    )
                     sample = sample.clamp(0, 1)
-
-                    # Four panels: GT | control video | mask video | generated.
                     concat_video = torch.cat(
-                        [gt_panel, control_panel, mask_panel, sample], dim=0
+                        [
+                            reference_panel.to(
+                                sample.device, dtype=sample.dtype
+                            ),
+                            control_panel.to(
+                                sample.device, dtype=sample.dtype
+                            ),
+                            mask_panel.to(
+                                sample.device, dtype=sample.dtype
+                            ),
+                            sample,
+                        ],
+                        dim=0,
                     )
 
-                    os.makedirs(
-                        os.path.join(args.output_dir, "sample"), exist_ok=True
-                    )
+                    sample_dir = os.path.join(args.output_dir, "sample")
+                    os.makedirs(sample_dir, exist_ok=True)
+                    safe_case_name = case_name.replace("/", "_")
                     save_videos_grid(
                         concat_video,
                         os.path.join(
-                            args.output_dir,
-                            f"sample/sample-{global_step}-"
-                            f"rank{accelerator.process_index}-idx{data_idx}-"
-                            f"{variant_name}.mp4",
+                            sample_dir,
+                            f"sample-{global_step}-"
+                            f"rank{accelerator.process_index}-"
+                            f"{safe_case_name}-{variant_name}.mp4",
                         ),
                         n_rows=4,
                     )
-                
+
                 sampled_count += 1
                 break
 
-            if sampled_count < num_samples:
+            if sampled_count < 1:
                 logger.warning(
-                    f"Validation: exhausted {max_retries} candidate(s), "
-                    f"only generated {sampled_count}/{num_samples} samples"
+                    f"Validation: exhausted {max_retries} candidate(s) "
+                    "without generating a sample."
                 )
 
             del pipeline
@@ -806,6 +831,24 @@ def parse_args():
         type=int,
         default=21,
         help="Number of frames for validation video.",
+    )
+    parser.add_argument(
+        "--validation_data_dir",
+        type=str,
+        default=None,
+        help=(
+            "Directory whose direct child case folders contain "
+            "gs_render.mp4, image.jpg, and prompt.txt."
+        ),
+    )
+    parser.add_argument(
+        "--validation_mask_threshold",
+        type=int,
+        default=8,
+        help=(
+            "Near-black RGB threshold (0-255) used to derive validation "
+            "control masks from gs_render.mp4."
+        ),
     )
     parser.add_argument(
         "--tracker_project_name",
@@ -2084,8 +2127,11 @@ def main():
         train_loss = 0.0
         batch_sampler.sampler.generator = torch.Generator().manual_seed(args.seed + epoch)
         
-        if epoch == first_epoch and global_step == 0:
-            logger.info("Running initial validation at step 0...")
+        if epoch == first_epoch:
+            logger.info(
+                f"Running validation before the first training batch "
+                f"(global_step={global_step})..."
+            )
             log_validation(
                 vae,
                 text_encoder,
