@@ -65,14 +65,14 @@ negative_prompt = (
 )
 
 guidance_scale = 6.0
-num_inference_steps = 30
+num_inference_steps = 8
 seed = 43
 weight_dtype = torch.bfloat16
 
 # This test script intentionally uses full model loading (no CPU/model offload).
-enable_teacache = True
+enable_teacache = False
 teacache_threshold = 0.10
-num_skip_start_steps = 5
+num_skip_start_steps = 0
 teacache_offload = False
 
 sampler_name = "Flow"  # This standalone script currently uses Flow.
