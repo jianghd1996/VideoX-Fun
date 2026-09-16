@@ -7,7 +7,7 @@ NCCL_DEBUG=INFO
 accelerate launch --gpu-ids 2,3 --num_processes=2 --mixed_precision="bf16" --main_process_port=29501 scripts/wan2.2_fun/train_control_lora.py \
   --config_path="config/wan2.2/wan_civitai_5b.yaml" \
   --pretrained_model_name_or_path=$MODEL_NAME \
-  --resume_from_checkpoint="/mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun-mask/output_dir_wan2.2_fun_control_lora/checkpoint-5500.safetensors" \
+  --resume_from_checkpoint="/mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun-mask/output_dir_wan2.2_fun_control_lora/checkpoint-20000.safetensors" \
   --train_data_dir=$DATASET_NAME \
   --train_data_meta=$DATASET_META_NAME \
   --image_sample_size=640 \
@@ -24,7 +24,10 @@ accelerate launch --gpu-ids 2,3 --num_processes=2 --mixed_precision="bf16" --mai
   --validation_steps=500 \
   --validation_samples_per_gpu=1 \
   --validation_n_frames=81 \
-  --learning_rate=1e-04 \
+  --learning_rate=5e-05 \
+  --control_mask_perturb_prob=0.5 \
+  --control_mask_edge_loss_weight=1.0 \
+  --control_mask_edge_width=1 \
   --seed=42 \
   --output_dir="output_dir_wan2.2_fun_control_lora" \
   --gradient_checkpointing \
