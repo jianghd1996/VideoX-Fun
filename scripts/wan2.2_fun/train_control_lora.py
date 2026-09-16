@@ -472,7 +472,7 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                         control_mask=control_mask,
                         video=inpaint_video,
                         mask_video=inpaint_video_mask,
-                        ref_image=clip_image,
+                        ref_image=reference_tensor,
                         num_inference_steps=8,
                         guidance_scale=4.5,
                         boundary=config["transformer_additional_kwargs"].get(
