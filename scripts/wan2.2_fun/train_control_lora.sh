@@ -23,7 +23,9 @@ accelerate launch --gpu-ids 2,3 --num_processes=2 --mixed_precision="bf16" --mai
   --checkpointing_steps=500 \
   --validation_steps=500 \
   --validation_samples_per_gpu=1 \
-  --validation_n_frames=81 \
+  --validation_data_dir="/mnt/DataPart/jianghongda/VideoX-Fun-dev/test_data/0806_test" \
+  --validation_n_frames=121 \
+  --validation_mask_threshold=8 \
   --learning_rate=5e-05 \
   --control_mask_perturb_prob=0.5 \
   --control_mask_edge_loss_weight=1.0 \
