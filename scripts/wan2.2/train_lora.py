@@ -192,10 +192,10 @@ def _load_validation_cases(args):
     for image_name, prompt in prompt_map.items():
         image_path = os.path.join(args.validation_data_dir, image_name)
         if not os.path.isfile(image_path):
-            logger.warning("Skip validation image missing from disk: %s", image_path)
+            logging.getLogger(__name__).warning("Skip validation image missing from disk: %s", image_path)
             continue
         if not isinstance(prompt, str) or not prompt.strip():
-            logger.warning("Skip validation image with an empty prompt: %s", image_path)
+            logging.getLogger(__name__).warning("Skip validation image with an empty prompt: %s", image_path)
             continue
         validation_paths.append(image_path)
         validation_prompts.append(prompt.strip())
@@ -205,7 +205,7 @@ def _load_validation_cases(args):
 
     args.validation_paths = validation_paths
     args.validation_prompts = validation_prompts
-    logger.info("Loaded %d validation cases from %s", len(validation_paths), prompt_json)
+    logging.getLogger(__name__).info("Loaded %d validation cases from %s", len(validation_paths), prompt_json)
 
 
 def _validation_indices(args, accelerator, global_step):
