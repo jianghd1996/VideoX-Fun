@@ -68,7 +68,8 @@ from videox_fun.data import (ASPECT_RATIO_512, ASPECT_RATIO_RANDOM_CROP_512,
                              RandomSampler, get_closest_ratio, get_random_mask)
 from videox_fun.models import (AutoencoderKLWan, AutoencoderKLWan3_8,
                                Wan2_2Transformer3DModel, WanT5EncoderModel)
-from videox_fun.pipeline import Wan2_2I2VPipeline, Wan2_2Pipeline
+from videox_fun.pipeline import (Wan2_2I2VPipeline, Wan2_2Pipeline,
+                                Wan2_2TI2VPipeline)
 from videox_fun.utils.discrete_sampler import DiscreteSampling
 from videox_fun.utils.lora_utils import (convert_peft_lora_to_kohya_lora,
                                          create_network, merge_lora,
@@ -275,7 +276,12 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
                     else transformer3d
                 )
 
-            pipeline_cls = Wan2_2I2VPipeline if args.train_mode != "normal" else Wan2_2Pipeline
+            if args.train_mode == "ti2v":
+                pipeline_cls = Wan2_2TI2VPipeline
+            elif args.train_mode != "normal":
+                pipeline_cls = Wan2_2I2VPipeline
+            else:
+                pipeline_cls = Wan2_2Pipeline
             pipeline = pipeline_cls(
                 vae=vae,
                 text_encoder=text_encoder,
