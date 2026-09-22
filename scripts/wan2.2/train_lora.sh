@@ -36,6 +36,9 @@ accelerate launch \
   --learning_rate=1e-4 \
   --seed=42 \
   --output_dir="output_dir_wan2.2_lora_8_trajectory" \
+  --report_to=tensorboard \
+  --logging_dir=logs \
+  --tracker_project_name="wan2.2-trajectory-lora" \
   --gradient_checkpointing \
   --mixed_precision=bf16 \
   --adam_weight_decay=3e-2 \
