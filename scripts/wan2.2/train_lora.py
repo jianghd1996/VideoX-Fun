@@ -17,6 +17,7 @@
 
 import argparse
 import gc
+import json
 import logging
 import math
 import os
@@ -160,116 +161,193 @@ check_min_version("0.18.0.dev0")
 
 logger = get_logger(__name__, log_level="INFO")
 
+def _load_validation_cases(args):
+    """Load image/prompt pairs from a JSON object in validation_data_dir."""
+    if args.validation_data_dir is None:
+        return
+
+    prompt_json = args.validation_prompt_json
+    if prompt_json is None:
+        json_files = sorted(
+            name for name in os.listdir(args.validation_data_dir)
+            if name.lower().endswith(".json")
+        )
+        if len(json_files) != 1:
+            raise ValueError(
+                "--validation_data_dir must contain exactly one JSON file when "
+                "--validation_prompt_json is not provided. "
+                f"Found: {json_files}"
+            )
+        prompt_json = os.path.join(args.validation_data_dir, json_files[0])
+    elif not os.path.isabs(prompt_json):
+        prompt_json = os.path.join(args.validation_data_dir, prompt_json)
+
+    with open(prompt_json, "r", encoding="utf-8") as f:
+        prompt_map = json.load(f)
+    if not isinstance(prompt_map, dict) or not prompt_map:
+        raise ValueError(f"Validation prompt JSON must be a non-empty object: {prompt_json}")
+
+    validation_paths = []
+    validation_prompts = []
+    for image_name, prompt in prompt_map.items():
+        image_path = os.path.join(args.validation_data_dir, image_name)
+        if not os.path.isfile(image_path):
+            logger.warning("Skip validation image missing from disk: %s", image_path)
+            continue
+        if not isinstance(prompt, str) or not prompt.strip():
+            logger.warning("Skip validation image with an empty prompt: %s", image_path)
+            continue
+        validation_paths.append(image_path)
+        validation_prompts.append(prompt.strip())
+
+    if not validation_paths:
+        raise ValueError(f"No valid validation image/prompt pairs found in {prompt_json}")
+
+    args.validation_paths = validation_paths
+    args.validation_prompts = validation_prompts
+    logger.info("Loaded %d validation cases from %s", len(validation_paths), prompt_json)
+
+
+def _validation_indices(args, accelerator, global_step):
+    """Select different rotating cases per process without duplicating GPU work."""
+    case_count = len(args.validation_prompts)
+    per_process = max(1, args.validation_cases_per_process)
+    validation_round = 0 if global_step == 0 else global_step // max(1, args.validation_steps)
+    start = (validation_round * accelerator.num_processes * per_process
+             + accelerator.process_index * per_process) % case_count
+    return [(start + offset) % case_count for offset in range(per_process)]
+
+
 def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, config, accelerator, weight_dtype, global_step):
     try:
-        is_deepspeed = type(transformer3d).__name__ == 'DeepSpeedEngine'
+        is_deepspeed = type(transformer3d).__name__ == "DeepSpeedEngine"
         if is_deepspeed:
             origin_config = transformer3d.config
             transformer3d.config = accelerator.unwrap_model(transformer3d).config
+
         with torch.no_grad(), torch.cuda.amp.autocast(dtype=weight_dtype), torch.cuda.device(device=accelerator.device):
-            logger.info("Running validation... ")
+            case_indices = _validation_indices(args, accelerator, global_step)
+            logger.info(
+                "Running validation at step %d on rank %d with cases %s",
+                global_step, accelerator.process_index, case_indices,
+            )
             scheduler = FlowMatchEulerDiscreteScheduler(
-                **filter_kwargs(FlowMatchEulerDiscreteScheduler, OmegaConf.to_container(config['scheduler_kwargs']))
+                **filter_kwargs(
+                    FlowMatchEulerDiscreteScheduler,
+                    OmegaConf.to_container(config["scheduler_kwargs"]),
+                )
             )
             if args.boundary_type == "full":
-                transformer3d_1 = accelerator.unwrap_model(transformer3d) if type(transformer3d).__name__ == 'DistributedDataParallel' else transformer3d
+                transformer3d_1 = (
+                    accelerator.unwrap_model(transformer3d)
+                    if type(transformer3d).__name__ == "DistributedDataParallel"
+                    else transformer3d
+                )
                 transformer3d_2 = None
-            else:
-                if args.boundary_type == "low":
-                    transformer3d_1 = accelerator.unwrap_model(transformer3d) if type(transformer3d).__name__ == 'DistributedDataParallel' else transformer3d
-                    
-                    sub_path = config['transformer_additional_kwargs'].get('transformer_high_noise_model_subpath', 'transformer')
-                    transformer3d_2 = Wan2_2Transformer3DModel.from_pretrained(
-                        os.path.join(args.pretrained_model_name_or_path, sub_path),
-                        transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs']),
-                    ).to(weight_dtype)
-                else:
-                    sub_path = config['transformer_additional_kwargs'].get('transformer_low_noise_model_subpath', 'transformer')
-                    transformer3d_1 = Wan2_2Transformer3DModel.from_pretrained(
-                        os.path.join(args.pretrained_model_name_or_path, sub_path),
-                        transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs']),
-                    ).to(weight_dtype)
-
-                    transformer3d_2 = accelerator.unwrap_model(transformer3d) if type(transformer3d).__name__ == 'DistributedDataParallel' else transformer3d
-            
-            if args.train_mode != "normal":
-                pipeline = Wan2_2I2VPipeline(
-                    vae=vae, 
-                    text_encoder=text_encoder,
-                    tokenizer=tokenizer,
-                    transformer=transformer3d_1,
-                    transformer_2=transformer3d_2,
-                    scheduler=scheduler,
+            elif args.boundary_type == "low":
+                transformer3d_1 = (
+                    accelerator.unwrap_model(transformer3d)
+                    if type(transformer3d).__name__ == "DistributedDataParallel"
+                    else transformer3d
                 )
-            else:
-                pipeline = Wan2_2Pipeline(
-                    vae=vae, 
-                    text_encoder=text_encoder,
-                    tokenizer=tokenizer,
-                    transformer=transformer3d_1,
-                    transformer_2=transformer3d_2,
-                    scheduler=scheduler,
+                sub_path = config["transformer_additional_kwargs"].get(
+                    "transformer_high_noise_model_subpath", "transformer"
                 )
-            pipeline = pipeline.to(accelerator.device)
-
-            if args.seed is None:
-                generator = None
+                transformer3d_2 = Wan2_2Transformer3DModel.from_pretrained(
+                    os.path.join(args.pretrained_model_name_or_path, sub_path),
+                    transformer_additional_kwargs=OmegaConf.to_container(
+                        config["transformer_additional_kwargs"]
+                    ),
+                ).to(weight_dtype)
             else:
-                rank_seed = args.seed + accelerator.process_index
-                generator = torch.Generator(device=accelerator.device).manual_seed(rank_seed)
-                logger.info(f"Rank {accelerator.process_index} using seed: {rank_seed}")
+                sub_path = config["transformer_additional_kwargs"].get(
+                    "transformer_low_noise_model_subpath", "transformer"
+                )
+                transformer3d_1 = Wan2_2Transformer3DModel.from_pretrained(
+                    os.path.join(args.pretrained_model_name_or_path, sub_path),
+                    transformer_additional_kwargs=OmegaConf.to_container(
+                        config["transformer_additional_kwargs"]
+                    ),
+                ).to(weight_dtype)
+                transformer3d_2 = (
+                    accelerator.unwrap_model(transformer3d)
+                    if type(transformer3d).__name__ == "DistributedDataParallel"
+                    else transformer3d
+                )
 
-            for i in range(len(args.validation_prompts)):
+            pipeline_cls = Wan2_2I2VPipeline if args.train_mode != "normal" else Wan2_2Pipeline
+            pipeline = pipeline_cls(
+                vae=vae,
+                text_encoder=text_encoder,
+                tokenizer=tokenizer,
+                transformer=transformer3d_1,
+                transformer_2=transformer3d_2,
+                scheduler=scheduler,
+            ).to(accelerator.device)
+            pipeline.set_progress_bar_config(disable=not accelerator.is_local_main_process)
+
+            sample_dir = os.path.join(args.output_dir, "sample")
+            os.makedirs(sample_dir, exist_ok=True)
+            for case_index in case_indices:
+                prompt = args.validation_prompts[case_index]
+                image_path = args.validation_paths[case_index]
+                case_name = os.path.splitext(os.path.basename(image_path))[0]
+                case_seed = (args.seed or 0) + case_index
+                generator = torch.Generator(device=accelerator.device).manual_seed(case_seed)
+
                 if args.train_mode != "normal":
-                    start_image = Image.open(args.validation_paths[i])
-                    width, height = start_image.width, start_image.height
-                    width, height = calculate_dimensions(args.image_sample_size * args.image_sample_size,  width / height)
-
-                    video_length = int((args.video_sample_n_frames - 1) // vae.config.temporal_compression_ratio * vae.config.temporal_compression_ratio) + 1 if args.video_sample_n_frames != 1 else 1
-                    input_video, input_video_mask, _ = get_image_to_video_latent(args.validation_paths[i], None, video_length=video_length, sample_size=[height, width])
-                    sample = pipeline(
-                        args.validation_prompts[i],
-                        num_frames = video_length,
-                        negative_prompt = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走",
-                        height      = height,
-                        width       = width,
-                        generator   = generator,
-
-                        video        = input_video,
-                        mask_video   = input_video_mask,
-                        num_inference_steps = 25,
-                        guidance_scale      = 4.5,
-                        boundary            = config['transformer_additional_kwargs'].get('boundary', 0.900)
-                    ).videos
-
-                    os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
-                    save_videos_grid(
-                        sample, 
-                        os.path.join(
-                            args.output_dir, 
-                            f"sample/sample-{global_step}-rank{accelerator.process_index}-image-{i}.mp4"
-                        )
+                    with Image.open(image_path) as start_image:
+                        width, height = start_image.size
+                    width, height = calculate_dimensions(
+                        args.validation_sample_size * args.validation_sample_size,
+                        width / height,
                     )
+                    video_length = (
+                        (args.video_sample_n_frames - 1)
+                        // vae.config.temporal_compression_ratio
+                        * vae.config.temporal_compression_ratio
+                        + 1
+                        if args.video_sample_n_frames != 1 else 1
+                    )
+                    input_video, input_video_mask, _ = get_image_to_video_latent(
+                        image_path,
+                        None,
+                        video_length=video_length,
+                        sample_size=[height, width],
+                    )
+                    sample = pipeline(
+                        prompt,
+                        num_frames=video_length,
+                        negative_prompt=args.validation_negative_prompt,
+                        height=height,
+                        width=width,
+                        generator=generator,
+                        video=input_video,
+                        mask_video=input_video_mask,
+                        num_inference_steps=args.validation_num_inference_steps,
+                        guidance_scale=args.validation_guidance_scale,
+                        boundary=config["transformer_additional_kwargs"].get("boundary", 0.900),
+                    ).videos
                 else:
                     sample = pipeline(
-                        args.validation_prompts[i],
-                        num_frames = args.video_sample_n_frames,
-                        negative_prompt = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走",
-                        height      = args.video_sample_size,
-                        width       = args.video_sample_size,
-                        generator   = generator,
-                        num_inference_steps = 25,
-                        guidance_scale      = 4.5,
-                        boundary            = config['transformer_additional_kwargs'].get('boundary', 0.900)
+                        prompt,
+                        num_frames=args.video_sample_n_frames,
+                        negative_prompt=args.validation_negative_prompt,
+                        height=args.validation_sample_size,
+                        width=args.validation_sample_size,
+                        generator=generator,
+                        num_inference_steps=args.validation_num_inference_steps,
+                        guidance_scale=args.validation_guidance_scale,
+                        boundary=config["transformer_additional_kwargs"].get("boundary", 0.900),
                     ).videos
-                    os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
-                    save_videos_grid(
-                        sample, 
-                        os.path.join(
-                            args.output_dir, 
-                            f"sample/sample-{global_step}-rank{accelerator.process_index}-image-{i}.mp4"
-                        )
-                    )
+
+                output_path = os.path.join(
+                    sample_dir,
+                    f"sample-{global_step:06d}-rank{accelerator.process_index}-{case_name}.mp4",
+                )
+                save_videos_grid(sample, output_path)
+                logger.info("Saved validation sample to %s (seed=%d)", output_path, case_seed)
+                del sample
 
             del pipeline
             gc.collect()
@@ -278,18 +356,24 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
             vae.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
             transformer3d.to(accelerator.device, dtype=weight_dtype)
             if not args.enable_text_encoder_in_dataloader:
-                text_encoder.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
+                text_encoder.to(
+                    accelerator.device if not args.low_vram else "cpu",
+                    dtype=weight_dtype,
+                )
         if is_deepspeed:
             transformer3d.config = origin_config
-    except Exception as e:
+    except Exception:
+        logger.exception("Validation failed on rank %d", accelerator.process_index)
         gc.collect()
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
-        print(f"Eval error on rank {accelerator.process_index} with info {e}")
         vae.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
         transformer3d.to(accelerator.device, dtype=weight_dtype)
         if not args.enable_text_encoder_in_dataloader:
-            text_encoder.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
+            text_encoder.to(
+                accelerator.device if not args.low_vram else "cpu",
+                dtype=weight_dtype,
+            )
 
 def linear_decay(initial_value, final_value, total_steps, current_step):
     if current_step >= total_steps:
@@ -367,6 +451,48 @@ def parse_args():
         default=None,
         nargs="+",
         help=("A set of control videos evaluated every `--validation_epochs` and logged to `--report_to`."),
+    )
+    parser.add_argument(
+        "--validation_data_dir",
+        type=str,
+        default=None,
+        help="Directory containing validation images and a filename-to-prompt JSON object.",
+    )
+    parser.add_argument(
+        "--validation_prompt_json",
+        type=str,
+        default=None,
+        help="Prompt JSON path. Relative paths are resolved inside validation_data_dir.",
+    )
+    parser.add_argument(
+        "--validation_sample_size",
+        type=int,
+        default=720,
+        help="Approximate validation pixel size used for aspect-ratio-aware generation.",
+    )
+    parser.add_argument(
+        "--validation_num_inference_steps",
+        type=int,
+        default=8,
+        help="Number of denoising steps used for validation.",
+    )
+    parser.add_argument(
+        "--validation_guidance_scale",
+        type=float,
+        default=6.0,
+        help="CFG scale used for validation.",
+    )
+    parser.add_argument(
+        "--validation_cases_per_process",
+        type=int,
+        default=1,
+        help="Number of rotating validation cases generated by each process per validation round.",
+    )
+    parser.add_argument(
+        "--validation_negative_prompt",
+        type=str,
+        default="色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走",
+        help="Negative prompt used for validation.",
     )
     parser.add_argument(
         "--output_dir",
@@ -559,6 +685,12 @@ def parse_args():
         type=int,
         default=2000,
         help="Run validation every X steps.",
+    )
+    parser.add_argument(
+        "--ti2v_condition_probability",
+        type=float,
+        default=0.5,
+        help="Probability of keeping the first-frame condition during TI2V training.",
     )
     parser.add_argument(
         "--tracker_project_name",
@@ -777,6 +909,15 @@ def parse_args():
 
 def main():
     args = parse_args()
+    _load_validation_cases(args)
+
+    if not 0.0 <= args.ti2v_condition_probability <= 1.0:
+        raise ValueError("--ti2v_condition_probability must be in [0, 1].")
+    if args.validation_prompts is not None:
+        if args.validation_paths is None:
+            raise ValueError("--validation_paths is required when --validation_prompts is provided.")
+        if len(args.validation_prompts) != len(args.validation_paths):
+            raise ValueError("--validation_prompts and --validation_paths must have the same length.")
 
     if args.report_to == "wandb" and args.hub_token is not None:
         raise ValueError(
@@ -1569,6 +1710,22 @@ def main():
 
     idx_sampling = DiscreteSampling(train_sampling_steps, start_num_idx=start_num_idx, uniform_sampling=args.uniform_sampling)
 
+    # Validate the initialized/resumed LoRA before the first optimizer step.
+    if args.validation_prompts is not None:
+        log_validation(
+            vae,
+            text_encoder,
+            tokenizer,
+            transformer3d,
+            network,
+            args,
+            config,
+            accelerator,
+            weight_dtype,
+            global_step,
+        )
+        accelerator.wait_for_everyone()
+
     for epoch in range(first_epoch, args.num_train_epochs):
         train_loss = 0.0
         batch_sampler.sampler.generator = torch.Generator().manual_seed(args.seed + epoch)
@@ -1820,10 +1977,15 @@ def main():
                 )
 
                 if args.train_mode == "ti2v":
+                    condition_probability = args.ti2v_condition_probability
                     if rng is None:
-                        t2v_in_ti2v = np.random.choice([0, 1], p = [0.50, 0.50])
+                        t2v_in_ti2v = np.random.choice(
+                            [0, 1], p=[1 - condition_probability, condition_probability]
+                        )
                     else:
-                        t2v_in_ti2v = rng.choice([0, 1], p = [0.50, 0.50])
+                        t2v_in_ti2v = rng.choice(
+                            [0, 1], p=[1 - condition_probability, condition_probability]
+                        )
 
                     mask_bs = mask.size()[0]
                     if t2v_in_ti2v:
@@ -1948,7 +2110,11 @@ def main():
             if global_step >= args.max_train_steps:
                 break
 
-        if args.validation_prompts is not None and epoch % args.validation_epochs == 0:
+        if (
+            args.validation_prompts is not None
+            and args.validation_epochs > 0
+            and epoch % args.validation_epochs == 0
+        ):
             log_validation(
                 vae,
                 text_encoder,
