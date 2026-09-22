@@ -1091,7 +1091,7 @@ def main():
     # Lora will work with this...
     if args.use_peft_lora:
         from peft import (LoraConfig, get_peft_model_state_dict,
-                          inject_adapter_in_model)
+                          inject_adapter_in_model, set_peft_model_state_dict)
         lora_config = LoraConfig(r=args.rank, lora_alpha=args.network_alpha, target_modules=args.target_name.split(","))
         transformer3d = inject_adapter_in_model(lora_config, transformer3d)
 
@@ -1119,9 +1119,33 @@ def main():
             state_dict = torch.load(args.transformer_path, map_location="cpu")
         state_dict = state_dict["state_dict"] if "state_dict" in state_dict else state_dict
 
-        m, u = transformer3d.load_state_dict(state_dict, strict=False)
-        print(f"missing keys: {len(m)}, unexpected keys: {len(u)}")
-        assert len(u) == 0
+        if args.use_peft_lora:
+            incompatible_keys = set_peft_model_state_dict(transformer3d, state_dict)
+            missing_keys = incompatible_keys.missing_keys
+            unexpected_keys = incompatible_keys.unexpected_keys
+            print(
+                "Loaded PEFT LoRA checkpoint. "
+                f"missing base-model keys: {len(missing_keys)}, "
+                f"unexpected adapter keys: {len(unexpected_keys)}"
+            )
+            if unexpected_keys:
+                raise ValueError(
+                    "The LoRA checkpoint contains keys that do not match the configured "
+                    f"adapter. First unexpected keys: {unexpected_keys[:10]}"
+                )
+        else:
+            missing_keys, unexpected_keys = transformer3d.load_state_dict(
+                state_dict, strict=False
+            )
+            print(
+                f"missing keys: {len(missing_keys)}, "
+                f"unexpected keys: {len(unexpected_keys)}"
+            )
+            if unexpected_keys:
+                raise ValueError(
+                    "The Transformer checkpoint contains unexpected keys. "
+                    f"First unexpected keys: {unexpected_keys[:10]}"
+                )
 
     if args.vae_path is not None:
         print(f"From checkpoint: {args.vae_path}")
