@@ -13,7 +13,7 @@ export PRETRAIN_LORA="/mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun-Single
 export NCCL_DEBUG=INFO
 
 accelerate launch \
-  --gpu_ids 6,7 \
+  --gpu_ids 4,5 \
   --num_processes 2 \
   --mixed_precision bf16 \
   scripts/wan2.2/train_lora.py \
