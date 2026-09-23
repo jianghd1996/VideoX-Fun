@@ -5,7 +5,6 @@ export MODEL_NAME="/mnt/DataPart/jianghongda/VideoX-Fun/models/Diffusion_Transfo
 export DATASET_NAME="/mnt/DataPart/jianghongda/"
 export DATASET_META_NAME="datasets/all_video_dataset_prompts.json"
 export VALIDATION_DATA_DIR="/mnt/DataPart/jianghongda/VideoX-Fun-dev/test_data/livephoto_test"
-export PRETRAIN_LORA="/mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun-Single8/output_dir_wan2.2_lora_8_trajectory/checkpoint-1600.safetensors"
 
 # Only enable these for multi-node runs without RDMA/P2P support.
 # export NCCL_IB_DISABLE=1
@@ -19,7 +18,6 @@ accelerate launch \
   scripts/wan2.2/train_lora.py \
   --config_path="config/wan2.2/wan_civitai_5b.yaml" \
   --pretrained_model_name_or_path="$MODEL_NAME" \
-  --transformer_path="$PRETRAIN_LORA" \
   --train_data_dir="$DATASET_NAME" \
   --train_data_meta="$DATASET_META_NAME" \
   --image_sample_size=960 \
@@ -34,10 +32,10 @@ accelerate launch \
   --num_train_epochs=100 \
   --checkpointing_steps=400 \
   --checkpoints_total_limit=3 \
-  --initial_global_step=1600 \
+  --initial_global_step=0 \
   --learning_rate=5e-5 \
   --seed=42 \
-  --output_dir="output_dir_wan2.2_lora_8_trajectory" \
+  --output_dir="output_dir_wan2.2_lora_8_trajectory_clean" \
   --report_to=tensorboard \
   --logging_dir=logs \
   --tracker_project_name="wan2.2-trajectory-lora" \
