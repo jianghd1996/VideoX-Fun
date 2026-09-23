@@ -671,6 +671,15 @@ def parse_args():
         help=("Max number of checkpoints to store."),
     )
     parser.add_argument(
+        "--initial_global_step",
+        type=int,
+        default=0,
+        help=(
+            "Initial step number for LoRA-only warm starts. This restores numbering "
+            "only; optimizer and scheduler states are not restored."
+        ),
+    )
+    parser.add_argument(
         "--resume_from_checkpoint",
         type=str,
         default=None,
@@ -1601,7 +1610,7 @@ def main():
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
-    global_step = 0
+    global_step = args.initial_global_step
     first_epoch = 0
 
     # Potentially load in the weights and states from a previous save
@@ -1693,7 +1702,7 @@ def main():
                 accelerator.print("accelerator.load_state() completed for zero_stage 3.")
 
     else:
-        initial_global_step = 0
+        initial_global_step = global_step
 
     def remove_old_checkpoints(limit, reserve_for_new=1):
         """Keep checkpoint steps as groups, including native and ComfyUI LoRA files."""
