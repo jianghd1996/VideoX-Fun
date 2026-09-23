@@ -5,7 +5,7 @@ export MODEL_NAME="/mnt/DataPart/jianghongda/VideoX-Fun/models/Diffusion_Transfo
 export DATASET_NAME="/mnt/DataPart/jianghongda/"
 export DATASET_META_NAME="datasets/all_video_dataset_prompts.json"
 export VALIDATION_DATA_DIR="/mnt/DataPart/jianghongda/VideoX-Fun-dev/test_data/livephoto_test"
-export PRETRAIN_LORA="/mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun-Single8/pretrain_ckpt/checkpoint-3000.safetensors"
+export PRETRAIN_LORA="/mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun-Single8/output_dir_wan2.2_lora_8_trajectory/checkpoint-1600.safetensors"
 
 # Only enable these for multi-node runs without RDMA/P2P support.
 # export NCCL_IB_DISABLE=1
@@ -32,7 +32,8 @@ accelerate launch \
   --gradient_accumulation_steps=1 \
   --dataloader_num_workers=8 \
   --num_train_epochs=100 \
-  --checkpointing_steps=100 \
+  --checkpointing_steps=400 \
+  --checkpoints_total_limit=3 \
   --learning_rate=1e-4 \
   --seed=42 \
   --output_dir="output_dir_wan2.2_lora_8_trajectory" \
