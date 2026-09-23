@@ -111,7 +111,7 @@ lora_high_path          = None
 # Batch test configuration
 test_data_dir       = "/mnt/DataPart/jianghongda/VideoX-Fun-dev/test_data/livephoto_test"
 prompt_json_path    = None  # Auto-detect the unique JSON file in test_data_dir.
-target_long_edge    = 1280
+target_short_edge   = 704
 align_to             = 32
 video_length        = 121
 fps                 = 24
@@ -364,7 +364,7 @@ run_config = {
     "test_data_dir": test_data_dir,
     "prompt_json_path": prompt_json_path,
     "video_length": video_length,
-    "target_long_edge": target_long_edge,
+    "target_short_edge": target_short_edge,
     "align_to": align_to,
     "guidance_scale": guidance_scale,
     "num_inference_steps": num_inference_steps,
@@ -386,13 +386,13 @@ with torch.no_grad():
         with Image.open(image_path) as image:
             source_width, source_height = image.size
         if source_height >= source_width:
-            scale = target_long_edge / source_height
-            new_height = target_long_edge
-            new_width = int(round(source_width * scale))
-        else:
-            scale = target_long_edge / source_width
-            new_width = target_long_edge
+            scale = target_short_edge / source_width
+            new_width = target_short_edge
             new_height = int(round(source_height * scale))
+        else:
+            scale = target_short_edge / source_height
+            new_height = target_short_edge
+            new_width = int(round(source_width * scale))
 
         # Wan VAE/DiT spatial dimensions are kept on a 32-pixel grid.
         height = max(align_to, int(round(new_height / align_to) * align_to))
