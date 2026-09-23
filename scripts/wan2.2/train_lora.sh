@@ -45,8 +45,6 @@ accelerate launch \
   --adam_epsilon=1e-10 \
   --vae_mini_batch=1 \
   --max_grad_norm=0.05 \
-  --motion_sub_loss \
-  --motion_sub_loss_ratio=0.05 \
   --random_hw_adapt \
   --training_with_video_token_length \
   --enable_bucket \
@@ -59,7 +57,7 @@ accelerate launch \
   --train_mode=ti2v \
   --ti2v_condition_probability=0.95 \
   --validation_data_dir="$VALIDATION_DATA_DIR" \
-  --validation_steps=400 \
+  --validation_steps=200 \
   --validation_epochs=0 \
   --validation_cases_per_process=1 \
   --validation_test_case_index=0 \
