@@ -12,8 +12,8 @@ export VALIDATION_DATA_DIR="/mnt/DataPart/jianghongda/VideoX-Fun-dev/test_data/l
 export NCCL_DEBUG=INFO
 
 accelerate launch \
-  --gpu_ids 4,5 \
-  --num_processes 2 \
+  --gpu_ids 4,5,6,7 \
+  --num_processes 4 \
   --mixed_precision bf16 \
   scripts/wan2.2/train_lora.py \
   --config_path="config/wan2.2/wan_civitai_5b.yaml" \
