@@ -277,7 +277,9 @@ def _select_validation_case(args, accelerator, global_step):
             "paired_gt": True,
         }
 
-    case_index = args.validation_test_case_index % len(args.validation_paths)
+    case_index = (
+        args.validation_test_case_index + accelerator.process_index - 1
+    ) % len(args.validation_paths)
     return {
         "split": "test",
         "index": case_index,
