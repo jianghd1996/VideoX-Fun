@@ -26,6 +26,7 @@ import shutil
 import sys
 
 import accelerate
+import cv2
 import diffusers
 import numpy as np
 import torch
@@ -209,14 +210,81 @@ def _load_validation_cases(args):
     logging.getLogger(__name__).info("Loaded %d validation cases from %s", len(validation_paths), prompt_json)
 
 
-def _validation_indices(args, accelerator, global_step):
-    """Select different rotating cases per process without duplicating GPU work."""
-    case_count = len(args.validation_prompts)
-    per_process = max(1, args.validation_cases_per_process)
-    validation_round = 0 if global_step == 0 else global_step // max(1, args.validation_steps)
-    start = (validation_round * accelerator.num_processes * per_process
-             + accelerator.process_index * per_process) % case_count
-    return [(start + offset) % case_count for offset in range(per_process)]
+def _load_training_validation_cases(args):
+    """Load paired training videos for rank-0 validation."""
+    with open(args.train_data_meta, "r", encoding="utf-8") as f:
+        metadata = json.load(f)
+    if not isinstance(metadata, list):
+        raise ValueError("Training metadata must be a JSON list for paired validation.")
+
+    paths, prompts = [], []
+    for item in metadata:
+        if not isinstance(item, dict):
+            continue
+        video_path = item.get("video_path") or item.get("file_path")
+        prompt = item.get("caption") or item.get("text") or ""
+        if not video_path:
+            continue
+        if not os.path.isabs(video_path):
+            video_path = os.path.join(args.train_data_dir, video_path)
+        if not os.path.isfile(video_path):
+            continue
+        if isinstance(prompt, list):
+            prompt = prompt[0] if prompt else ""
+        paths.append(video_path)
+        prompts.append(str(prompt))
+
+    if not paths:
+        raise ValueError(
+            f"No valid training videos found for paired validation in {args.train_data_meta}"
+        )
+    args.validation_train_paths = paths
+    args.validation_train_prompts = prompts
+    logging.getLogger(__name__).info(
+        "Loaded %d paired training validation cases", len(paths)
+    )
+
+
+def _validation_round(args, global_step):
+    if global_step <= args.initial_global_step:
+        return 0
+    return (global_step - args.initial_global_step) // max(1, args.validation_steps)
+
+
+def _extract_first_frame(video_path, cache_path):
+    if os.path.isfile(cache_path):
+        return cache_path
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    capture = cv2.VideoCapture(video_path)
+    ok, frame = capture.read()
+    capture.release()
+    if not ok:
+        raise ValueError(f"Could not read first frame from training video: {video_path}")
+    if not cv2.imwrite(cache_path, frame):
+        raise ValueError(f"Could not save validation first frame: {cache_path}")
+    return cache_path
+
+
+def _select_validation_case(args, accelerator, global_step):
+    validation_round = _validation_round(args, global_step)
+    if accelerator.process_index == 0:
+        case_index = validation_round % len(args.validation_train_paths)
+        return {
+            "split": "train",
+            "index": case_index,
+            "path": args.validation_train_paths[case_index],
+            "prompt": args.validation_train_prompts[case_index],
+            "paired_gt": True,
+        }
+
+    case_index = args.validation_test_case_index % len(args.validation_paths)
+    return {
+        "split": "test",
+        "index": case_index,
+        "path": args.validation_paths[case_index],
+        "prompt": args.validation_prompts[case_index],
+        "paired_gt": False,
+    }
 
 
 def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, config, accelerator, weight_dtype, global_step):
@@ -227,10 +295,10 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
             transformer3d.config = accelerator.unwrap_model(transformer3d).config
 
         with torch.no_grad(), torch.cuda.amp.autocast(dtype=weight_dtype), torch.cuda.device(device=accelerator.device):
-            case_indices = _validation_indices(args, accelerator, global_step)
+            case = _select_validation_case(args, accelerator, global_step)
             logger.info(
-                "Running validation at step %d on rank %d with cases %s",
-                global_step, accelerator.process_index, case_indices,
+                "Running %s validation at step %d on rank %d with case %d",
+                case["split"], global_step, accelerator.process_index, case["index"],
             )
             scheduler = FlowMatchEulerDiscreteScheduler(
                 **filter_kwargs(
@@ -292,70 +360,82 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
             ).to(accelerator.device)
             pipeline.set_progress_bar_config(disable=not accelerator.is_local_main_process)
 
-            sample_dir = os.path.join(args.output_dir, "sample")
-            os.makedirs(sample_dir, exist_ok=True)
-            for case_index in case_indices:
-                prompt = args.validation_prompts[case_index]
-                image_path = args.validation_paths[case_index]
-                case_name = os.path.splitext(os.path.basename(image_path))[0]
-                case_seed = (args.seed or 0) + case_index
-                generator = torch.Generator(device=accelerator.device).manual_seed(case_seed)
+            split_dir = os.path.join(args.output_dir, "sample", case["split"])
+            os.makedirs(split_dir, exist_ok=True)
+            source_path = case["path"]
+            case_name = os.path.splitext(os.path.basename(source_path))[0]
+            case_name = f"{case['index']:05d}-{case_name}"
+            prompt = case["prompt"]
 
-                if args.train_mode != "normal":
-                    with Image.open(image_path) as start_image:
-                        width, height = start_image.size
-                    width, height = calculate_dimensions(
-                        args.validation_sample_size * args.validation_sample_size,
-                        width / height,
-                    )
-                    video_length = (
-                        (args.video_sample_n_frames - 1)
-                        // vae.config.temporal_compression_ratio
-                        * vae.config.temporal_compression_ratio
-                        + 1
-                        if args.video_sample_n_frames != 1 else 1
-                    )
-                    input_video, input_video_mask, _ = get_image_to_video_latent(
-                        image_path,
-                        None,
-                        video_length=video_length,
-                        sample_size=[height, width],
-                    )
-                    sample = pipeline(
-                        prompt,
-                        num_frames=video_length,
-                        negative_prompt=args.validation_negative_prompt,
-                        height=height,
-                        width=width,
-                        generator=generator,
-                        video=input_video,
-                        mask_video=input_video_mask,
-                        num_inference_steps=args.validation_num_inference_steps,
-                        guidance_scale=args.validation_guidance_scale,
-                        boundary=config["transformer_additional_kwargs"].get("boundary", 0.900),
-                    ).videos
-                else:
-                    sample = pipeline(
-                        prompt,
-                        num_frames=args.video_sample_n_frames,
-                        negative_prompt=args.validation_negative_prompt,
-                        height=args.validation_sample_size,
-                        width=args.validation_sample_size,
-                        generator=generator,
-                        num_inference_steps=args.validation_num_inference_steps,
-                        guidance_scale=args.validation_guidance_scale,
-                        boundary=config["transformer_additional_kwargs"].get("boundary", 0.900),
-                    ).videos
-
-                output_path = os.path.join(
-                    sample_dir,
-                    f"sample-{global_step:06d}-rank{accelerator.process_index}-{case_name}.mp4",
+            if case["paired_gt"]:
+                input_cache = os.path.join(
+                    args.output_dir, "sample", "train_inputs", f"{case_name}.png"
                 )
-                save_videos_grid(sample, output_path)
-                logger.info("Saved validation sample to %s (seed=%d)", output_path, case_seed)
-                del sample
+                image_path = _extract_first_frame(source_path, input_cache)
+                gt_dir = os.path.join(args.output_dir, "sample", "train_gt")
+                os.makedirs(gt_dir, exist_ok=True)
+                gt_path = os.path.join(gt_dir, f"{case_name}.mp4")
+                if not os.path.exists(gt_path):
+                    shutil.copy2(source_path, gt_path)
+            else:
+                image_path = source_path
 
-            del pipeline
+            case_seed = (args.seed or 0) + case["index"]
+            generator = torch.Generator(device=accelerator.device).manual_seed(case_seed)
+
+            if args.train_mode != "normal":
+                with Image.open(image_path) as start_image:
+                    width, height = start_image.size
+                width, height = calculate_dimensions(
+                    args.validation_sample_size * args.validation_sample_size,
+                    width / height,
+                )
+                video_length = (
+                    (args.video_sample_n_frames - 1)
+                    // vae.config.temporal_compression_ratio
+                    * vae.config.temporal_compression_ratio
+                    + 1
+                    if args.video_sample_n_frames != 1 else 1
+                )
+                input_video, input_video_mask, _ = get_image_to_video_latent(
+                    image_path,
+                    None,
+                    video_length=video_length,
+                    sample_size=[height, width],
+                )
+                sample = pipeline(
+                    prompt,
+                    num_frames=video_length,
+                    negative_prompt=args.validation_negative_prompt,
+                    height=height,
+                    width=width,
+                    generator=generator,
+                    video=input_video,
+                    mask_video=input_video_mask,
+                    num_inference_steps=args.validation_num_inference_steps,
+                    guidance_scale=args.validation_guidance_scale,
+                    boundary=config["transformer_additional_kwargs"].get("boundary", 0.900),
+                ).videos
+            else:
+                sample = pipeline(
+                    prompt,
+                    num_frames=args.video_sample_n_frames,
+                    negative_prompt=args.validation_negative_prompt,
+                    height=args.validation_sample_size,
+                    width=args.validation_sample_size,
+                    generator=generator,
+                    num_inference_steps=args.validation_num_inference_steps,
+                    guidance_scale=args.validation_guidance_scale,
+                    boundary=config["transformer_additional_kwargs"].get("boundary", 0.900),
+                ).videos
+
+            output_path = os.path.join(
+                split_dir,
+                f"sample-{global_step:06d}-rank{accelerator.process_index}-{case_name}.mp4",
+            )
+            save_videos_grid(sample, output_path)
+            logger.info("Saved validation sample to %s (seed=%d)", output_path, case_seed)
+            del sample, pipeline
             gc.collect()
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
@@ -493,6 +573,12 @@ def parse_args():
         type=int,
         default=1,
         help="Number of rotating validation cases generated by each process per validation round.",
+    )
+    parser.add_argument(
+        "--validation_test_case_index",
+        type=int,
+        default=0,
+        help="Fixed test-set anchor case used by nonzero validation ranks.",
     )
     parser.add_argument(
         "--validation_negative_prompt",
@@ -925,6 +1011,7 @@ def parse_args():
 def main():
     args = parse_args()
     _load_validation_cases(args)
+    _load_training_validation_cases(args)
 
     if not 0.0 <= args.ti2v_condition_probability <= 1.0:
         raise ValueError("--ti2v_condition_probability must be in [0, 1].")
@@ -1798,6 +1885,7 @@ def main():
         )
         accelerator.wait_for_everyone()
 
+    rolling_loss_values = []
     for epoch in range(first_epoch, args.num_train_epochs):
         train_loss = 0.0
         batch_sampler.sampler.generator = torch.Generator().manual_seed(args.seed + epoch)
@@ -2091,17 +2179,40 @@ def main():
                     return final_loss
                 
                 weighting = compute_loss_weighting_for_sd3(weighting_scheme=args.weighting_scheme, sigmas=sigmas)
-                loss = custom_mse_loss(noise_pred.float(), target.float(), weighting.float())
-                loss = loss.mean()
+                diffusion_loss = custom_mse_loss(
+                    noise_pred.float(), target.float(), weighting.float()
+                ).mean()
+                temporal_loss = None
+                loss = diffusion_loss
 
                 if args.motion_sub_loss and noise_pred.size()[2] > 2:
-                    gt_sub_noise = noise_pred[:, :, 1:].float() - noise_pred[:, :, :-1].float()
-                    pre_sub_noise = target[:, :, 1:].float() - target[:, :, :-1].float()
-                    sub_loss = F.mse_loss(gt_sub_noise, pre_sub_noise, reduction="mean")
-                    loss = loss * (1 - args.motion_sub_loss_ratio) + sub_loss * args.motion_sub_loss_ratio
+                    predicted_delta = (
+                        noise_pred[:, :, 1:].float() - noise_pred[:, :, :-1].float()
+                    )
+                    target_delta = (
+                        target[:, :, 1:].float() - target[:, :, :-1].float()
+                    )
+                    temporal_loss = F.mse_loss(
+                        predicted_delta, target_delta, reduction="mean"
+                    )
+                    loss = (
+                        diffusion_loss * (1 - args.motion_sub_loss_ratio)
+                        + temporal_loss * args.motion_sub_loss_ratio
+                    )
 
-                # Gather the losses across all processes for logging (if we use distributed training).
-                avg_loss = accelerator.gather(loss.repeat(args.train_batch_size)).mean()
+                # Gather losses across all processes for logging.
+                avg_loss = accelerator.gather(
+                    loss.repeat(args.train_batch_size)
+                ).mean()
+                avg_diffusion_loss = accelerator.gather(
+                    diffusion_loss.repeat(args.train_batch_size)
+                ).mean()
+                if temporal_loss is not None:
+                    avg_temporal_loss = accelerator.gather(
+                        temporal_loss.repeat(args.train_batch_size)
+                    ).mean()
+                else:
+                    avg_temporal_loss = None
                 train_loss += avg_loss.item() / args.gradient_accumulation_steps
 
                 # Backpropagate
@@ -2116,13 +2227,18 @@ def main():
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
-                accelerator.log(
-                    {
-                        "train/loss": train_loss,
-                        "train/learning_rate": lr_scheduler.get_last_lr()[0],
-                    },
-                    step=global_step,
-                )
+                rolling_loss_values.append(train_loss)
+                if len(rolling_loss_values) > 100:
+                    rolling_loss_values.pop(0)
+                log_values = {
+                    "train/loss": train_loss,
+                    "train/loss_100step_mean": sum(rolling_loss_values) / len(rolling_loss_values),
+                    "train/diffusion_loss": avg_diffusion_loss.item(),
+                    "train/learning_rate": lr_scheduler.get_last_lr()[0],
+                }
+                if avg_temporal_loss is not None:
+                    log_values["train/temporal_loss"] = avg_temporal_loss.item()
+                accelerator.log(log_values, step=global_step)
                 train_loss = 0.0
 
                 if global_step % args.checkpointing_steps == 0:
