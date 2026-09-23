@@ -28,8 +28,8 @@ from videox_fun.utils.fp8_optimization import (convert_model_weight_to_float8,
                                                convert_weight_dtype_wrapper,
                                                replace_parameters_by_name)
 from videox_fun.utils.lora_utils import merge_lora, unmerge_lora
-from videox_fun.utils.utils import (calculate_dimensions, filter_kwargs,
-                                    get_image_to_video_latent, save_videos_grid)
+from videox_fun.utils.utils import (filter_kwargs, get_image_to_video_latent,
+                                    save_videos_grid)
 
 # GPU memory mode, which can be chosen in [model_full_load, model_full_load_and_qfloat8, model_cpu_offload, model_cpu_offload_and_qfloat8, model_group_offload, sequential_cpu_offload].
 # model_full_load means that the entire model will be moved to the GPU.
@@ -111,7 +111,8 @@ lora_high_path          = None
 # Batch test configuration
 test_data_dir       = "/mnt/DataPart/jianghongda/VideoX-Fun-dev/test_data/livephoto_test"
 prompt_json_path    = None  # Auto-detect the unique JSON file in test_data_dir.
-target_sample_size  = 720   # Aspect-ratio-aware target area: 720 * 720.
+target_long_edge    = 1280
+align_to             = 32
 video_length        = 121
 fps                 = 24
 
@@ -363,7 +364,8 @@ run_config = {
     "test_data_dir": test_data_dir,
     "prompt_json_path": prompt_json_path,
     "video_length": video_length,
-    "target_sample_size": target_sample_size,
+    "target_long_edge": target_long_edge,
+    "align_to": align_to,
     "guidance_scale": guidance_scale,
     "num_inference_steps": num_inference_steps,
     "sampler_name": sampler_name,
@@ -383,10 +385,19 @@ with torch.no_grad():
 
         with Image.open(image_path) as image:
             source_width, source_height = image.size
-        width, height = calculate_dimensions(
-            target_sample_size * target_sample_size,
-            source_width / source_height,
-        )
+        if source_height >= source_width:
+            scale = target_long_edge / source_height
+            new_height = target_long_edge
+            new_width = int(round(source_width * scale))
+        else:
+            scale = target_long_edge / source_width
+            new_width = target_long_edge
+            new_height = int(round(source_height * scale))
+
+        # Wan VAE/DiT spatial dimensions are kept on a 32-pixel grid.
+        height = max(align_to, int(round(new_height / align_to) * align_to))
+        width = max(align_to, int(round(new_width / align_to) * align_to))
+        # get_image_to_video_latent expects [height, width].
         sample_size = [height, width]
         case_seed = seed + case_index
         generator = torch.Generator(device=device).manual_seed(case_seed)
