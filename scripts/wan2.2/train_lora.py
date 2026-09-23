@@ -1695,6 +1695,39 @@ def main():
     else:
         initial_global_step = 0
 
+    def remove_old_checkpoints(limit, reserve_for_new=1):
+        """Keep checkpoint steps as groups, including native and ComfyUI LoRA files."""
+        if limit is None:
+            return
+        if limit < 1:
+            raise ValueError("--checkpoints_total_limit must be at least 1.")
+
+        checkpoint_groups = {}
+        for name in os.listdir(args.output_dir):
+            step = None
+            if name.startswith("checkpoint-"):
+                step_token = name[len("checkpoint-"):].split("-", 1)[0].split(".", 1)[0]
+                if step_token.isdigit():
+                    step = int(step_token)
+            if step is not None:
+                checkpoint_groups.setdefault(step, []).append(name)
+
+        keep_existing = max(0, limit - reserve_for_new)
+        steps_to_remove = sorted(checkpoint_groups)[:-keep_existing] if keep_existing else sorted(checkpoint_groups)
+        for checkpoint_step in steps_to_remove:
+            names = checkpoint_groups[checkpoint_step]
+            logger.info(
+                "Removing checkpoint step %d artifacts: %s",
+                checkpoint_step,
+                ", ".join(names),
+            )
+            for name in names:
+                checkpoint_path = os.path.join(args.output_dir, name)
+                if os.path.isdir(checkpoint_path):
+                    shutil.rmtree(checkpoint_path)
+                elif os.path.isfile(checkpoint_path):
+                    os.remove(checkpoint_path)
+
     # function for saving/removing
     def save_model(ckpt_file, unwrapped_nw):
         os.makedirs(args.output_dir, exist_ok=True)
@@ -2085,25 +2118,11 @@ def main():
 
                 if global_step % args.checkpointing_steps == 0:
                     if args.use_deepspeed or args.use_fsdp or accelerator.is_main_process:
-                        # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
-                        if args.checkpoints_total_limit is not None:
-                            checkpoints = os.listdir(args.output_dir)
-                            checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
-                            checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
-
-                            # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
-                            if len(checkpoints) >= args.checkpoints_total_limit:
-                                num_to_remove = len(checkpoints) - args.checkpoints_total_limit + 1
-                                removing_checkpoints = checkpoints[0:num_to_remove]
-
-                                logger.info(
-                                    f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
-                                )
-                                logger.info(f"removing checkpoints: {', '.join(removing_checkpoints)}")
-
-                                for removing_checkpoint in removing_checkpoints:
-                                    removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
-                                    shutil.rmtree(removing_checkpoint)
+                        # Reserve one slot for the checkpoint about to be saved.
+                        remove_old_checkpoints(
+                            args.checkpoints_total_limit,
+                            reserve_for_new=1,
+                        )
                         gc.collect()
                         torch.cuda.empty_cache()
                         torch.cuda.ipc_collect()
