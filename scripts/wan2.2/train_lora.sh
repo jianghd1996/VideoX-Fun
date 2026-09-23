@@ -34,6 +34,7 @@ accelerate launch \
   --num_train_epochs=100 \
   --checkpointing_steps=400 \
   --checkpoints_total_limit=3 \
+  --initial_global_step=1600 \
   --learning_rate=1e-4 \
   --seed=42 \
   --output_dir="output_dir_wan2.2_lora_8_trajectory" \
