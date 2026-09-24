@@ -5,6 +5,7 @@ export MODEL_NAME="/mnt/DataPart/jianghongda/VideoX-Fun/models/Diffusion_Transfo
 export DATASET_NAME="/mnt/DataPart/jianghongda/"
 export DATASET_META_NAME="datasets/all_video_dataset_prompts.json"
 export VALIDATION_DATA_DIR="/mnt/DataPart/jianghongda/VideoX-Fun-dev/test_data/livephoto_test"
+export PRETRAIN_LORA="/mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun-Single8/output_dir_wan2.2_lora_8_trajectory_clean/checkpoint-2800.safetensors"
 
 # Only enable these for multi-node runs without RDMA/P2P support.
 # export NCCL_IB_DISABLE=1
@@ -12,12 +13,13 @@ export VALIDATION_DATA_DIR="/mnt/DataPart/jianghongda/VideoX-Fun-dev/test_data/l
 export NCCL_DEBUG=INFO
 
 accelerate launch \
-  --gpu_ids 4,5,6,7 \
-  --num_processes 4 \
+  --gpu_ids 4,5 \
+  --num_processes 2 \
   --mixed_precision bf16 \
   scripts/wan2.2/train_lora.py \
   --config_path="config/wan2.2/wan_civitai_5b.yaml" \
   --pretrained_model_name_or_path="$MODEL_NAME" \
+  --transformer_path="$PRETRAIN_LORA" \
   --train_data_dir="$DATASET_NAME" \
   --train_data_meta="$DATASET_META_NAME" \
   --image_sample_size=960 \
@@ -29,10 +31,10 @@ accelerate launch \
   --video_repeat=1 \
   --gradient_accumulation_steps=1 \
   --dataloader_num_workers=8 \
-  --num_train_epochs=100 \
+  --num_train_epochs=200 \
   --checkpointing_steps=400 \
   --checkpoints_total_limit=3 \
-  --initial_global_step=0 \
+  --initial_global_step=2800 \
   --learning_rate=5e-5 \
   --seed=42 \
   --output_dir="output_dir_wan2.2_lora_8_trajectory_clean" \
