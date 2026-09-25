@@ -17,6 +17,7 @@
 
 import argparse
 import gc
+import json
 import logging
 import math
 import os
@@ -25,6 +26,7 @@ import shutil
 import sys
 
 import accelerate
+import cv2
 import diffusers
 import numpy as np
 import torch
@@ -67,7 +69,8 @@ from videox_fun.data import (ASPECT_RATIO_512, ASPECT_RATIO_RANDOM_CROP_512,
                              RandomSampler, get_closest_ratio, get_random_mask)
 from videox_fun.models import (AutoencoderKLWan, AutoencoderKLWan3_8,
                                Wan2_2Transformer3DModel, WanT5EncoderModel)
-from videox_fun.pipeline import Wan2_2I2VPipeline, Wan2_2Pipeline
+from videox_fun.pipeline import (Wan2_2I2VPipeline, Wan2_2Pipeline,
+                                Wan2_2TI2VPipeline)
 from videox_fun.utils.discrete_sampler import DiscreteSampling
 from videox_fun.utils.lora_utils import (convert_peft_lora_to_kohya_lora,
                                          create_network, merge_lora,
@@ -160,136 +163,305 @@ check_min_version("0.18.0.dev0")
 
 logger = get_logger(__name__, log_level="INFO")
 
+def _load_validation_cases(args):
+    """Load image/prompt pairs from a JSON object in validation_data_dir."""
+    if args.validation_data_dir is None:
+        return
+
+    prompt_json = args.validation_prompt_json
+    if prompt_json is None:
+        json_files = sorted(
+            name for name in os.listdir(args.validation_data_dir)
+            if name.lower().endswith(".json")
+        )
+        if len(json_files) != 1:
+            raise ValueError(
+                "--validation_data_dir must contain exactly one JSON file when "
+                "--validation_prompt_json is not provided. "
+                f"Found: {json_files}"
+            )
+        prompt_json = os.path.join(args.validation_data_dir, json_files[0])
+    elif not os.path.isabs(prompt_json):
+        prompt_json = os.path.join(args.validation_data_dir, prompt_json)
+
+    with open(prompt_json, "r", encoding="utf-8") as f:
+        prompt_map = json.load(f)
+    if not isinstance(prompt_map, dict) or not prompt_map:
+        raise ValueError(f"Validation prompt JSON must be a non-empty object: {prompt_json}")
+
+    validation_paths = []
+    validation_prompts = []
+    for image_name, prompt in prompt_map.items():
+        image_path = os.path.join(args.validation_data_dir, image_name)
+        if not os.path.isfile(image_path):
+            logging.getLogger(__name__).warning("Skip validation image missing from disk: %s", image_path)
+            continue
+        if not isinstance(prompt, str) or not prompt.strip():
+            logging.getLogger(__name__).warning("Skip validation image with an empty prompt: %s", image_path)
+            continue
+        validation_paths.append(image_path)
+        validation_prompts.append(prompt.strip())
+
+    if not validation_paths:
+        raise ValueError(f"No valid validation image/prompt pairs found in {prompt_json}")
+
+    args.validation_paths = validation_paths
+    args.validation_prompts = validation_prompts
+    logging.getLogger(__name__).info("Loaded %d validation cases from %s", len(validation_paths), prompt_json)
+
+
+def _load_training_validation_cases(args):
+    """Load paired training videos for rank-0 validation."""
+    with open(args.train_data_meta, "r", encoding="utf-8") as f:
+        metadata = json.load(f)
+    if not isinstance(metadata, list):
+        raise ValueError("Training metadata must be a JSON list for paired validation.")
+
+    paths, prompts = [], []
+    for item in metadata:
+        if not isinstance(item, dict):
+            continue
+        video_path = item.get("video_path") or item.get("file_path")
+        prompt = item.get("caption") or item.get("text") or ""
+        if not video_path:
+            continue
+        if not os.path.isabs(video_path):
+            video_path = os.path.join(args.train_data_dir, video_path)
+        if not os.path.isfile(video_path):
+            continue
+        if isinstance(prompt, list):
+            prompt = prompt[0] if prompt else ""
+        paths.append(video_path)
+        prompts.append(str(prompt))
+
+    if not paths:
+        raise ValueError(
+            f"No valid training videos found for paired validation in {args.train_data_meta}"
+        )
+    args.validation_train_paths = paths
+    args.validation_train_prompts = prompts
+    logging.getLogger(__name__).info(
+        "Loaded %d paired training validation cases", len(paths)
+    )
+
+
+def _validation_round(args, global_step):
+    if global_step <= args.initial_global_step:
+        return 0
+    return (global_step - args.initial_global_step) // max(1, args.validation_steps)
+
+
+def _extract_first_frame(video_path, cache_path):
+    if os.path.isfile(cache_path):
+        return cache_path
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    capture = cv2.VideoCapture(video_path)
+    ok, frame = capture.read()
+    capture.release()
+    if not ok:
+        raise ValueError(f"Could not read first frame from training video: {video_path}")
+    if not cv2.imwrite(cache_path, frame):
+        raise ValueError(f"Could not save validation first frame: {cache_path}")
+    return cache_path
+
+
+def _select_validation_case(args, accelerator, global_step):
+    validation_round = _validation_round(args, global_step)
+    if accelerator.process_index == 0:
+        case_index = validation_round % len(args.validation_train_paths)
+        return {
+            "split": "train",
+            "index": case_index,
+            "path": args.validation_train_paths[case_index],
+            "prompt": args.validation_train_prompts[case_index],
+            "paired_gt": True,
+        }
+
+    case_index = (
+        args.validation_test_case_index + accelerator.process_index - 1
+    ) % len(args.validation_paths)
+    return {
+        "split": "test",
+        "index": case_index,
+        "path": args.validation_paths[case_index],
+        "prompt": args.validation_prompts[case_index],
+        "paired_gt": False,
+    }
+
+
 def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, config, accelerator, weight_dtype, global_step):
     try:
-        is_deepspeed = type(transformer3d).__name__ == 'DeepSpeedEngine'
+        is_deepspeed = type(transformer3d).__name__ == "DeepSpeedEngine"
         if is_deepspeed:
             origin_config = transformer3d.config
             transformer3d.config = accelerator.unwrap_model(transformer3d).config
+
         with torch.no_grad(), torch.cuda.amp.autocast(dtype=weight_dtype), torch.cuda.device(device=accelerator.device):
-            logger.info("Running validation... ")
+            case = _select_validation_case(args, accelerator, global_step)
+            logger.info(
+                "Running %s validation at step %d on rank %d with case %d",
+                case["split"], global_step, accelerator.process_index, case["index"],
+            )
             scheduler = FlowMatchEulerDiscreteScheduler(
-                **filter_kwargs(FlowMatchEulerDiscreteScheduler, OmegaConf.to_container(config['scheduler_kwargs']))
+                **filter_kwargs(
+                    FlowMatchEulerDiscreteScheduler,
+                    OmegaConf.to_container(config["scheduler_kwargs"]),
+                )
             )
             if args.boundary_type == "full":
-                transformer3d_1 = accelerator.unwrap_model(transformer3d) if type(transformer3d).__name__ == 'DistributedDataParallel' else transformer3d
+                transformer3d_1 = (
+                    accelerator.unwrap_model(transformer3d)
+                    if type(transformer3d).__name__ == "DistributedDataParallel"
+                    else transformer3d
+                )
                 transformer3d_2 = None
+            elif args.boundary_type == "low":
+                transformer3d_1 = (
+                    accelerator.unwrap_model(transformer3d)
+                    if type(transformer3d).__name__ == "DistributedDataParallel"
+                    else transformer3d
+                )
+                sub_path = config["transformer_additional_kwargs"].get(
+                    "transformer_high_noise_model_subpath", "transformer"
+                )
+                transformer3d_2 = Wan2_2Transformer3DModel.from_pretrained(
+                    os.path.join(args.pretrained_model_name_or_path, sub_path),
+                    transformer_additional_kwargs=OmegaConf.to_container(
+                        config["transformer_additional_kwargs"]
+                    ),
+                ).to(weight_dtype)
             else:
-                if args.boundary_type == "low":
-                    transformer3d_1 = accelerator.unwrap_model(transformer3d) if type(transformer3d).__name__ == 'DistributedDataParallel' else transformer3d
-                    
-                    sub_path = config['transformer_additional_kwargs'].get('transformer_high_noise_model_subpath', 'transformer')
-                    transformer3d_2 = Wan2_2Transformer3DModel.from_pretrained(
-                        os.path.join(args.pretrained_model_name_or_path, sub_path),
-                        transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs']),
-                    ).to(weight_dtype)
-                else:
-                    sub_path = config['transformer_additional_kwargs'].get('transformer_low_noise_model_subpath', 'transformer')
-                    transformer3d_1 = Wan2_2Transformer3DModel.from_pretrained(
-                        os.path.join(args.pretrained_model_name_or_path, sub_path),
-                        transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs']),
-                    ).to(weight_dtype)
+                sub_path = config["transformer_additional_kwargs"].get(
+                    "transformer_low_noise_model_subpath", "transformer"
+                )
+                transformer3d_1 = Wan2_2Transformer3DModel.from_pretrained(
+                    os.path.join(args.pretrained_model_name_or_path, sub_path),
+                    transformer_additional_kwargs=OmegaConf.to_container(
+                        config["transformer_additional_kwargs"]
+                    ),
+                ).to(weight_dtype)
+                transformer3d_2 = (
+                    accelerator.unwrap_model(transformer3d)
+                    if type(transformer3d).__name__ == "DistributedDataParallel"
+                    else transformer3d
+                )
 
-                    transformer3d_2 = accelerator.unwrap_model(transformer3d) if type(transformer3d).__name__ == 'DistributedDataParallel' else transformer3d
-            
+            if args.train_mode == "ti2v":
+                pipeline_cls = Wan2_2TI2VPipeline
+            elif args.train_mode != "normal":
+                pipeline_cls = Wan2_2I2VPipeline
+            else:
+                pipeline_cls = Wan2_2Pipeline
+            pipeline = pipeline_cls(
+                vae=vae,
+                text_encoder=text_encoder,
+                tokenizer=tokenizer,
+                transformer=transformer3d_1,
+                transformer_2=transformer3d_2,
+                scheduler=scheduler,
+            ).to(accelerator.device)
+            pipeline.set_progress_bar_config(disable=not accelerator.is_local_main_process)
+
+            split_dir = os.path.join(args.output_dir, "sample", case["split"])
+            os.makedirs(split_dir, exist_ok=True)
+            source_path = case["path"]
+            case_name = os.path.splitext(os.path.basename(source_path))[0]
+            case_name = f"{case['index']:05d}-{case_name}"
+            prompt = case["prompt"]
+
+            if case["paired_gt"]:
+                input_cache = os.path.join(
+                    args.output_dir, "sample", "train_inputs", f"{case_name}.png"
+                )
+                image_path = _extract_first_frame(source_path, input_cache)
+                gt_dir = os.path.join(args.output_dir, "sample", "train_gt")
+                os.makedirs(gt_dir, exist_ok=True)
+                gt_path = os.path.join(gt_dir, f"{case_name}.mp4")
+                if not os.path.exists(gt_path):
+                    shutil.copy2(source_path, gt_path)
+            else:
+                image_path = source_path
+
+            case_seed = (args.seed or 0) + case["index"]
+            generator = torch.Generator(device=accelerator.device).manual_seed(case_seed)
+
             if args.train_mode != "normal":
-                pipeline = Wan2_2I2VPipeline(
-                    vae=vae, 
-                    text_encoder=text_encoder,
-                    tokenizer=tokenizer,
-                    transformer=transformer3d_1,
-                    transformer_2=transformer3d_2,
-                    scheduler=scheduler,
+                with Image.open(image_path) as start_image:
+                    width, height = start_image.size
+                width, height = calculate_dimensions(
+                    args.validation_sample_size * args.validation_sample_size,
+                    width / height,
                 )
-            else:
-                pipeline = Wan2_2Pipeline(
-                    vae=vae, 
-                    text_encoder=text_encoder,
-                    tokenizer=tokenizer,
-                    transformer=transformer3d_1,
-                    transformer_2=transformer3d_2,
-                    scheduler=scheduler,
+                video_length = (
+                    (args.video_sample_n_frames - 1)
+                    // vae.config.temporal_compression_ratio
+                    * vae.config.temporal_compression_ratio
+                    + 1
+                    if args.video_sample_n_frames != 1 else 1
                 )
-            pipeline = pipeline.to(accelerator.device)
-
-            if args.seed is None:
-                generator = None
+                input_video, input_video_mask, _ = get_image_to_video_latent(
+                    image_path,
+                    None,
+                    video_length=video_length,
+                    sample_size=[height, width],
+                )
+                sample = pipeline(
+                    prompt,
+                    num_frames=video_length,
+                    negative_prompt=args.validation_negative_prompt,
+                    height=height,
+                    width=width,
+                    generator=generator,
+                    video=input_video,
+                    mask_video=input_video_mask,
+                    num_inference_steps=args.validation_num_inference_steps,
+                    guidance_scale=args.validation_guidance_scale,
+                    boundary=config["transformer_additional_kwargs"].get("boundary", 0.900),
+                ).videos
             else:
-                rank_seed = args.seed + accelerator.process_index
-                generator = torch.Generator(device=accelerator.device).manual_seed(rank_seed)
-                logger.info(f"Rank {accelerator.process_index} using seed: {rank_seed}")
+                sample = pipeline(
+                    prompt,
+                    num_frames=args.video_sample_n_frames,
+                    negative_prompt=args.validation_negative_prompt,
+                    height=args.validation_sample_size,
+                    width=args.validation_sample_size,
+                    generator=generator,
+                    num_inference_steps=args.validation_num_inference_steps,
+                    guidance_scale=args.validation_guidance_scale,
+                    boundary=config["transformer_additional_kwargs"].get("boundary", 0.900),
+                ).videos
 
-            for i in range(len(args.validation_prompts)):
-                if args.train_mode != "normal":
-                    start_image = Image.open(args.validation_paths[i])
-                    width, height = start_image.width, start_image.height
-                    width, height = calculate_dimensions(args.image_sample_size * args.image_sample_size,  width / height)
-
-                    video_length = int((args.video_sample_n_frames - 1) // vae.config.temporal_compression_ratio * vae.config.temporal_compression_ratio) + 1 if args.video_sample_n_frames != 1 else 1
-                    input_video, input_video_mask, _ = get_image_to_video_latent(args.validation_paths[i], None, video_length=video_length, sample_size=[height, width])
-                    sample = pipeline(
-                        args.validation_prompts[i],
-                        num_frames = video_length,
-                        negative_prompt = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走",
-                        height      = height,
-                        width       = width,
-                        generator   = generator,
-
-                        video        = input_video,
-                        mask_video   = input_video_mask,
-                        num_inference_steps = 25,
-                        guidance_scale      = 4.5,
-                        boundary            = config['transformer_additional_kwargs'].get('boundary', 0.900)
-                    ).videos
-
-                    os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
-                    save_videos_grid(
-                        sample, 
-                        os.path.join(
-                            args.output_dir, 
-                            f"sample/sample-{global_step}-rank{accelerator.process_index}-image-{i}.mp4"
-                        )
-                    )
-                else:
-                    sample = pipeline(
-                        args.validation_prompts[i],
-                        num_frames = args.video_sample_n_frames,
-                        negative_prompt = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走",
-                        height      = args.video_sample_size,
-                        width       = args.video_sample_size,
-                        generator   = generator,
-                        num_inference_steps = 25,
-                        guidance_scale      = 4.5,
-                        boundary            = config['transformer_additional_kwargs'].get('boundary', 0.900)
-                    ).videos
-                    os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
-                    save_videos_grid(
-                        sample, 
-                        os.path.join(
-                            args.output_dir, 
-                            f"sample/sample-{global_step}-rank{accelerator.process_index}-image-{i}.mp4"
-                        )
-                    )
-
-            del pipeline
+            output_path = os.path.join(
+                split_dir,
+                f"sample-{global_step:06d}-rank{accelerator.process_index}-{case_name}.mp4",
+            )
+            save_videos_grid(sample, output_path)
+            logger.info("Saved validation sample to %s (seed=%d)", output_path, case_seed)
+            del sample, pipeline
             gc.collect()
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
             vae.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
             transformer3d.to(accelerator.device, dtype=weight_dtype)
             if not args.enable_text_encoder_in_dataloader:
-                text_encoder.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
+                text_encoder.to(
+                    accelerator.device if not args.low_vram else "cpu",
+                    dtype=weight_dtype,
+                )
         if is_deepspeed:
             transformer3d.config = origin_config
-    except Exception as e:
+    except Exception:
+        logger.exception("Validation failed on rank %d", accelerator.process_index)
         gc.collect()
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
-        print(f"Eval error on rank {accelerator.process_index} with info {e}")
         vae.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
         transformer3d.to(accelerator.device, dtype=weight_dtype)
         if not args.enable_text_encoder_in_dataloader:
-            text_encoder.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
+            text_encoder.to(
+                accelerator.device if not args.low_vram else "cpu",
+                dtype=weight_dtype,
+            )
 
 def linear_decay(initial_value, final_value, total_steps, current_step):
     if current_step >= total_steps:
@@ -367,6 +539,54 @@ def parse_args():
         default=None,
         nargs="+",
         help=("A set of control videos evaluated every `--validation_epochs` and logged to `--report_to`."),
+    )
+    parser.add_argument(
+        "--validation_data_dir",
+        type=str,
+        default=None,
+        help="Directory containing validation images and a filename-to-prompt JSON object.",
+    )
+    parser.add_argument(
+        "--validation_prompt_json",
+        type=str,
+        default=None,
+        help="Prompt JSON path. Relative paths are resolved inside validation_data_dir.",
+    )
+    parser.add_argument(
+        "--validation_sample_size",
+        type=int,
+        default=720,
+        help="Approximate validation pixel size used for aspect-ratio-aware generation.",
+    )
+    parser.add_argument(
+        "--validation_num_inference_steps",
+        type=int,
+        default=8,
+        help="Number of denoising steps used for validation.",
+    )
+    parser.add_argument(
+        "--validation_guidance_scale",
+        type=float,
+        default=6.0,
+        help="CFG scale used for validation.",
+    )
+    parser.add_argument(
+        "--validation_cases_per_process",
+        type=int,
+        default=1,
+        help="Number of rotating validation cases generated by each process per validation round.",
+    )
+    parser.add_argument(
+        "--validation_test_case_index",
+        type=int,
+        default=0,
+        help="Fixed test-set anchor case used by nonzero validation ranks.",
+    )
+    parser.add_argument(
+        "--validation_negative_prompt",
+        type=str,
+        default="色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走",
+        help="Negative prompt used for validation.",
     )
     parser.add_argument(
         "--output_dir",
@@ -539,6 +759,15 @@ def parse_args():
         help=("Max number of checkpoints to store."),
     )
     parser.add_argument(
+        "--initial_global_step",
+        type=int,
+        default=0,
+        help=(
+            "Initial step number for LoRA-only warm starts. This restores numbering "
+            "only; optimizer and scheduler states are not restored."
+        ),
+    )
+    parser.add_argument(
         "--resume_from_checkpoint",
         type=str,
         default=None,
@@ -559,6 +788,12 @@ def parse_args():
         type=int,
         default=2000,
         help="Run validation every X steps.",
+    )
+    parser.add_argument(
+        "--ti2v_condition_probability",
+        type=float,
+        default=0.5,
+        help="Probability of keeping the first-frame condition during TI2V training.",
     )
     parser.add_argument(
         "--tracker_project_name",
@@ -777,6 +1012,16 @@ def parse_args():
 
 def main():
     args = parse_args()
+    _load_validation_cases(args)
+    _load_training_validation_cases(args)
+
+    if not 0.0 <= args.ti2v_condition_probability <= 1.0:
+        raise ValueError("--ti2v_condition_probability must be in [0, 1].")
+    if args.validation_prompts is not None:
+        if args.validation_paths is None:
+            raise ValueError("--validation_paths is required when --validation_prompts is provided.")
+        if len(args.validation_prompts) != len(args.validation_paths):
+            raise ValueError("--validation_prompts and --validation_paths must have the same length.")
 
     if args.report_to == "wandb" and args.hub_token is not None:
         raise ValueError(
@@ -950,7 +1195,7 @@ def main():
     # Lora will work with this...
     if args.use_peft_lora:
         from peft import (LoraConfig, get_peft_model_state_dict,
-                          inject_adapter_in_model)
+                          inject_adapter_in_model, set_peft_model_state_dict)
         lora_config = LoraConfig(r=args.rank, lora_alpha=args.network_alpha, target_modules=args.target_name.split(","))
         transformer3d = inject_adapter_in_model(lora_config, transformer3d)
 
@@ -978,9 +1223,33 @@ def main():
             state_dict = torch.load(args.transformer_path, map_location="cpu")
         state_dict = state_dict["state_dict"] if "state_dict" in state_dict else state_dict
 
-        m, u = transformer3d.load_state_dict(state_dict, strict=False)
-        print(f"missing keys: {len(m)}, unexpected keys: {len(u)}")
-        assert len(u) == 0
+        if args.use_peft_lora:
+            incompatible_keys = set_peft_model_state_dict(transformer3d, state_dict)
+            missing_keys = incompatible_keys.missing_keys
+            unexpected_keys = incompatible_keys.unexpected_keys
+            print(
+                "Loaded PEFT LoRA checkpoint. "
+                f"missing base-model keys: {len(missing_keys)}, "
+                f"unexpected adapter keys: {len(unexpected_keys)}"
+            )
+            if unexpected_keys:
+                raise ValueError(
+                    "The LoRA checkpoint contains keys that do not match the configured "
+                    f"adapter. First unexpected keys: {unexpected_keys[:10]}"
+                )
+        else:
+            missing_keys, unexpected_keys = transformer3d.load_state_dict(
+                state_dict, strict=False
+            )
+            print(
+                f"missing keys: {len(missing_keys)}, "
+                f"unexpected keys: {len(unexpected_keys)}"
+            )
+            if unexpected_keys:
+                raise ValueError(
+                    "The Transformer checkpoint contains unexpected keys. "
+                    f"First unexpected keys: {unexpected_keys[:10]}"
+                )
 
     if args.vae_path is not None:
         print(f"From checkpoint: {args.vae_path}")
@@ -1430,7 +1699,7 @@ def main():
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
-    global_step = 0
+    global_step = args.initial_global_step
     first_epoch = 0
 
     # Potentially load in the weights and states from a previous save
@@ -1522,7 +1791,40 @@ def main():
                 accelerator.print("accelerator.load_state() completed for zero_stage 3.")
 
     else:
-        initial_global_step = 0
+        initial_global_step = global_step
+
+    def remove_old_checkpoints(limit, reserve_for_new=1):
+        """Keep checkpoint steps as groups, including native and ComfyUI LoRA files."""
+        if limit is None:
+            return
+        if limit < 1:
+            raise ValueError("--checkpoints_total_limit must be at least 1.")
+
+        checkpoint_groups = {}
+        for name in os.listdir(args.output_dir):
+            step = None
+            if name.startswith("checkpoint-"):
+                step_token = name[len("checkpoint-"):].split("-", 1)[0].split(".", 1)[0]
+                if step_token.isdigit():
+                    step = int(step_token)
+            if step is not None:
+                checkpoint_groups.setdefault(step, []).append(name)
+
+        keep_existing = max(0, limit - reserve_for_new)
+        steps_to_remove = sorted(checkpoint_groups)[:-keep_existing] if keep_existing else sorted(checkpoint_groups)
+        for checkpoint_step in steps_to_remove:
+            names = checkpoint_groups[checkpoint_step]
+            logger.info(
+                "Removing checkpoint step %d artifacts: %s",
+                checkpoint_step,
+                ", ".join(names),
+            )
+            for name in names:
+                checkpoint_path = os.path.join(args.output_dir, name)
+                if os.path.isdir(checkpoint_path):
+                    shutil.rmtree(checkpoint_path)
+                elif os.path.isfile(checkpoint_path):
+                    os.remove(checkpoint_path)
 
     # function for saving/removing
     def save_model(ckpt_file, unwrapped_nw):
@@ -1569,6 +1871,23 @@ def main():
 
     idx_sampling = DiscreteSampling(train_sampling_steps, start_num_idx=start_num_idx, uniform_sampling=args.uniform_sampling)
 
+    # Validate the initialized/resumed LoRA before the first optimizer step.
+    if args.validation_prompts is not None:
+        log_validation(
+            vae,
+            text_encoder,
+            tokenizer,
+            transformer3d,
+            network,
+            args,
+            config,
+            accelerator,
+            weight_dtype,
+            global_step,
+        )
+        accelerator.wait_for_everyone()
+
+    rolling_loss_values = []
     for epoch in range(first_epoch, args.num_train_epochs):
         train_loss = 0.0
         batch_sampler.sampler.generator = torch.Generator().manual_seed(args.seed + epoch)
@@ -1820,10 +2139,15 @@ def main():
                 )
 
                 if args.train_mode == "ti2v":
+                    condition_probability = args.ti2v_condition_probability
                     if rng is None:
-                        t2v_in_ti2v = np.random.choice([0, 1], p = [0.50, 0.50])
+                        t2v_in_ti2v = np.random.choice(
+                            [0, 1], p=[1 - condition_probability, condition_probability]
+                        )
                     else:
-                        t2v_in_ti2v = rng.choice([0, 1], p = [0.50, 0.50])
+                        t2v_in_ti2v = rng.choice(
+                            [0, 1], p=[1 - condition_probability, condition_probability]
+                        )
 
                     mask_bs = mask.size()[0]
                     if t2v_in_ti2v:
@@ -1857,17 +2181,40 @@ def main():
                     return final_loss
                 
                 weighting = compute_loss_weighting_for_sd3(weighting_scheme=args.weighting_scheme, sigmas=sigmas)
-                loss = custom_mse_loss(noise_pred.float(), target.float(), weighting.float())
-                loss = loss.mean()
+                diffusion_loss = custom_mse_loss(
+                    noise_pred.float(), target.float(), weighting.float()
+                ).mean()
+                temporal_loss = None
+                loss = diffusion_loss
 
                 if args.motion_sub_loss and noise_pred.size()[2] > 2:
-                    gt_sub_noise = noise_pred[:, :, 1:].float() - noise_pred[:, :, :-1].float()
-                    pre_sub_noise = target[:, :, 1:].float() - target[:, :, :-1].float()
-                    sub_loss = F.mse_loss(gt_sub_noise, pre_sub_noise, reduction="mean")
-                    loss = loss * (1 - args.motion_sub_loss_ratio) + sub_loss * args.motion_sub_loss_ratio
+                    predicted_delta = (
+                        noise_pred[:, :, 1:].float() - noise_pred[:, :, :-1].float()
+                    )
+                    target_delta = (
+                        target[:, :, 1:].float() - target[:, :, :-1].float()
+                    )
+                    temporal_loss = F.mse_loss(
+                        predicted_delta, target_delta, reduction="mean"
+                    )
+                    loss = (
+                        diffusion_loss * (1 - args.motion_sub_loss_ratio)
+                        + temporal_loss * args.motion_sub_loss_ratio
+                    )
 
-                # Gather the losses across all processes for logging (if we use distributed training).
-                avg_loss = accelerator.gather(loss.repeat(args.train_batch_size)).mean()
+                # Gather losses across all processes for logging.
+                avg_loss = accelerator.gather(
+                    loss.repeat(args.train_batch_size)
+                ).mean()
+                avg_diffusion_loss = accelerator.gather(
+                    diffusion_loss.repeat(args.train_batch_size)
+                ).mean()
+                if temporal_loss is not None:
+                    avg_temporal_loss = accelerator.gather(
+                        temporal_loss.repeat(args.train_batch_size)
+                    ).mean()
+                else:
+                    avg_temporal_loss = None
                 train_loss += avg_loss.item() / args.gradient_accumulation_steps
 
                 # Backpropagate
@@ -1882,30 +2229,27 @@ def main():
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
-                accelerator.log({"train_loss": train_loss}, step=global_step)
+                rolling_loss_values.append(train_loss)
+                if len(rolling_loss_values) > 100:
+                    rolling_loss_values.pop(0)
+                log_values = {
+                    "train/loss": train_loss,
+                    "train/loss_100step_mean": sum(rolling_loss_values) / len(rolling_loss_values),
+                    "train/diffusion_loss": avg_diffusion_loss.item(),
+                    "train/learning_rate": lr_scheduler.get_last_lr()[0],
+                }
+                if avg_temporal_loss is not None:
+                    log_values["train/temporal_loss"] = avg_temporal_loss.item()
+                accelerator.log(log_values, step=global_step)
                 train_loss = 0.0
 
                 if global_step % args.checkpointing_steps == 0:
                     if args.use_deepspeed or args.use_fsdp or accelerator.is_main_process:
-                        # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
-                        if args.checkpoints_total_limit is not None:
-                            checkpoints = os.listdir(args.output_dir)
-                            checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
-                            checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
-
-                            # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
-                            if len(checkpoints) >= args.checkpoints_total_limit:
-                                num_to_remove = len(checkpoints) - args.checkpoints_total_limit + 1
-                                removing_checkpoints = checkpoints[0:num_to_remove]
-
-                                logger.info(
-                                    f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
-                                )
-                                logger.info(f"removing checkpoints: {', '.join(removing_checkpoints)}")
-
-                                for removing_checkpoint in removing_checkpoints:
-                                    removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
-                                    shutil.rmtree(removing_checkpoint)
+                        # Reserve one slot for the checkpoint about to be saved.
+                        remove_old_checkpoints(
+                            args.checkpoints_total_limit,
+                            reserve_for_new=1,
+                        )
                         gc.collect()
                         torch.cuda.empty_cache()
                         torch.cuda.ipc_collect()
@@ -1948,7 +2292,11 @@ def main():
             if global_step >= args.max_train_steps:
                 break
 
-        if args.validation_prompts is not None and epoch % args.validation_epochs == 0:
+        if (
+            args.validation_prompts is not None
+            and args.validation_epochs > 0
+            and epoch % args.validation_epochs == 0
+        ):
             log_validation(
                 vae,
                 text_encoder,
