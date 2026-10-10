@@ -126,16 +126,13 @@ def build_training_metadata() -> Path:
             errors.append(f"record {index}: {exc}")
             continue
 
-        converted_item = dict(item)
-        converted_item.update(
+        converted.append(
             {
-                "file_path": file_path,
-                "video_path": str(video_path),
+                "file_path": str(video_path),
                 "text": str(caption),
                 "type": "video",
             }
         )
-        converted.append(converted_item)
 
     if errors:
         preview = "\n".join(errors[:10])
