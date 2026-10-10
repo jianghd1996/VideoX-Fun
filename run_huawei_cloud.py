@@ -185,6 +185,26 @@ def patch_cloud_python39_compatibility() -> None:
     else:
         print("[compat] Python 3.9 datasets workaround already applied", flush=True)
 
+    # Several unrelated model modules use PEP 604 annotations (X | None).
+    # Python 3.9 evaluates those annotations eagerly and fails while importing
+    # videox_fun.models, so postpone annotation evaluation for model modules.
+    patched_annotation_files = 0
+    future_import = "from __future__ import annotations\n"
+    models_dir = REPO_DIR / "videox_fun/models"
+    for python_file in models_dir.rglob("*.py"):
+        module_source = python_file.read_text(encoding="utf-8")
+        if future_import not in module_source:
+            python_file.write_text(
+                future_import + module_source,
+                encoding="utf-8",
+            )
+            patched_annotation_files += 1
+    print(
+        f"[compat] Future annotations enabled in "
+        f"{patched_annotation_files} model files",
+        flush=True,
+    )
+
 
 def ensure_python_package(import_name: str, pip_name: str) -> None:
     if importlib.util.find_spec(import_name) is not None:
