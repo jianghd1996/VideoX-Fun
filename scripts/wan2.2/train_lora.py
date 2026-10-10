@@ -758,6 +758,11 @@ def parse_args():
         help=("Max number of checkpoints to store."),
     )
     parser.add_argument(
+        "--save_initial_checkpoint",
+        action="store_true",
+        help="Save the initialized LoRA weights before the first optimizer step.",
+    )
+    parser.add_argument(
         "--initial_global_step",
         type=int,
         default=0,
@@ -1832,6 +1837,28 @@ def main():
             save_file(unwrapped_nw, ckpt_file, metadata={"format": "pt"})
             return ckpt_file
         unwrapped_nw.save_weights(ckpt_file, weight_dtype, None)
+
+    if args.save_initial_checkpoint and global_step == 0:
+        accelerator.wait_for_everyone()
+        if accelerator.is_main_process:
+            if not args.use_peft_lora:
+                raise ValueError("--save_initial_checkpoint currently requires --use_peft_lora")
+            initial_save_path = os.path.join(args.output_dir, "checkpoint-0.safetensors")
+            initial_state_dict = get_peft_model_state_dict(
+                accelerator.unwrap_model(transformer3d)
+            )
+            save_model(initial_save_path, initial_state_dict)
+
+            initial_kohya_path = os.path.join(
+                args.output_dir,
+                "checkpoint-0-compatible_with_comfyui.safetensors",
+            )
+            initial_kohya_state_dict = convert_peft_lora_to_kohya_lora(
+                initial_state_dict
+            )
+            save_model(initial_kohya_path, initial_kohya_state_dict)
+            logger.info("Saved initial LoRA checkpoints before training.")
+        accelerator.wait_for_everyone()
 
     progress_bar = tqdm(
         range(0, args.max_train_steps),
