@@ -71,8 +71,7 @@ from videox_fun.models import (AutoencoderKLWan, AutoencoderKLWan3_8,
 from videox_fun.pipeline import (Wan2_2I2VPipeline, Wan2_2Pipeline,
                                 Wan2_2TI2VPipeline)
 from videox_fun.utils.discrete_sampler import DiscreteSampling
-from videox_fun.utils.lora_utils import (convert_peft_lora_to_kohya_lora,
-                                         create_network, merge_lora,
+from videox_fun.utils.lora_utils import (create_network, merge_lora,
                                          unmerge_lora)
 from videox_fun.utils.utils import (calculate_dimensions, get_image_latent,
                                     get_image_to_video_latent,
@@ -1277,9 +1276,6 @@ def main():
                     safetensor_save_path = os.path.join(output_dir, f"lora_diffusion_pytorch_model.safetensors")
                     if args.use_peft_lora:
                         network_state_dict = get_peft_model_state_dict(accelerator.unwrap_model(models[-1]), accelerate_state_dict)
-                        network_state_dict_kohya = convert_peft_lora_to_kohya_lora(network_state_dict)
-                        safetensor_kohya_format_save_path = os.path.join(output_dir, f"lora_diffusion_pytorch_model_compatible_with_comfyui.safetensors")
-                        save_model(safetensor_kohya_format_save_path, network_state_dict_kohya)
                     else:
                         network_state_dict = {}
                         for key in accelerate_state_dict:
@@ -1307,9 +1303,6 @@ def main():
                     safetensor_save_path = os.path.join(output_dir, f"lora_diffusion_pytorch_model.safetensors")
                     if args.use_peft_lora:
                         network_state_dict = get_peft_model_state_dict(accelerator.unwrap_model(models[-1]), accelerate_state_dict)
-                        network_state_dict_kohya = convert_peft_lora_to_kohya_lora(network_state_dict)
-                        safetensor_kohya_format_save_path = os.path.join(output_dir, f"lora_diffusion_pytorch_model_compatible_with_comfyui.safetensors")
-                        save_model(safetensor_kohya_format_save_path, network_state_dict_kohya)
                     else:
                         network_state_dict = {}
                         for key in accelerate_state_dict:
@@ -1849,14 +1842,6 @@ def main():
             )
             save_model(initial_save_path, initial_state_dict)
 
-            initial_kohya_path = os.path.join(
-                args.output_dir,
-                "checkpoint-0-compatible_with_comfyui.safetensors",
-            )
-            initial_kohya_state_dict = convert_peft_lora_to_kohya_lora(
-                initial_state_dict
-            )
-            save_model(initial_kohya_path, initial_kohya_state_dict)
             logger.info("Saved initial LoRA checkpoints before training.")
         accelerator.wait_for_everyone()
 
@@ -2283,9 +2268,6 @@ def main():
                                 network_state_dict = get_peft_model_state_dict(accelerator.unwrap_model(transformer3d))
                                 save_model(safetensor_save_path, network_state_dict)
 
-                                safetensor_kohya_format_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}-compatible_with_comfyui.safetensors")
-                                network_state_dict_kohya = convert_peft_lora_to_kohya_lora(network_state_dict)
-                                save_model(safetensor_kohya_format_save_path, network_state_dict_kohya)
                                 logger.info(f"Saved safetensor to {safetensor_save_path}")
                             else:
                                 safetensor_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}.safetensors")
@@ -2346,9 +2328,6 @@ def main():
                 network_state_dict = get_peft_model_state_dict(accelerator.unwrap_model(transformer3d))
                 save_model(safetensor_save_path, network_state_dict)
 
-                safetensor_kohya_format_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}-compatible_with_comfyui.safetensors")
-                network_state_dict_kohya = convert_peft_lora_to_kohya_lora(network_state_dict)
-                save_model(safetensor_kohya_format_save_path, network_state_dict_kohya)
                 logger.info(f"Saved safetensor to {safetensor_save_path}")
             else:
                 safetensor_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}.safetensors")
