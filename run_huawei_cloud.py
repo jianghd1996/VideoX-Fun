@@ -121,7 +121,7 @@ def build_training_metadata() -> Path:
         caption = item.get("caption", item.get("text", ""))
         try:
             video_path = resolve_video(item)
-            file_path = video_path.relative_to(DATA_ROOT.resolve()).as_posix()
+            video_path.relative_to(DATA_ROOT.resolve())
         except (FileNotFoundError, ValueError) as exc:
             errors.append(f"record {index}: {exc}")
             continue
