@@ -38,6 +38,9 @@ accelerate launch \
   --main_process_port "${MAIN_PROCESS_PORT}" \
   --gpu_ids "${GPU_IDS}" \
   --num_processes "${NUM_PROCESSES}" \
+  --num_machines 1 \
+  --machine_rank 0 \
+  --dynamo_backend no \
   --mixed_precision=bf16 \
   scripts/wan2.2/train_lora.py \
   --config_path="config/wan2.2/wan_civitai_5b.yaml" \
