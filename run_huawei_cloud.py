@@ -58,6 +58,7 @@ OUTPUT_OBS_URI = os.getenv(
 )
 
 FORCE_COPY = os.getenv("FORCE_COPY", "0").lower() in {"1", "true", "yes"}
+STRICT_DATASET = os.getenv("STRICT_DATASET", "0").lower() in {"1", "true", "yes"}
 SYNC_INTERVAL_SECONDS = max(60, int(os.getenv("SYNC_INTERVAL_SECONDS", "300")))
 
 
@@ -137,9 +138,13 @@ def build_training_metadata() -> Path:
 
     if errors:
         preview = "\n".join(errors[:10])
-        raise RuntimeError(
-            f"{len(errors)} dataset records cannot be resolved. First errors:\n{preview}"
+        message = (
+            f"{len(errors)} dataset records cannot be resolved and will be skipped. "
+            f"First errors:\n{preview}"
         )
+        if STRICT_DATASET:
+            raise RuntimeError(message)
+        print(f"[dataset] WARNING: {message}", file=sys.stderr, flush=True)
     if not converted:
         raise RuntimeError("No valid videos were found in the training metadata.")
 
@@ -147,7 +152,11 @@ def build_training_metadata() -> Path:
     with temporary.open("w", encoding="utf-8") as handle:
         json.dump(converted, handle, ensure_ascii=False, indent=2)
     os.replace(temporary, target_json)
-    print(f"[dataset] Wrote {len(converted)} samples to {target_json}", flush=True)
+    print(
+        f"[dataset] Wrote {len(converted)} valid samples to {target_json}; "
+        f"skipped {len(errors)} missing samples",
+        flush=True,
+    )
     return target_json
 
 
