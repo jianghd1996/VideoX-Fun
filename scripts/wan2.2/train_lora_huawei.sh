@@ -4,7 +4,7 @@ set -euo pipefail
 MODEL_NAME="${MODEL_NAME:-/cache/02_model/Wan2.2-TI2V-5B}"
 DATASET_NAME="${DATASET_NAME:-/cache/00_data}"
 DATASET_META_NAME="${DATASET_META_NAME:-/cache/00_data/theta30_phi5_self_render_cloud.json}"
-VALIDATION_DATA_DIR="${VALIDATION_DATA_DIR:-/cache/00_data/validation_theta30_phi5}"
+VALIDATION_DATA_DIR="${VALIDATION_DATA_DIR:-/cache/00_data_test/livephoto_test}"
 OUTPUT_DIR="${OUTPUT_DIR:-/cache/03_output/trajectory_lora_theta30_phi5}"
 
 GPU_IDS="${GPU_IDS:-0,1}"
