@@ -130,6 +130,7 @@ def build_training_metadata() -> Path:
         converted_item.update(
             {
                 "file_path": file_path,
+                "video_path": str(video_path),
                 "text": str(caption),
                 "type": "video",
             }
