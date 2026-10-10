@@ -145,6 +145,43 @@ def build_training_metadata() -> Path:
     return target_json
 
 
+def build_validation_dataset(metadata_path: Path) -> Path:
+    """Extract deterministic first-frame validation cases from training videos."""
+    import cv2
+
+    validation_dir = DATA_ROOT / "validation_theta30_phi5"
+    validation_dir.mkdir(parents=True, exist_ok=True)
+    case_count = max(1, int(os.getenv("VALIDATION_CASE_COUNT", "8")))
+
+    with metadata_path.open("r", encoding="utf-8") as handle:
+        records = json.load(handle)
+
+    prompt_map: Dict[str, str] = {}
+    for index, item in enumerate(records[:case_count]):
+        video_path = DATA_ROOT / item["file_path"]
+        image_name = f"case_{index:03d}.jpg"
+        image_path = validation_dir / image_name
+        capture = cv2.VideoCapture(str(video_path))
+        ok, frame = capture.read()
+        capture.release()
+        if not ok:
+            raise RuntimeError(f"Could not read validation frame from {video_path}")
+        if not cv2.imwrite(str(image_path), frame):
+            raise RuntimeError(f"Could not write validation image to {image_path}")
+        prompt_map[image_name] = item["text"]
+
+    prompt_json = validation_dir / "prompts.json"
+    temporary = prompt_json.with_suffix(".json.tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(prompt_map, handle, ensure_ascii=False, indent=2)
+    os.replace(temporary, prompt_json)
+    print(
+        f"[validation] Prepared {len(prompt_map)} first-frame cases in {validation_dir}",
+        flush=True,
+    )
+    return validation_dir
+
+
 def ensure_python_package(import_name: str, pip_name: str) -> None:
     if importlib.util.find_spec(import_name) is not None:
         print(f"[python] {pip_name} is already installed", flush=True)
@@ -210,6 +247,7 @@ def main() -> None:
     copy_once(MODEL_OBS_URI, MODEL_DIR)
 
     metadata_path = build_training_metadata()
+    validation_dir = build_validation_dataset(metadata_path)
     ensure_python_package("accelerate", "accelerate")
     ensure_python_package("tensorboard", "tensorboard")
 
@@ -227,6 +265,7 @@ def main() -> None:
             "MODEL_NAME": str(MODEL_DIR),
             "DATASET_NAME": str(DATA_ROOT),
             "DATASET_META_NAME": str(metadata_path),
+            "VALIDATION_DATA_DIR": str(validation_dir),
             "OUTPUT_DIR": str(OUTPUT_DIR),
             "PYTHONUNBUFFERED": "1",
         }
