@@ -7,8 +7,8 @@ DATASET_META_NAME="${DATASET_META_NAME:-/cache/training_data/theta30_phi5_self_r
 VALIDATION_DATA_DIR="${VALIDATION_DATA_DIR:-/cache/testing_data/livephoto_test}"
 OUTPUT_DIR="${OUTPUT_DIR:-/cache/output/trajectory_lora_theta30_phi5}"
 
-GPU_IDS="${GPU_IDS:-0,1}"
-NUM_PROCESSES="${NUM_PROCESSES:-2}"
+GPU_IDS="${GPU_IDS:-0,1,2,3,4,5,6,7}"
+NUM_PROCESSES="${NUM_PROCESSES:-8}"
 MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-0}"
 NUM_TRAIN_EPOCHS="${NUM_TRAIN_EPOCHS:-200}"
 DATALOADER_NUM_WORKERS="${DATALOADER_NUM_WORKERS:-8}"
@@ -59,6 +59,7 @@ accelerate launch \
   --num_train_epochs="${NUM_TRAIN_EPOCHS}" \
   --checkpointing_steps=400 \
   --checkpoints_total_limit=3 \
+  --save_initial_checkpoint \
   --learning_rate=5e-5 \
   --seed=42 \
   --output_dir="${OUTPUT_DIR}" \
