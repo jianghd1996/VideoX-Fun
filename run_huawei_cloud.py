@@ -13,13 +13,13 @@ import moxing as mox
 
 
 CACHE_ROOT = Path(os.getenv("CACHE_ROOT", "/cache"))
-DATA_ROOT = CACHE_ROOT / "00_data"
-TEST_DATA_ROOT = CACHE_ROOT / "00_data_test"
-CODE_ROOT = CACHE_ROOT / "01_code"
-MODEL_ROOT = CACHE_ROOT / "02_model"
-OUTPUT_ROOT = CACHE_ROOT / "03_output"
+DATA_ROOT = CACHE_ROOT / "training_data"
+TEST_DATA_ROOT = CACHE_ROOT / "testing_data"
+CODE_ROOT = CACHE_ROOT / "code"
+MODEL_ROOT = CACHE_ROOT / "models"
+OUTPUT_ROOT = CACHE_ROOT / "output"
 
-REPO_DIR = CODE_ROOT / "VideoX-Fun"
+REPO_DIR = CODE_ROOT / "VideoX-Fun-Single8"
 TOOLS_DIR = CODE_ROOT / "tools"
 DATASET_DIR = DATA_ROOT / "theta30_phi5_self_render"
 VALIDATION_DATA_DIR = TEST_DATA_ROOT / "livephoto_test"
@@ -33,7 +33,7 @@ OUTPUT_DIR = Path(
 
 CODE_OBS_URI = os.getenv(
     "CODE_OBS_URI",
-    "s3://bucket-si-wulan/jianghognda/01_code/VideoX-Fun",
+    "s3://bucket-si-wulan/jianghognda/01_code/VideoX-Fun-Single8/",
 )
 TOOLS_OBS_URI = os.getenv(
     "TOOLS_OBS_URI",
