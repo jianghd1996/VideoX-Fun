@@ -14,6 +14,7 @@ import moxing as mox
 
 CACHE_ROOT = Path(os.getenv("CACHE_ROOT", "/cache"))
 DATA_ROOT = CACHE_ROOT / "00_data"
+TEST_DATA_ROOT = CACHE_ROOT / "00_data_test"
 CODE_ROOT = CACHE_ROOT / "01_code"
 MODEL_ROOT = CACHE_ROOT / "02_model"
 OUTPUT_ROOT = CACHE_ROOT / "03_output"
@@ -21,6 +22,7 @@ OUTPUT_ROOT = CACHE_ROOT / "03_output"
 REPO_DIR = CODE_ROOT / "VideoX-Fun"
 TOOLS_DIR = CODE_ROOT / "tools"
 DATASET_DIR = DATA_ROOT / "theta30_phi5_self_render"
+VALIDATION_DATA_DIR = TEST_DATA_ROOT / "livephoto_test"
 MODEL_DIR = MODEL_ROOT / "Wan2.2-TI2V-5B"
 OUTPUT_DIR = Path(
     os.getenv(
@@ -40,6 +42,10 @@ TOOLS_OBS_URI = os.getenv(
 DATA_OBS_URI = os.getenv(
     "DATA_OBS_URI",
     "s3://bucket-si-wulan/jianghognda/00_data/theta30_phi5_self_render/",
+)
+TEST_DATA_OBS_URI = os.getenv(
+    "TEST_DATA_OBS_URI",
+    "s3://bucket-si-wulan/jianghognda/00_data_test/livephoto_test/",
 )
 MODEL_OBS_URI = os.getenv(
     "MODEL_OBS_URI",
@@ -145,43 +151,6 @@ def build_training_metadata() -> Path:
     return target_json
 
 
-def build_validation_dataset(metadata_path: Path) -> Path:
-    """Extract deterministic first-frame validation cases from training videos."""
-    import cv2
-
-    validation_dir = DATA_ROOT / "validation_theta30_phi5"
-    validation_dir.mkdir(parents=True, exist_ok=True)
-    case_count = max(1, int(os.getenv("VALIDATION_CASE_COUNT", "8")))
-
-    with metadata_path.open("r", encoding="utf-8") as handle:
-        records = json.load(handle)
-
-    prompt_map: Dict[str, str] = {}
-    for index, item in enumerate(records[:case_count]):
-        video_path = DATA_ROOT / item["file_path"]
-        image_name = f"case_{index:03d}.jpg"
-        image_path = validation_dir / image_name
-        capture = cv2.VideoCapture(str(video_path))
-        ok, frame = capture.read()
-        capture.release()
-        if not ok:
-            raise RuntimeError(f"Could not read validation frame from {video_path}")
-        if not cv2.imwrite(str(image_path), frame):
-            raise RuntimeError(f"Could not write validation image to {image_path}")
-        prompt_map[image_name] = item["text"]
-
-    prompt_json = validation_dir / "prompts.json"
-    temporary = prompt_json.with_suffix(".json.tmp")
-    with temporary.open("w", encoding="utf-8") as handle:
-        json.dump(prompt_map, handle, ensure_ascii=False, indent=2)
-    os.replace(temporary, prompt_json)
-    print(
-        f"[validation] Prepared {len(prompt_map)} first-frame cases in {validation_dir}",
-        flush=True,
-    )
-    return validation_dir
-
-
 def ensure_python_package(import_name: str, pip_name: str) -> None:
     if importlib.util.find_spec(import_name) is not None:
         print(f"[python] {pip_name} is already installed", flush=True)
@@ -237,17 +206,17 @@ def run_training(launcher: Path, environment: Dict[str, str]) -> None:
 
 def main() -> None:
     CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-    for directory in (DATA_ROOT, CODE_ROOT, MODEL_ROOT, OUTPUT_ROOT):
+    for directory in (DATA_ROOT, TEST_DATA_ROOT, CODE_ROOT, MODEL_ROOT, OUTPUT_ROOT):
         directory.mkdir(parents=True, exist_ok=True)
     os.chdir(CACHE_ROOT)
 
     copy_once(CODE_OBS_URI, REPO_DIR)
     copy_once(TOOLS_OBS_URI, TOOLS_DIR)
     copy_once(DATA_OBS_URI, DATASET_DIR)
+    copy_once(TEST_DATA_OBS_URI, VALIDATION_DATA_DIR)
     copy_once(MODEL_OBS_URI, MODEL_DIR)
 
     metadata_path = build_training_metadata()
-    validation_dir = build_validation_dataset(metadata_path)
     ensure_python_package("accelerate", "accelerate")
     ensure_python_package("tensorboard", "tensorboard")
 
@@ -265,7 +234,7 @@ def main() -> None:
             "MODEL_NAME": str(MODEL_DIR),
             "DATASET_NAME": str(DATA_ROOT),
             "DATASET_META_NAME": str(metadata_path),
-            "VALIDATION_DATA_DIR": str(validation_dir),
+            "VALIDATION_DATA_DIR": str(VALIDATION_DATA_DIR),
             "OUTPUT_DIR": str(OUTPUT_DIR),
             "PYTHONUNBUFFERED": "1",
         }
