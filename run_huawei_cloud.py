@@ -25,7 +25,7 @@ MODEL_DIR = MODEL_ROOT / "Wan2.2-TI2V-5B"
 OUTPUT_DIR = Path(
     os.getenv(
         "OUTPUT_DIR",
-        str(OUTPUT_ROOT / "output_dir_wan2.2_lora_theta30_phi5_self_render"),
+        str(OUTPUT_ROOT / "trajectory_lora_theta30_phi5"),
     )
 )
 
@@ -48,10 +48,11 @@ MODEL_OBS_URI = os.getenv(
 OUTPUT_OBS_URI = os.getenv(
     "OUTPUT_OBS_URI",
     "s3://bucket-si-wulan/jianghognda/03_output/"
-    "output_dir_wan2.2_lora_theta30_phi5_self_render/",
+    "trajectory_lora_theta30_phi5/",
 )
 
 FORCE_COPY = os.getenv("FORCE_COPY", "0").lower() in {"1", "true", "yes"}
+SYNC_INTERVAL_SECONDS = max(60, int(os.getenv("SYNC_INTERVAL_SECONDS", "300")))
 
 
 def copy_once(source: str, destination: Path) -> None:
@@ -140,10 +141,7 @@ def build_training_metadata() -> Path:
     with temporary.open("w", encoding="utf-8") as handle:
         json.dump(converted, handle, ensure_ascii=False, indent=2)
     os.replace(temporary, target_json)
-    print(
-        f"[dataset] Wrote {len(converted)} samples to {target_json}",
-        flush=True,
-    )
+    print(f"[dataset] Wrote {len(converted)} samples to {target_json}", flush=True)
     return target_json
 
 
@@ -152,10 +150,52 @@ def ensure_python_package(import_name: str, pip_name: str) -> None:
         print(f"[python] {pip_name} is already installed", flush=True)
         return
     print(f"[python] Installing {pip_name}", flush=True)
-    subprocess.run(
-        [sys.executable, "-m", "pip", "install", pip_name],
-        check=True,
+    subprocess.run([sys.executable, "-m", "pip", "install", pip_name], check=True)
+
+
+def sync_output(reason: str) -> None:
+    if not OUTPUT_OBS_URI or not OUTPUT_DIR.exists():
+        return
+    print(
+        f"[upload:{reason}] {OUTPUT_DIR} -> {OUTPUT_OBS_URI}",
+        flush=True,
     )
+    mox.file.copy_parallel(str(OUTPUT_DIR), OUTPUT_OBS_URI)
+    print(f"[upload:{reason}] Completed", flush=True)
+
+
+def run_training(launcher: Path, environment: Dict[str, str]) -> None:
+    """Run training and periodically upload completed outputs while it is alive."""
+    process = subprocess.Popen(
+        ["bash", str(launcher)],
+        cwd=str(REPO_DIR),
+        env=environment,
+    )
+    try:
+        while True:
+            try:
+                return_code = process.wait(timeout=SYNC_INTERVAL_SECONDS)
+                break
+            except subprocess.TimeoutExpired:
+                try:
+                    sync_output("periodic")
+                except BaseException as upload_error:
+                    # A transient OBS failure must not kill an otherwise healthy training job.
+                    print(
+                        f"[upload:periodic] Failed; will retry: {upload_error}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+    except BaseException:
+        process.terminate()
+        try:
+            process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            process.kill()
+        raise
+
+    if return_code != 0:
+        raise subprocess.CalledProcessError(return_code, process.args)
 
 
 def main() -> None:
@@ -180,6 +220,7 @@ def main() -> None:
             "Upload the latest repository code to CODE_OBS_URI first."
         )
 
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     environment = os.environ.copy()
     environment.update(
         {
@@ -193,32 +234,21 @@ def main() -> None:
 
     training_error = None
     try:
-        subprocess.run(
-            ["bash", str(launcher)],
-            cwd=str(REPO_DIR),
-            env=environment,
-            check=True,
-        )
+        run_training(launcher, environment)
     except BaseException as exc:
         training_error = exc
         raise
     finally:
-        if OUTPUT_OBS_URI and OUTPUT_DIR.exists():
+        try:
+            sync_output("final")
+        except BaseException as upload_error:
+            if training_error is None:
+                raise
             print(
-                f"[upload] {OUTPUT_DIR} -> {OUTPUT_OBS_URI}",
+                f"[upload:final] Failed after training error: {upload_error}",
+                file=sys.stderr,
                 flush=True,
             )
-            try:
-                mox.file.copy_parallel(str(OUTPUT_DIR), OUTPUT_OBS_URI)
-                print("[upload] Output upload completed", flush=True)
-            except BaseException as upload_error:
-                if training_error is None:
-                    raise
-                print(
-                    f"[upload] Output upload failed after training error: {upload_error}",
-                    file=sys.stderr,
-                    flush=True,
-                )
 
 
 if __name__ == "__main__":
