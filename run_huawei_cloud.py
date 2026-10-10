@@ -1,0 +1,272 @@
+#!/usr/bin/env python3
+"""Huawei Cloud/ModelArts bootstrap for VideoX-Fun trajectory LoRA training."""
+
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+from typing import Any, Dict, List
+
+import moxing as mox
+
+
+CACHE_ROOT = Path(os.getenv("CACHE_ROOT", "/cache"))
+DATA_ROOT = CACHE_ROOT / "training_data"
+TEST_DATA_ROOT = CACHE_ROOT / "testing_data"
+CODE_ROOT = CACHE_ROOT / "code"
+MODEL_ROOT = CACHE_ROOT / "models"
+OUTPUT_ROOT = CACHE_ROOT / "output"
+
+REPO_DIR = CODE_ROOT / "VideoX-Fun-Single8"
+TOOLS_DIR = CODE_ROOT / "tools"
+DATASET_DIR = DATA_ROOT / "theta30_phi5_self_render"
+VALIDATION_DATA_DIR = TEST_DATA_ROOT / "livephoto_test"
+MODEL_DIR = MODEL_ROOT / "Wan2.2-TI2V-5B"
+OUTPUT_DIR = Path(
+    os.getenv(
+        "OUTPUT_DIR",
+        str(OUTPUT_ROOT / "trajectory_lora_theta30_phi5"),
+    )
+)
+
+CODE_OBS_URI = os.getenv(
+    "CODE_OBS_URI",
+    "s3://bucket-si-wulan/jianghognda/01_code/VideoX-Fun-Single8/",
+)
+TOOLS_OBS_URI = os.getenv(
+    "TOOLS_OBS_URI",
+    "s3://bucket-si-wulan/jianghognda/01_code/tools",
+)
+DATA_OBS_URI = os.getenv(
+    "DATA_OBS_URI",
+    "s3://bucket-si-wulan/jianghognda/00_data/theta30_phi5_self_render/",
+)
+TEST_DATA_OBS_URI = os.getenv(
+    "TEST_DATA_OBS_URI",
+    "s3://bucket-si-wulan/jianghognda/00_data_test/livephoto_test/",
+)
+MODEL_OBS_URI = os.getenv(
+    "MODEL_OBS_URI",
+    "s3://bucket-si-wulan/jianghognda/02_models/Wan2.2-TI2V-5B/",
+)
+OUTPUT_OBS_URI = os.getenv(
+    "OUTPUT_OBS_URI",
+    "s3://bucket-si-wulan/jianghognda/03_output/"
+    "trajectory_lora_theta30_phi5/",
+)
+
+FORCE_COPY = os.getenv("FORCE_COPY", "0").lower() in {"1", "true", "yes"}
+STRICT_DATASET = os.getenv("STRICT_DATASET", "0").lower() in {"1", "true", "yes"}
+SYNC_INTERVAL_SECONDS = max(60, int(os.getenv("SYNC_INTERVAL_SECONDS", "300")))
+
+
+def copy_once(source: str, destination: Path) -> None:
+    """Copy an OBS directory once and mark only completed copies."""
+    destination.mkdir(parents=True, exist_ok=True)
+    marker = destination / ".mox_copy_complete"
+
+    if marker.exists() and not FORCE_COPY:
+        print(f"[cache] Skip existing completed copy: {destination}", flush=True)
+        return
+
+    print(f"[copy] {source} -> {destination}", flush=True)
+    mox.file.copy_parallel(source, str(destination))
+    marker.write_text(source + "\n", encoding="utf-8")
+    print(f"[copy] Completed: {destination}", flush=True)
+
+
+def resolve_video(item: Dict[str, Any]) -> Path:
+    relative_path = str(item.get("relative_path") or "").strip()
+    video_name = str(item.get("video_name") or "").strip()
+
+    candidates: List[Path] = []
+    if relative_path:
+        clean_relative = relative_path.lstrip("/")
+        candidates.append(DATA_ROOT / clean_relative)
+        candidates.append(DATASET_DIR / clean_relative)
+    if video_name:
+        candidates.append(DATASET_DIR / video_name)
+    if item.get("video_path"):
+        candidates.append(DATASET_DIR / Path(str(item["video_path"])).name)
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+
+    shown = ", ".join(str(path) for path in candidates) or "<no usable path>"
+    raise FileNotFoundError(f"Cannot find video. Tried: {shown}")
+
+
+def build_training_metadata() -> Path:
+    """Convert video_path/caption records to VideoX-Fun file_path/text records."""
+    source_json = DATASET_DIR / "theta30_phi5_self_render.json"
+    target_json = DATA_ROOT / "theta30_phi5_self_render_cloud.json"
+
+    if not source_json.is_file():
+        raise FileNotFoundError(f"Dataset metadata does not exist: {source_json}")
+
+    with source_json.open("r", encoding="utf-8") as handle:
+        records = json.load(handle)
+    if not isinstance(records, list):
+        raise TypeError(f"Expected a JSON list in {source_json}, got {type(records).__name__}")
+
+    converted: List[Dict[str, Any]] = []
+    errors: List[str] = []
+    for index, item in enumerate(records):
+        if not isinstance(item, dict):
+            errors.append(f"record {index}: expected object")
+            continue
+        caption = item.get("caption", item.get("text", ""))
+        try:
+            video_path = resolve_video(item)
+            file_path = video_path.relative_to(DATA_ROOT.resolve()).as_posix()
+        except (FileNotFoundError, ValueError) as exc:
+            errors.append(f"record {index}: {exc}")
+            continue
+
+        converted_item = dict(item)
+        converted_item.update(
+            {
+                "file_path": file_path,
+                "text": str(caption),
+                "type": "video",
+            }
+        )
+        converted.append(converted_item)
+
+    if errors:
+        preview = "\n".join(errors[:10])
+        message = (
+            f"{len(errors)} dataset records cannot be resolved and will be skipped. "
+            f"First errors:\n{preview}"
+        )
+        if STRICT_DATASET:
+            raise RuntimeError(message)
+        print(f"[dataset] WARNING: {message}", file=sys.stderr, flush=True)
+    if not converted:
+        raise RuntimeError("No valid videos were found in the training metadata.")
+
+    temporary = target_json.with_suffix(".json.tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(converted, handle, ensure_ascii=False, indent=2)
+    os.replace(temporary, target_json)
+    print(
+        f"[dataset] Wrote {len(converted)} valid samples to {target_json}; "
+        f"skipped {len(errors)} missing samples",
+        flush=True,
+    )
+    return target_json
+
+
+def ensure_python_package(import_name: str, pip_name: str) -> None:
+    if importlib.util.find_spec(import_name) is not None:
+        print(f"[python] {pip_name} is already installed", flush=True)
+        return
+    print(f"[python] Installing {pip_name}", flush=True)
+    subprocess.run([sys.executable, "-m", "pip", "install", pip_name], check=True)
+
+
+def sync_output(reason: str) -> None:
+    if not OUTPUT_OBS_URI or not OUTPUT_DIR.exists():
+        return
+    print(
+        f"[upload:{reason}] {OUTPUT_DIR} -> {OUTPUT_OBS_URI}",
+        flush=True,
+    )
+    mox.file.copy_parallel(str(OUTPUT_DIR), OUTPUT_OBS_URI)
+    print(f"[upload:{reason}] Completed", flush=True)
+
+
+def run_training(launcher: Path, environment: Dict[str, str]) -> None:
+    """Run training and periodically upload completed outputs while it is alive."""
+    process = subprocess.Popen(
+        ["bash", str(launcher)],
+        cwd=str(REPO_DIR),
+        env=environment,
+    )
+    try:
+        while True:
+            try:
+                return_code = process.wait(timeout=SYNC_INTERVAL_SECONDS)
+                break
+            except subprocess.TimeoutExpired:
+                try:
+                    sync_output("periodic")
+                except BaseException as upload_error:
+                    # A transient OBS failure must not kill an otherwise healthy training job.
+                    print(
+                        f"[upload:periodic] Failed; will retry: {upload_error}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+    except BaseException:
+        process.terminate()
+        try:
+            process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            process.kill()
+        raise
+
+    if return_code != 0:
+        raise subprocess.CalledProcessError(return_code, process.args)
+
+
+def main() -> None:
+    CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+    for directory in (DATA_ROOT, TEST_DATA_ROOT, CODE_ROOT, MODEL_ROOT, OUTPUT_ROOT):
+        directory.mkdir(parents=True, exist_ok=True)
+    os.chdir(CACHE_ROOT)
+
+    copy_once(CODE_OBS_URI, REPO_DIR)
+    copy_once(TOOLS_OBS_URI, TOOLS_DIR)
+    copy_once(DATA_OBS_URI, DATASET_DIR)
+    copy_once(TEST_DATA_OBS_URI, VALIDATION_DATA_DIR)
+    copy_once(MODEL_OBS_URI, MODEL_DIR)
+
+    metadata_path = build_training_metadata()
+    ensure_python_package("accelerate", "accelerate")
+    ensure_python_package("tensorboard", "tensorboard")
+
+    launcher = REPO_DIR / "scripts/wan2.2/train_lora_huawei.sh"
+    if not launcher.is_file():
+        raise FileNotFoundError(
+            f"Cloud launcher is missing: {launcher}. "
+            "Upload the latest repository code to CODE_OBS_URI first."
+        )
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "MODEL_NAME": str(MODEL_DIR),
+            "DATASET_NAME": str(DATA_ROOT),
+            "DATASET_META_NAME": str(metadata_path),
+            "VALIDATION_DATA_DIR": str(VALIDATION_DATA_DIR),
+            "OUTPUT_DIR": str(OUTPUT_DIR),
+            "PYTHONUNBUFFERED": "1",
+        }
+    )
+
+    training_error = None
+    try:
+        run_training(launcher, environment)
+    except BaseException as exc:
+        training_error = exc
+        raise
+    finally:
+        try:
+            sync_output("final")
+        except BaseException as upload_error:
+            if training_error is None:
+                raise
+            print(
+                f"[upload:final] Failed after training error: {upload_error}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+
+if __name__ == "__main__":
+    main()

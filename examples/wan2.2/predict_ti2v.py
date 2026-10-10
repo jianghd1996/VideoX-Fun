@@ -1,5 +1,7 @@
+import json
 import os
 import sys
+from datetime import datetime
 
 import numpy as np
 import torch
@@ -45,7 +47,7 @@ from videox_fun.utils.utils import (filter_kwargs, get_image_to_video_latent,
 # 
 # sequential_cpu_offload means that each layer of the model will be moved to the CPU after use, 
 # resulting in slower speeds but saving a large amount of GPU memory.
-GPU_memory_mode     = "sequential_cpu_offload"
+GPU_memory_mode     = "model_full_load"
 # Multi GPUs config
 # Please ensure that the product of ulysses_degree and ring_degree equals the number of GPUs used. 
 # For example, if you are using 8 GPUs, you can set ulysses_degree = 2 and ring_degree = 4.
@@ -60,7 +62,7 @@ fsdp_text_encoder   = True
 compile_dit         = False
 
 # TeaCache config
-enable_teacache     = True
+enable_teacache     = False
 # Recommended to be set between 0.05 and 0.30. A larger threshold can cache more steps, speeding up the inference process, 
 # but it may cause slight differences between the generated content and the original content.
 # # --------------------------------------------------------------------------------------------------- #
@@ -86,7 +88,7 @@ riflex_k            = 6
 # Config and model path
 config_path         = "config/wan2.2/wan_civitai_5b.yaml"
 # model path
-model_name          = "models/Diffusion_Transformer/Wan2.2-TI2V-5B"
+model_name          = "/mnt/DataPart/jianghongda/VideoX-Fun/models/Diffusion_Transformer/Wan2.2-TI2V-5B"
 
 # Choose the sampler in "Flow", "Flow_Unipc", "Flow_DPM++"
 sampler_name        = "Flow_Unipc"
@@ -103,30 +105,32 @@ vae_path                = None
 # Load lora model if need
 # The lora_path is used for low noise model, the lora_high_path is used for high noise model.
 # Since Wan2.2-5b consists of only one model, only lora_path is used.
-lora_path               = None
+lora_path               = "/mnt/DataPart/jianghongda/VideoX-Fun-dev/VideoX-Fun-Single8/output_dir_wan2.2_lora_8_trajectory/checkpoint-1600.safetensors"
 lora_high_path          = None
 
-# Other params
-sample_size         = [704, 1280]
+# Batch test configuration
+test_data_dir       = "/mnt/DataPart/jianghongda/VideoX-Fun-dev/test_data/livephoto_test"
+prompt_json_path    = None  # Auto-detect the unique JSON file in test_data_dir.
+target_short_edge   = 704
+align_to             = 32
 video_length        = 121
 fps                 = 24
 
-# Use torch.float16 if GPU does not support torch.bfloat16
-# ome graphics cards, such as v100, 2080ti, do not support torch.bfloat16
-weight_dtype            = torch.bfloat16
-# If you want to generate from text, please set the validation_image_start = None and validation_image_end = None
-validation_image_start  = "asset/1.png"
-
-# prompts
-prompt              = "一只棕色的狗摇着头，坐在舒适房间里的浅色沙发上。在狗的后面，架子上有一幅镶框的画，周围是粉红色的花朵。房间里柔和温暖的灯光营造出舒适的氛围。"
+# Use torch.float16 if GPU does not support torch.bfloat16.
+weight_dtype        = torch.bfloat16
 negative_prompt     = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
 guidance_scale      = 6.0
-seed                = 43
-num_inference_steps = 50
-# The lora_weight is used for low noise model, the lora_high_weight is used for high noise model.
-lora_weight         = 0.55
-lora_high_weight    = 0.55
-save_path           = "samples/wan-videos-t2v"
+seed                = 42
+num_inference_steps = 8
+# PEFT LoRA checkpoints are evaluated at their trained strength.
+lora_weight         = 1.0
+lora_high_weight    = 1.0
+checkpoint_name     = os.path.splitext(os.path.basename(lora_path))[0] if lora_path else "base"
+save_path           = os.path.join(
+    "samples",
+    "trajectory_lora_test",
+    f"{checkpoint_name}-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+)
 
 device = set_multi_gpus_devices(ulysses_degree, ring_degree)
 config = OmegaConf.load(config_path)
@@ -299,69 +303,149 @@ if cfg_skip_ratio is not None:
     if transformer_2 is not None:
         pipeline.transformer_2.share_cfg_skip(transformer=pipeline.transformer)
 
-generator = torch.Generator(device=device).manual_seed(seed)
-
 if lora_path is not None:
-    pipeline = merge_lora(pipeline, lora_path, lora_weight, device=device, dtype=weight_dtype)
+    pipeline = merge_lora(
+        pipeline, lora_path, lora_weight, device=device, dtype=weight_dtype
+    )
     if transformer_2 is not None:
-        pipeline = merge_lora(pipeline, lora_high_path, lora_high_weight, device=device, dtype=weight_dtype, sub_transformer_name="transformer_2")
+        pipeline = merge_lora(
+            pipeline,
+            lora_high_path,
+            lora_high_weight,
+            device=device,
+            dtype=weight_dtype,
+            sub_transformer_name="transformer_2",
+        )
+
+if prompt_json_path is None:
+    prompt_json_candidates = sorted(
+        os.path.join(test_data_dir, name)
+        for name in os.listdir(test_data_dir)
+        if name.lower().endswith(".json")
+    )
+    if len(prompt_json_candidates) != 1:
+        raise ValueError(
+            "test_data_dir must contain exactly one JSON file when "
+            f"prompt_json_path is None. Found: {prompt_json_candidates}"
+        )
+    prompt_json_path = prompt_json_candidates[0]
+elif not os.path.isabs(prompt_json_path):
+    prompt_json_path = os.path.join(test_data_dir, prompt_json_path)
+
+with open(prompt_json_path, "r", encoding="utf-8") as f:
+    prompt_map = json.load(f)
+if not isinstance(prompt_map, dict) or not prompt_map:
+    raise ValueError(
+        f"Prompt JSON must be a non-empty image-filename-to-prompt object: {prompt_json_path}"
+    )
+
+os.makedirs(save_path, exist_ok=True)
+video_length = (
+    int(
+        (video_length - 1)
+        // vae.config.temporal_compression_ratio
+        * vae.config.temporal_compression_ratio
+    )
+    + 1
+    if video_length != 1
+    else 1
+)
+latent_frames = (video_length - 1) // vae.config.temporal_compression_ratio + 1
+
+if enable_riflex:
+    pipeline.transformer.enable_riflex(k=riflex_k, L_test=latent_frames)
+    if transformer_2 is not None:
+        pipeline.transformer_2.enable_riflex(k=riflex_k, L_test=latent_frames)
+
+run_config = {
+    "model_name": model_name,
+    "lora_path": lora_path,
+    "lora_weight": lora_weight,
+    "test_data_dir": test_data_dir,
+    "prompt_json_path": prompt_json_path,
+    "video_length": video_length,
+    "target_short_edge": target_short_edge,
+    "align_to": align_to,
+    "guidance_scale": guidance_scale,
+    "num_inference_steps": num_inference_steps,
+    "sampler_name": sampler_name,
+    "shift": shift,
+    "seed": seed,
+    "gpu_memory_mode": GPU_memory_mode,
+}
+with open(os.path.join(save_path, "run_config.json"), "w", encoding="utf-8") as f:
+    json.dump(run_config, f, ensure_ascii=False, indent=2)
 
 with torch.no_grad():
-    video_length = int((video_length - 1) // vae.config.temporal_compression_ratio * vae.config.temporal_compression_ratio) + 1 if video_length != 1 else 1
-    latent_frames = (video_length - 1) // vae.config.temporal_compression_ratio + 1
+    for case_index, (image_name, prompt) in enumerate(prompt_map.items()):
+        image_path = os.path.join(test_data_dir, image_name)
+        if not os.path.isfile(image_path):
+            print(f"Skip missing image: {image_path}")
+            continue
 
-    if enable_riflex:
-        pipeline.transformer.enable_riflex(k = riflex_k, L_test = latent_frames)
-        if transformer_2 is not None:
-            pipeline.transformer_2.enable_riflex(k = riflex_k, L_test = latent_frames)
+        with Image.open(image_path) as image:
+            source_width, source_height = image.size
+        if source_height >= source_width:
+            scale = target_short_edge / source_width
+            new_width = target_short_edge
+            new_height = int(round(source_height * scale))
+        else:
+            scale = target_short_edge / source_height
+            new_height = target_short_edge
+            new_width = int(round(source_width * scale))
 
-    if validation_image_start is not None:
-        input_video, input_video_mask, clip_image = get_image_to_video_latent(validation_image_start, None, video_length=video_length, sample_size=sample_size)
-    else:
-        input_video, input_video_mask, clip_image = None, None, None
+        # Wan VAE/DiT spatial dimensions are kept on a 32-pixel grid.
+        height = max(align_to, int(round(new_height / align_to) * align_to))
+        width = max(align_to, int(round(new_width / align_to) * align_to))
+        # get_image_to_video_latent expects [height, width].
+        sample_size = [height, width]
+        case_seed = seed + case_index
+        generator = torch.Generator(device=device).manual_seed(case_seed)
 
-    sample = pipeline(
-        prompt, 
-        num_frames = video_length,
-        negative_prompt = negative_prompt,
-        height      = sample_size[0],
-        width       = sample_size[1],
-        generator   = generator,
-        guidance_scale = guidance_scale,
-        num_inference_steps = num_inference_steps,
-        boundary = boundary,
+        print(
+            f"[{case_index + 1}/{len(prompt_map)}] {image_name}: "
+            f"{width}x{height}, seed={case_seed}"
+        )
+        input_video, input_video_mask, _ = get_image_to_video_latent(
+            image_path,
+            None,
+            video_length=video_length,
+            sample_size=sample_size,
+        )
+        sample = pipeline(
+            prompt,
+            num_frames=video_length,
+            negative_prompt=negative_prompt,
+            height=height,
+            width=width,
+            generator=generator,
+            guidance_scale=guidance_scale,
+            num_inference_steps=num_inference_steps,
+            boundary=boundary,
+            video=input_video,
+            mask_video=input_video_mask,
+            shift=shift,
+        ).videos
 
-        video      = input_video,
-        mask_video   = input_video_mask,
-        shift = shift,
-    ).videos
+        case_name = os.path.splitext(os.path.basename(image_name))[0]
+        output_path = os.path.join(save_path, f"{case_name}.mp4")
+        save_videos_grid(sample, output_path, fps=fps)
+        print(f"Saved: {output_path}")
+        del sample
+        torch.cuda.empty_cache()
 
 if lora_path is not None:
-    pipeline = unmerge_lora(pipeline, lora_path, lora_weight, device=device, dtype=weight_dtype)
+    pipeline = unmerge_lora(
+        pipeline, lora_path, lora_weight, device=device, dtype=weight_dtype
+    )
     if transformer_2 is not None:
-        pipeline = unmerge_lora(pipeline, lora_high_path, lora_high_weight, device=device, dtype=weight_dtype, sub_transformer_name="transformer_2")
+        pipeline = unmerge_lora(
+            pipeline,
+            lora_high_path,
+            lora_high_weight,
+            device=device,
+            dtype=weight_dtype,
+            sub_transformer_name="transformer_2",
+        )
 
-def save_results():
-    if not os.path.exists(save_path):
-        os.makedirs(save_path, exist_ok=True)
-
-    index = len([path for path in os.listdir(save_path)]) + 1
-    prefix = str(index).zfill(8)
-    if video_length == 1:
-        video_path = os.path.join(save_path, prefix + ".png")
-
-        image = sample[0, :, 0]
-        image = image.transpose(0, 1).transpose(1, 2)
-        image = (image * 255).numpy().astype(np.uint8)
-        image = Image.fromarray(image)
-        image.save(video_path)
-    else:
-        video_path = os.path.join(save_path, prefix + ".mp4")
-        save_videos_grid(sample, video_path, fps=fps)
-
-if ulysses_degree * ring_degree > 1:
-    import torch.distributed as dist
-    if dist.get_rank() == 0:
-        save_results()
-else:
-    save_results()
+print(f"All results saved to: {save_path}")
