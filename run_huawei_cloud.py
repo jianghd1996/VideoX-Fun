@@ -204,6 +204,30 @@ def patch_cloud_python39_compatibility() -> None:
     )
 
 
+def remove_broken_optional_datasets() -> None:
+    """Disable a broken optional HF datasets install that Accelerate auto-imports."""
+    if importlib.util.find_spec("datasets") is None:
+        print("[python] Optional datasets package is not installed", flush=True)
+        return
+    try:
+        __import__("datasets")
+        print("[python] Optional datasets package imports successfully", flush=True)
+    except BaseException as error:
+        print(
+            f"[python] Broken optional datasets package detected: {error}",
+            file=sys.stderr,
+            flush=True,
+        )
+        print(
+            "[python] Uninstalling datasets; VideoX-Fun uses its own PyTorch dataset",
+            flush=True,
+        )
+        subprocess.run(
+            [sys.executable, "-m", "pip", "uninstall", "-y", "datasets"],
+            check=True,
+        )
+
+
 def ensure_python_package(import_name: str, pip_name: str) -> None:
     if importlib.util.find_spec(import_name) is not None:
         print(f"[python] {pip_name} is already installed", flush=True)
@@ -271,6 +295,7 @@ def main() -> None:
 
     metadata_path = build_training_metadata()
     patch_cloud_python39_compatibility()
+    remove_broken_optional_datasets()
     ensure_python_package("accelerate", "accelerate")
     ensure_python_package("tensorboard", "tensorboard")
 
