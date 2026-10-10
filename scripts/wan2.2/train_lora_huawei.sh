@@ -4,6 +4,7 @@ set -euo pipefail
 MODEL_NAME="${MODEL_NAME:-/cache/02_model/Wan2.2-TI2V-5B}"
 DATASET_NAME="${DATASET_NAME:-/cache/00_data}"
 DATASET_META_NAME="${DATASET_META_NAME:-/cache/00_data/theta30_phi5_self_render_cloud.json}"
+VALIDATION_DATA_DIR="${VALIDATION_DATA_DIR:-/cache/00_data/validation_theta30_phi5}"
 OUTPUT_DIR="${OUTPUT_DIR:-/cache/03_output/trajectory_lora_theta30_phi5}"
 
 GPU_IDS="${GPU_IDS:-0,1}"
@@ -27,6 +28,7 @@ export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 echo "Model:       ${MODEL_NAME}"
 echo "Dataset:     ${DATASET_NAME}"
 echo "Metadata:    ${DATASET_META_NAME}"
+echo "Validation:  ${VALIDATION_DATA_DIR}"
 echo "Output:      ${OUTPUT_DIR}"
 echo "GPU IDs:     ${GPU_IDS}"
 echo "Processes:   ${NUM_PROCESSES}"
@@ -36,7 +38,7 @@ accelerate launch \
   --main_process_port "${MAIN_PROCESS_PORT}" \
   --gpu_ids "${GPU_IDS}" \
   --num_processes "${NUM_PROCESSES}" \
-  --mixed_precision="bf16" \
+  --mixed_precision=bf16 \
   scripts/wan2.2/train_lora.py \
   --config_path="config/wan2.2/wan_civitai_5b.yaml" \
   --pretrained_model_name_or_path="${MODEL_NAME}" \
@@ -57,10 +59,11 @@ accelerate launch \
   --learning_rate=5e-5 \
   --seed=42 \
   --output_dir="${OUTPUT_DIR}" \
+  --report_to=tensorboard \
   --logging_dir="${OUTPUT_DIR}/tensorboard" \
-  --report_to="tensorboard" \
+  --tracker_project_name="wan2.2-trajectory-lora-cloud" \
   --gradient_checkpointing \
-  --mixed_precision="bf16" \
+  --mixed_precision=bf16 \
   --adam_weight_decay=3e-2 \
   --adam_epsilon=1e-10 \
   --vae_mini_batch=1 \
@@ -69,18 +72,19 @@ accelerate launch \
   --training_with_video_token_length \
   --enable_bucket \
   --uniform_sampling \
-  --boundary_type="full" \
+  --boundary_type=full \
   --rank=64 \
   --network_alpha=32 \
   --target_name="q,k,v,ffn.0,ffn.2" \
   --use_peft_lora \
-  --train_mode="ti2v" \
-  --trainable_modules="." \
-  --random_ratio_crop \
-  --random_frame_crop \
-  --random_hw_adapt \
-  --keep_all_node_same_token_length \
-  --use_dynamic_cfg \
-  --cfg_skip_ratio=0.1 \
-  --ti2v_condition_dropout_ratio=0.05 \
+  --train_mode=ti2v \
+  --ti2v_condition_probability=0.95 \
+  --validation_data_dir="${VALIDATION_DATA_DIR}" \
+  --validation_steps=200 \
+  --validation_epochs=0 \
+  --validation_cases_per_process=1 \
+  --validation_test_case_index=0 \
+  --validation_sample_size=720 \
+  --validation_num_inference_steps=8 \
+  --validation_guidance_scale=6.0 \
   "${EXTRA_ARGS[@]}"
