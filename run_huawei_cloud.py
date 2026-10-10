@@ -160,6 +160,32 @@ def build_training_metadata() -> Path:
     return target_json
 
 
+def patch_cloud_python39_compatibility() -> None:
+    """Remove an unused datasets import that breaks with some cloud Python 3.9 images."""
+    train_script = REPO_DIR / "scripts/wan2.2/train_lora.py"
+    if not train_script.is_file():
+        raise FileNotFoundError(f"Training script does not exist: {train_script}")
+
+    source = train_script.read_text(encoding="utf-8")
+    patched = source.replace("\nimport datasets\n", "\n")
+    patched = patched.replace(
+        "        datasets.utils.logging.set_verbosity_warning()\n",
+        "",
+    )
+    patched = patched.replace(
+        "        datasets.utils.logging.set_verbosity_error()\n",
+        "",
+    )
+    if patched != source:
+        train_script.write_text(patched, encoding="utf-8")
+        print(
+            f"[compat] Removed unused Hugging Face datasets import from {train_script}",
+            flush=True,
+        )
+    else:
+        print("[compat] Python 3.9 datasets workaround already applied", flush=True)
+
+
 def ensure_python_package(import_name: str, pip_name: str) -> None:
     if importlib.util.find_spec(import_name) is not None:
         print(f"[python] {pip_name} is already installed", flush=True)
@@ -226,6 +252,7 @@ def main() -> None:
     copy_once(MODEL_OBS_URI, MODEL_DIR)
 
     metadata_path = build_training_metadata()
+    patch_cloud_python39_compatibility()
     ensure_python_package("accelerate", "accelerate")
     ensure_python_package("tensorboard", "tensorboard")
 
