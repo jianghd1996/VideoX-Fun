@@ -211,7 +211,10 @@ def infer_frame_indices(
     frame_indices: Optional[Sequence[int]],
 ) -> np.ndarray:
     if frame_indices is not None:
-        indices = np.asarray(frame_indices, dtype=np.int64)
+        if isinstance(frame_indices, (str, Path)):
+            indices = np.loadtxt(frame_indices, dtype=np.int64, ndmin=1)
+        else:
+            indices = np.asarray(frame_indices, dtype=np.int64)
         if indices.shape != (camera_count,):
             raise ValueError(
                 f"Expected {camera_count} frame indices, got shape {indices.shape}."
@@ -567,7 +570,7 @@ def main() -> None:
     parser.add_argument("--input", type=Path, required=True, help="Input .npy shaped (N,3,4).")
     parser.add_argument("--output", type=Path, required=True, help="Output corrected .npy.")
     parser.add_argument("--convention", choices=["w2c", "c2w"], default="w2c")
-    parser.add_argument("--frame-indices", help="Comma list or text file of source frame indices.")
+    parser.add_argument("--frame-indices", help="Comma list or text file of source frame indices. REQUIRED for angle-aware sampling.")
     parser.add_argument("--start", type=float, default=0.0)
     parser.add_argument("--elevation", type=float, default=0.0)
     parser.add_argument("--theta", type=float, default=30.0)
