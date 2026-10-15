@@ -180,17 +180,27 @@ def blend_rotations(
     estimated: np.ndarray,
     prior: np.ndarray,
     strength: float,
+    max_change_degrees: Optional[float] = None,
 ) -> np.ndarray:
     if strength <= 0.0:
         return estimated.copy()
-    if strength >= 1.0:
-        return prior.copy()
 
     blended = []
+    max_change_radians = (
+        None if max_change_degrees is None else np.deg2rad(max_change_degrees)
+    )
     for estimated_rotation, prior_rotation in zip(estimated, prior):
         relative = estimated_rotation.T @ prior_rotation
         rotation_vector, _ = cv2.Rodrigues(relative)
-        incremental, _ = cv2.Rodrigues(rotation_vector * strength)
+        step = rotation_vector * strength
+        step_angle = float(np.linalg.norm(step))
+        if (
+            max_change_radians is not None
+            and step_angle > max_change_radians
+            and step_angle > 1e-12
+        ):
+            step *= max_change_radians / step_angle
+        incremental, _ = cv2.Rodrigues(step)
         blended.append(project_to_rotation(estimated_rotation @ incremental))
     return np.stack(blended)
 
@@ -378,6 +388,145 @@ def refine_figure8_extrinsics(
         ),
     }
     return (corrected, report) if return_report else corrected
+
+
+def camera_change_metrics(
+    original_centers: np.ndarray,
+    original_rotations: np.ndarray,
+    corrected_centers: np.ndarray,
+    corrected_rotations: np.ndarray,
+) -> Dict[str, float]:
+    position_changes = np.linalg.norm(corrected_centers - original_centers, axis=1)
+    rotation_changes = []
+    for original, corrected in zip(original_rotations, corrected_rotations):
+        relative = original.T @ corrected
+        cosine = np.clip((np.trace(relative) - 1.0) / 2.0, -1.0, 1.0)
+        rotation_changes.append(np.rad2deg(np.arccos(cosine)))
+    return {
+        "mean_position_change": float(np.mean(position_changes)),
+        "max_position_change": float(np.max(position_changes)),
+        "mean_rotation_change_degrees": float(np.mean(rotation_changes)),
+        "max_rotation_change_degrees": float(np.max(rotation_changes)),
+    }
+
+
+def visualize_extrinsics_comparison(
+    original_extrinsics: np.ndarray,
+    corrected_extrinsics: np.ndarray,
+    output_path: Path,
+    *,
+    convention: str = "w2c",
+    points: Optional[np.ndarray] = None,
+    forward_axis: str = "z",
+    max_points: int = 20000,
+) -> None:
+    """Save before/after/overlay camera-center and orientation visualization."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    original_rotations, original_centers = extrinsics_to_c2w(
+        original_extrinsics, convention
+    )
+    corrected_rotations, corrected_centers = extrinsics_to_c2w(
+        corrected_extrinsics, convention
+    )
+    axis_index = {"x": 0, "y": 1, "z": 2, "-x": 0, "-y": 1, "-z": 2}[forward_axis]
+    axis_sign = -1.0 if forward_axis.startswith("-") else 1.0
+    original_forward = axis_sign * original_rotations[:, :, axis_index]
+    corrected_forward = axis_sign * corrected_rotations[:, :, axis_index]
+
+    all_centers = np.concatenate([original_centers, corrected_centers], axis=0)
+    extent = max(float(np.ptp(all_centers, axis=0).max()), 1e-6)
+    arrow_length = 0.08 * extent
+
+    plot_points = None
+    if points is not None:
+        plot_points = np.asarray(points)
+        if plot_points.ndim != 2 or plot_points.shape[1] < 3:
+            raise ValueError("points must have shape (M,3) or (M,>=3).")
+        plot_points = plot_points[:, :3]
+        if len(plot_points) > max_points:
+            selection = np.linspace(0, len(plot_points) - 1, max_points).astype(int)
+            plot_points = plot_points[selection]
+
+    figure = plt.figure(figsize=(18, 6))
+    axes = [
+        figure.add_subplot(131, projection="3d"),
+        figure.add_subplot(132, projection="3d"),
+        figure.add_subplot(133, projection="3d"),
+    ]
+
+    def draw_scene(axis, centers, directions, color, title):
+        if plot_points is not None:
+            axis.scatter(
+                plot_points[:, 0], plot_points[:, 1], plot_points[:, 2],
+                s=0.3, c="0.7", alpha=0.2,
+            )
+        axis.plot(centers[:, 0], centers[:, 1], centers[:, 2], color=color)
+        axis.scatter(centers[:, 0], centers[:, 1], centers[:, 2], s=12, c=color)
+        axis.quiver(
+            centers[:, 0], centers[:, 1], centers[:, 2],
+            directions[:, 0], directions[:, 1], directions[:, 2],
+            length=arrow_length, normalize=True, color=color, linewidth=0.7,
+        )
+        for index, center in enumerate(centers):
+            if index % 4 == 0 or index in (0, len(centers) - 1):
+                axis.text(*center, str(index), fontsize=7)
+        axis.set_title(title)
+        axis.set_xlabel("X")
+        axis.set_ylabel("Y")
+        axis.set_zlabel("Z")
+
+    draw_scene(axes[0], original_centers, original_forward, "tab:blue", "Before")
+    draw_scene(axes[1], corrected_centers, corrected_forward, "tab:red", "After")
+
+    if plot_points is not None:
+        axes[2].scatter(
+            plot_points[:, 0], plot_points[:, 1], plot_points[:, 2],
+            s=0.3, c="0.7", alpha=0.2,
+        )
+    axes[2].plot(
+        original_centers[:, 0], original_centers[:, 1], original_centers[:, 2],
+        color="tab:blue", label="before",
+    )
+    axes[2].plot(
+        corrected_centers[:, 0], corrected_centers[:, 1], corrected_centers[:, 2],
+        color="tab:red", label="after",
+    )
+    for before, after in zip(original_centers, corrected_centers):
+        axes[2].plot(
+            [before[0], after[0]], [before[1], after[1]], [before[2], after[2]],
+            color="0.5", linewidth=0.5, alpha=0.6,
+        )
+    axes[2].quiver(
+        original_centers[:, 0], original_centers[:, 1], original_centers[:, 2],
+        original_forward[:, 0], original_forward[:, 1], original_forward[:, 2],
+        length=arrow_length, normalize=True, color="tab:blue", linewidth=0.5,
+    )
+    axes[2].quiver(
+        corrected_centers[:, 0], corrected_centers[:, 1], corrected_centers[:, 2],
+        corrected_forward[:, 0], corrected_forward[:, 1], corrected_forward[:, 2],
+        length=arrow_length, normalize=True, color="tab:red", linewidth=0.5,
+    )
+    axes[2].set_title("Overlay (gray lines are corrections)")
+    axes[2].legend()
+
+    combined = all_centers if plot_points is None else np.concatenate(
+        [all_centers, plot_points], axis=0
+    )
+    center = (combined.min(axis=0) + combined.max(axis=0)) / 2.0
+    radius = max(float(np.ptp(combined, axis=0).max()) / 2.0, 1e-6)
+    for axis in axes:
+        axis.set_xlim(center[0] - radius, center[0] + radius)
+        axis.set_ylim(center[1] - radius, center[1] + radius)
+        axis.set_zlim(center[2] - radius, center[2] + radius)
+        axis.set_box_aspect((1, 1, 1))
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=180, bbox_inches="tight")
+    plt.close(figure)
 
 
 def parse_frame_indices(value: Optional[str]) -> Optional[Sequence[int]]:
