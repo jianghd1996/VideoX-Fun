@@ -206,6 +206,9 @@ def infer_frame_indices(
             raise ValueError(
                 f"Expected {camera_count} frame indices, got shape {indices.shape}."
             )
+    elif camera_count == 40 and original_frame_count == 121:
+        # Matches: select='not(mod(n,floor(121/40)))', -vframes 40
+        indices = np.arange(0, 120, 3, dtype=np.int64)
     elif camera_count == 61 and original_frame_count == 121:
         indices = np.arange(0, 121, 2, dtype=np.int64)
     elif camera_count == original_frame_count:
@@ -213,7 +216,8 @@ def infer_frame_indices(
     else:
         raise ValueError(
             "Cannot safely infer the downsample mapping. Pass frame_indices explicitly. "
-            "For 61 cameras sampled from 121 frames, the default mapping is 0,2,...,120."
+            "For 40 cameras sampled by the provided ffmpeg command, the default "
+            "mapping is 0,3,...,117."
         )
 
     if np.any(indices < 0) or np.any(indices >= original_frame_count):
@@ -274,7 +278,8 @@ def refine_figure8_extrinsics(
         extrinsics: Array shaped (N, 3, 4), in w2c or c2w convention.
         convention: Input/output convention, either "w2c" or "c2w".
         frame_indices: Original 121-frame indices represented by the N cameras.
-            For N=61, defaults to [0, 2, ..., 120].
+            For N=40, defaults to [0, 3, ..., 117], matching the provided
+            ffmpeg command. N=61 still defaults to [0, 2, ..., 120].
         position_strength: 0 keeps DA3 centers; 1 uses the aligned trajectory prior.
         rotation_strength: 0 keeps DA3 rotations; 1 uses aligned prior rotations.
         return_report: Return (corrected_extrinsics, diagnostics) when True.
