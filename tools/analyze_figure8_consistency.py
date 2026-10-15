@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+from itertools import combinations
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
@@ -207,57 +208,57 @@ def build_contact_sheet(
     thumbnail_height: int,
     amplification: float,
 ) -> Tuple[np.ndarray, List[Dict[str, object]]]:
-    # A group can contain three repeated frames (0/60/120). Other groups are pairs.
-    max_comparisons = max(len(group) - 1 for group in groups)
-    column_count = 1 + max_comparisons * 2
+    max_columns = max(
+        len(group) + math.comb(len(group), 2)
+        for group in groups
+    )
     rows: List[np.ndarray] = []
     report_groups: List[Dict[str, object]] = []
 
     for group in groups:
-        reference_index = group[0]
-        reference = frames[reference_index]
-        pose = poses[reference_index]
-        tiles: List[np.ndarray] = [
-            add_header(
-                fit_thumbnail(reference, thumbnail_width, thumbnail_height),
-                f"reference frame {reference_index}",
-                f"az={pose[0]:.6f}, pitch={pose[1]:.6f}",
-            )
-        ]
+        pose = poses[group[0]]
+        tiles: List[np.ndarray] = []
         comparisons: List[Dict[str, object]] = []
 
-        for comparison_index in group[1:]:
-            comparison = frames[comparison_index]
-            metrics = image_metrics(reference, comparison)
+        for frame_index in group:
+            tiles.append(
+                add_header(
+                    fit_thumbnail(
+                        frames[frame_index],
+                        thumbnail_width,
+                        thumbnail_height,
+                    ),
+                    f"frame {frame_index}",
+                    f"az={pose[0]:.6f}, pitch={pose[1]:.6f}",
+                )
+            )
+
+        for first_index, second_index in combinations(group, 2):
+            first = frames[first_index]
+            second = frames[second_index]
+            metrics = image_metrics(first, second)
             metric_text = (
                 f"SSIM={metrics['ssim']:.4f}  "
                 f"PSNR={metrics['psnr']:.2f}  MAE={metrics['mae']:.4f}"
             )
-            tiles.append(
-                add_header(
-                    fit_thumbnail(comparison, thumbnail_width, thumbnail_height),
-                    f"comparison frame {comparison_index}",
-                    metric_text,
-                )
-            )
-            heatmap = difference_heatmap(reference, comparison, amplification)
+            heatmap = difference_heatmap(first, second, amplification)
             tiles.append(
                 add_header(
                     fit_thumbnail(heatmap, thumbnail_width, thumbnail_height),
-                    f"|frame {reference_index} - frame {comparison_index}|",
-                    f"diff amplified x{amplification:g}",
+                    f"|frame {first_index} - frame {second_index}|",
+                    metric_text,
                 )
             )
             comparisons.append(
                 {
-                    "reference_frame": reference_index,
-                    "comparison_frame": comparison_index,
+                    "first_frame": first_index,
+                    "second_frame": second_index,
                     **metrics,
                 }
             )
 
         blank = np.full_like(tiles[0], 235)
-        while len(tiles) < column_count:
+        while len(tiles) < max_columns:
             tiles.append(blank.copy())
 
         row = cv2.hconcat(tiles)
@@ -273,7 +274,6 @@ def build_contact_sheet(
         )
 
     return cv2.vconcat(rows[:-1]), report_groups
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
