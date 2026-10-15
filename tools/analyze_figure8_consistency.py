@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 from itertools import combinations
@@ -277,7 +278,13 @@ def build_contact_sheet(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--video", type=Path, required=True, help="Generated 121-frame video.")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--video", type=Path, help="One generated 121-frame video.")
+    source.add_argument(
+        "--input-dir",
+        type=Path,
+        help="Directory containing MP4 videos. Subdirectories are searched recursively.",
+    )
     parser.add_argument("--output-dir", type=Path, default=Path("figure8_consistency"))
     parser.add_argument("--frames", type=int, default=121)
     parser.add_argument("--start", type=float, default=0.0)
@@ -291,19 +298,15 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-
-    poses = figure8_angles(
-        args.frames,
-        args.start,
-        args.elevation,
-        args.theta,
-        args.phi,
-    )
-    repeated_groups = find_repeated_pose_groups(poses, args.pose_tolerance)
-    frames, fps = read_video_frames(args.video, args.frames)
+def analyze_video(
+    video_path: Path,
+    result_dir: Path,
+    args: argparse.Namespace,
+    poses: Sequence[Pose],
+    repeated_groups: Sequence[Sequence[int]],
+) -> Dict[str, object]:
+    result_dir.mkdir(parents=True, exist_ok=True)
+    frames, fps = read_video_frames(video_path, args.frames)
 
     sheet, group_report = build_contact_sheet(
         frames,
@@ -313,7 +316,7 @@ def main() -> None:
         args.thumbnail_height,
         args.diff_amplification,
     )
-    sheet_path = args.output_dir / "figure8_repeated_pose_comparison.png"
+    sheet_path = result_dir / "figure8_repeated_pose_comparison.png"
     if not cv2.imwrite(str(sheet_path), sheet):
         raise RuntimeError(f"Failed to save contact sheet: {sheet_path}")
 
@@ -330,8 +333,8 @@ def main() -> None:
     mean_ssim = float(np.mean([item["ssim"] for item in all_comparisons]))
     consistency_score = float(np.clip(mean_ssim, 0.0, 1.0) * 100.0)
 
-    report = {
-        "video": str(args.video.resolve()),
+    report: Dict[str, object] = {
+        "video": str(video_path.resolve()),
         "decoded_frames": len(frames),
         "fps": fps,
         "trajectory": {
@@ -351,19 +354,134 @@ def main() -> None:
             "mean_ssim": mean_ssim,
             "consistency_score_0_to_100": consistency_score,
         },
+        "contact_sheet": str(sheet_path.resolve()),
     }
-    report_path = args.output_dir / "figure8_consistency_metrics.json"
+    report_path = result_dir / "figure8_consistency_metrics.json"
     with report_path.open("w", encoding="utf-8") as handle:
         json.dump(report, handle, ensure_ascii=False, indent=2)
 
+    print(
+        f"[done] {video_path}: score={consistency_score:.2f}, "
+        f"SSIM={mean_ssim:.4f}, PSNR={mean_psnr:.2f}, MAE={mean_mae:.4f}",
+        flush=True,
+    )
+    return report
+
+
+def collect_videos(args: argparse.Namespace) -> List[Path]:
+    if args.video is not None:
+        if not args.video.is_file():
+            raise FileNotFoundError(f"Video does not exist: {args.video}")
+        return [args.video]
+
+    if not args.input_dir.is_dir():
+        raise NotADirectoryError(f"Input directory does not exist: {args.input_dir}")
+
+    videos = sorted(
+        path
+        for path in args.input_dir.rglob("*")
+        if path.is_file() and path.suffix.lower() == ".mp4"
+    )
+    if not videos:
+        raise FileNotFoundError(f"No MP4 videos found under {args.input_dir}")
+    return videos
+
+
+def write_batch_summary(
+    reports: Sequence[Dict[str, object]],
+    output_dir: Path,
+) -> None:
+    rows = []
+    for report in reports:
+        summary = report["summary"]
+        rows.append(
+            {
+                "video": report["video"],
+                "consistency_score": summary["consistency_score_0_to_100"],
+                "mean_ssim": summary["mean_ssim"],
+                "mean_psnr": summary["mean_psnr"],
+                "mean_mae": summary["mean_mae"],
+                "contact_sheet": report["contact_sheet"],
+            }
+        )
+    rows.sort(key=lambda row: row["consistency_score"])
+
+    summary_json = output_dir / "batch_summary.json"
+    with summary_json.open("w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "video_count": len(rows),
+                "mean_consistency_score": float(
+                    np.mean([row["consistency_score"] for row in rows])
+                ),
+                "videos_sorted_worst_first": rows,
+            },
+            handle,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    summary_csv = output_dir / "batch_summary.csv"
+    with summary_csv.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+    print(f"Batch JSON: {summary_json}")
+    print(f"Batch CSV: {summary_csv}")
+
+
+def main() -> None:
+    args = parse_args()
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    poses = figure8_angles(
+        args.frames,
+        args.start,
+        args.elevation,
+        args.theta,
+        args.phi,
+    )
+    repeated_groups = find_repeated_pose_groups(poses, args.pose_tolerance)
+    videos = collect_videos(args)
+
     print(f"Repeated pose groups ({len(repeated_groups)}):")
     print(" ".join("/".join(map(str, group)) for group in repeated_groups))
-    print(f"Mean MAE: {mean_mae:.6f} (lower is better)")
-    print(f"Mean PSNR: {mean_psnr:.3f} dB (higher is better)")
-    print(f"Mean SSIM: {mean_ssim:.6f} (higher is better)")
-    print(f"Consistency score: {consistency_score:.2f}/100")
-    print(f"Contact sheet: {sheet_path}")
-    print(f"Metrics JSON: {report_path}")
+    print(f"Found {len(videos)} video(s).", flush=True)
+
+    reports = []
+    failures = []
+    for index, video_path in enumerate(videos, start=1):
+        print(f"[{index}/{len(videos)}] Analyzing {video_path}", flush=True)
+        if args.input_dir is None:
+            result_dir = args.output_dir
+        else:
+            relative_path = video_path.relative_to(args.input_dir)
+            result_dir = args.output_dir / relative_path.parent / relative_path.stem
+        try:
+            reports.append(
+                analyze_video(
+                    video_path,
+                    result_dir,
+                    args,
+                    poses,
+                    repeated_groups,
+                )
+            )
+        except Exception as error:
+            failures.append({"video": str(video_path), "error": str(error)})
+            print(f"[failed] {video_path}: {error}", flush=True)
+
+    if reports:
+        write_batch_summary(reports, args.output_dir)
+    if failures:
+        failure_path = args.output_dir / "batch_failures.json"
+        with failure_path.open("w", encoding="utf-8") as handle:
+            json.dump(failures, handle, ensure_ascii=False, indent=2)
+        print(f"Failures: {len(failures)}; details: {failure_path}")
+
+    if not reports:
+        raise RuntimeError("All videos failed analysis.")
 
 
 if __name__ == "__main__":
