@@ -277,8 +277,10 @@ def refine_figure8_extrinsics(
     elevation: float = 0.0,
     theta: float = 30.0,
     phi: float = 5.0,
-    position_strength: float = 1.0,
-    rotation_strength: float = 1.0,
+    position_strength: float = 0.1,
+    rotation_strength: float = 0.1,
+    max_position_shift_ratio: Optional[float] = 0.5,
+    max_rotation_change_degrees: Optional[float] = 2.0,
     robust_alignment_iterations: int = 5,
     return_report: bool = False,
 ):
@@ -291,7 +293,10 @@ def refine_figure8_extrinsics(
             For N=40, defaults to [0, 3, ..., 117], matching the provided
             ffmpeg command. N=61 still defaults to [0, 2, ..., 120].
         position_strength: 0 keeps DA3 centers; 1 uses the aligned trajectory prior.
-        rotation_strength: 0 keeps DA3 rotations; 1 uses aligned prior rotations.
+        rotation_strength: Fraction of the rotation correction to apply.
+        max_position_shift_ratio: Cap each position update relative to the median
+            distance between consecutive DA3 camera centers. None disables the cap.
+        max_rotation_change_degrees: Cap each camera rotation update. None disables it.
         return_report: Return (corrected_extrinsics, diagnostics) when True.
     """
     input_array = np.asarray(extrinsics)
@@ -349,14 +354,22 @@ def refine_figure8_extrinsics(
         local_alignment,
     )
 
-    corrected_centers = (
-        (1.0 - position_strength) * estimated_centers
-        + position_strength * prior_centers
-    )
+    position_updates = position_strength * (prior_centers - estimated_centers)
+    consecutive_steps = np.linalg.norm(np.diff(estimated_centers, axis=0), axis=1)
+    median_camera_step = float(np.median(consecutive_steps))
+    if max_position_shift_ratio is not None:
+        maximum_shift = max_position_shift_ratio * median_camera_step
+        update_norms = np.linalg.norm(position_updates, axis=1)
+        clipped = update_norms > maximum_shift
+        position_updates[clipped] *= (
+            maximum_shift / np.maximum(update_norms[clipped], 1e-12)
+        )[:, None]
+    corrected_centers = estimated_centers + position_updates
     corrected_rotations = blend_rotations(
         estimated_rotations,
         prior_rotations,
         rotation_strength,
+        max_rotation_change_degrees,
     )
     corrected = c2w_to_extrinsics(
         corrected_rotations,
@@ -373,6 +386,15 @@ def refine_figure8_extrinsics(
         "sim3_translation": translation.tolist(),
         "position_strength": position_strength,
         "rotation_strength": rotation_strength,
+        "median_camera_step": median_camera_step,
+        "max_position_shift_ratio": max_position_shift_ratio,
+        "max_rotation_change_degrees": max_rotation_change_degrees,
+        "camera_changes": camera_change_metrics(
+            estimated_centers,
+            estimated_rotations,
+            corrected_centers,
+            corrected_rotations,
+        ),
         "alignment_center_rmse": float(
             np.sqrt(np.mean(np.sum((prior_centers - estimated_centers) ** 2, axis=1)))
         ),
@@ -550,8 +572,12 @@ def main() -> None:
     parser.add_argument("--elevation", type=float, default=0.0)
     parser.add_argument("--theta", type=float, default=30.0)
     parser.add_argument("--phi", type=float, default=5.0)
-    parser.add_argument("--position-strength", type=float, default=1.0)
-    parser.add_argument("--rotation-strength", type=float, default=1.0)
+    parser.add_argument("--position-strength", type=float, default=0.1)
+    parser.add_argument("--rotation-strength", type=float, default=0.1)
+    parser.add_argument("--max-position-shift-ratio", type=float, default=0.5)
+    parser.add_argument("--max-rotation-change-degrees", type=float, default=2.0)
+    parser.add_argument("--points", type=Path, help="Optional .npy point cloud for visualization.")
+    parser.add_argument("--forward-axis", choices=["x", "y", "z", "-x", "-y", "-z"], default="z")
     args = parser.parse_args()
 
     extrinsics = np.load(args.input)
@@ -565,11 +591,26 @@ def main() -> None:
         phi=args.phi,
         position_strength=args.position_strength,
         rotation_strength=args.rotation_strength,
+        max_position_shift_ratio=args.max_position_shift_ratio,
+        max_rotation_change_degrees=args.max_rotation_change_degrees,
         return_report=True,
     )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     np.save(args.output, corrected)
+    visualization_path = args.output.with_name(
+        args.output.stem + "_comparison.png"
+    )
+    points = np.load(args.points) if args.points is not None else None
+    visualize_extrinsics_comparison(
+        extrinsics,
+        corrected,
+        visualization_path,
+        convention=args.convention,
+        points=points,
+        forward_axis=args.forward_axis,
+    )
+
     report_path = args.output.with_suffix(".json")
     with report_path.open("w", encoding="utf-8") as handle:
         json.dump(report, handle, ensure_ascii=False, indent=2)
@@ -578,6 +619,8 @@ def main() -> None:
     print(f"Output shape: {corrected.shape}")
     print(f"Corrected extrinsics: {args.output}")
     print(f"Diagnostics: {report_path}")
+    print(f"Visualization: {visualization_path}")
+    print("Camera changes:", report["camera_changes"])
     print("Repeated-pose error before:", report["before_repeated_pose_error"])
     print("Repeated-pose error after:", report["after_repeated_pose_error"])
 
