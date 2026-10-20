@@ -21,13 +21,13 @@ OUTPUT_ROOT = CACHE_ROOT / "output"
 
 REPO_DIR = CODE_ROOT / "VideoX-Fun-Single8"
 TOOLS_DIR = CODE_ROOT / "tools"
-DATASET_DIR = DATA_ROOT / "theta45_phi10_UE_render"
+DATASET_DIR = DATA_ROOT / "theta30_phi5_self_render_1019"
 VALIDATION_DATA_DIR = TEST_DATA_ROOT / "livephoto_test"
 MODEL_DIR = MODEL_ROOT / "Wan2.2-TI2V-5B"
 OUTPUT_DIR = Path(
     os.getenv(
         "OUTPUT_DIR",
-        str(OUTPUT_ROOT / "trajectory_lora_theta45_phi10_UE"),
+        str(OUTPUT_ROOT / "trajectory_lora_theta30_phi5_self_render_1019"),
     )
 )
 
@@ -41,7 +41,7 @@ TOOLS_OBS_URI = os.getenv(
 )
 DATA_OBS_URI = os.getenv(
     "DATA_OBS_URI",
-    "s3://bucket-si-wulan/jianghognda/00_data/theta45_phi10_UE_render/",
+    "s3://bucket-si-wulan/jianghognda/00_data/theta30_phi5_self_render_1019/",
 )
 TEST_DATA_OBS_URI = os.getenv(
     "TEST_DATA_OBS_URI",
@@ -54,7 +54,7 @@ MODEL_OBS_URI = os.getenv(
 OUTPUT_OBS_URI = os.getenv(
     "OUTPUT_OBS_URI",
     "s3://bucket-si-wulan/jianghognda/03_output/"
-    "trajectory_lora_theta45_phi10_UE/",
+    "trajectory_lora_theta30_phi5_self_render_1019/",
 )
 
 FORCE_COPY = os.getenv("FORCE_COPY", "0").lower() in {"1", "true", "yes"}
@@ -101,8 +101,8 @@ def resolve_video(item: Dict[str, Any]) -> Path:
 
 def build_training_metadata() -> Path:
     """Convert video_path/caption records to VideoX-Fun file_path/text records."""
-    source_json = DATASET_DIR / "theta45_phi10_UE_render.json"
-    target_json = DATA_ROOT / "theta45_phi10_UE_render_cloud.json"
+    source_json = DATASET_DIR / "theta30_phi5_self_render_1019.json"
+    target_json = DATA_ROOT / "theta30_phi5_self_render_1019_cloud.json"
 
     if not source_json.is_file():
         raise FileNotFoundError(f"Dataset metadata does not exist: {source_json}")
@@ -228,6 +228,49 @@ def remove_broken_optional_datasets() -> None:
         )
 
 
+def install_training_environment() -> None:
+    """Install training dependencies without replacing the server's CUDA PyTorch."""
+    import shutil
+    if shutil.which("ffmpeg") is None:
+        print("[env] WARNING: ffmpeg executable is missing; install it via the system package manager if needed", flush=True)
+    try:
+        import torch
+    except ImportError as exc:
+        raise RuntimeError(
+            "PyTorch is not installed. Install a CUDA-compatible PyTorch build for this server "
+            "before running the cloud bootstrap."
+        ) from exc
+    if not torch.cuda.is_available():
+        raise RuntimeError("PyTorch cannot access CUDA. Check the GPU driver and PyTorch CUDA build.")
+    print(f"[env] PyTorch {torch.__version__}; CUDA {torch.version.cuda}; GPUs {torch.cuda.device_count()}", flush=True)
+
+    requirements = REPO_DIR / "requirements.txt"
+    if not requirements.is_file():
+        raise FileNotFoundError(f"Missing repository requirements: {requirements}")
+    # The cloud image supplies CUDA PyTorch. Avoid replacing it and skip the
+    # optional 'datasets' package, which breaks on some Python 3.9 images.
+    excluded = {"torch", "datasets"}
+    filtered = []
+    for raw in requirements.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        name = line.split("[", 1)[0].split("=", 1)[0].split(">", 1)[0].split("<", 1)[0].strip().lower().replace("_", "-")
+        if name not in excluded:
+            filtered.append(line)
+    print(f"[env] Installing {len(filtered)} repository dependencies", flush=True)
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", *filtered],
+        check=True,
+    )
+    # These are used by the training/validation code and may not be in requirements.txt.
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "peft", "protobuf"],
+        check=True,
+    )
+    remove_broken_optional_datasets()
+
+
 def ensure_python_package(import_name: str, pip_name: str) -> None:
     if importlib.util.find_spec(import_name) is not None:
         print(f"[python] {pip_name} is already installed", flush=True)
@@ -294,8 +337,8 @@ def main() -> None:
     copy_once(MODEL_OBS_URI, MODEL_DIR)
 
     metadata_path = build_training_metadata()
+    install_training_environment()
     patch_cloud_python39_compatibility()
-    remove_broken_optional_datasets()
     ensure_python_package("accelerate", "accelerate")
     ensure_python_package("tensorboard", "tensorboard")
 
