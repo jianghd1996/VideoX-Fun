@@ -273,7 +273,7 @@ def install_training_environment() -> None:
         ("av", "av", "15.1.0"),
         ("ftfy", "ftfy", "6.3.1"),
         ("tensorboard", "tensorboard", "2.20.0"),
-        ("timm", "timm", None),
+        ("timm", "timm", "1.0.22"),
         ("tomesd", "tomesd", None),
         ("torchdiffeq", "torchdiffeq", None),
         ("torchsde", "torchsde", None),
@@ -310,7 +310,7 @@ def install_training_environment() -> None:
         # The Huawei mirror may not expose the already installed CUDA torch
         # wheel to pip's resolver. PEFT's torch>=1.13 requirement is satisfied
         # by our checked torch 2.6; do not make pip resolve it again.
-        if package == "peft":
+        if package in {"peft", "timm", "tomesd", "torchdiffeq", "torchsde"}:
             command.append("--no-deps")
         command.append(spec)
         subprocess.run(command, check=True)
