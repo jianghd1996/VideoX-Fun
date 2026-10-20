@@ -238,18 +238,16 @@ def install_training_environment() -> None:
     except ImportError:
         # A new cloud image may lack PyTorch; install a CUDA wheel.
         torch_version = os.getenv("TORCH_VERSION", "2.6.0")
-        cuda_tag = os.getenv("TORCH_CUDA_TAG", "cu124")
-        torch_index = os.getenv("TORCH_INDEX_URL", f"https://download.pytorch.org/whl/{cuda_tag}")
-        print(f"[env] Installing PyTorch {torch_version} from {torch_index}", flush=True)
+        print(f"[env] Installing PyTorch {torch_version} from the configured pip index", flush=True)
         subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--index-url", torch_index, f"torch=={torch_version}"],
+            [sys.executable, "-m", "pip", "install", f"torch=={torch_version}"],
             check=True,
         )
         import torch
     if not torch.cuda.is_available():
         raise RuntimeError(
             f"PyTorch {torch.__version__} cannot access CUDA. "
-            "Check nvidia-smi, GPU drivers and TORCH_CUDA_TAG/TORCH_INDEX_URL."
+            "Check nvidia-smi, GPU drivers and the installed PyTorch CUDA build."
         )
     print(f"[env] PyTorch {torch.__version__}; CUDA {torch.version.cuda}; GPUs {torch.cuda.device_count()}", flush=True)
 
