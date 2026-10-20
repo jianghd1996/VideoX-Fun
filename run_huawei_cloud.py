@@ -251,45 +251,63 @@ def install_training_environment() -> None:
         )
     print(f"[env] PyTorch {torch.__version__}; CUDA {torch.version.cuda}; GPUs {torch.cuda.device_count()}", flush=True)
 
-    requirements = REPO_DIR / "requirements.txt"
-    if not requirements.is_file():
-        raise FileNotFoundError(f"Missing repository requirements: {requirements}")
-    # Install only training dependencies; Gradio and optional datasets are
-    # not needed for this cloud LoRA job. Pin the Hugging Face stack to
-    # compatible Python 3.9 versions and torchvision to the torch 2.6 pair.
-    requirements = REPO_DIR / "requirements.txt"
-    if not requirements.is_file():
-        raise FileNotFoundError(f"Missing repository requirements: {requirements}")
-    excluded = {
-        "torch", "torchvision", "torchaudio", "datasets", "gradio",
-        "accelerate", "transformers", "diffusers", "huggingface-hub",
-    }
-    filtered = []
-    for raw in requirements.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        name = line.split("[", 1)[0].split("=", 1)[0].split(">", 1)[0].split("<", 1)[0].strip().lower().replace("_", "-")
-        if name not in excluded:
-            filtered.append(line)
-    pinned = [
-        "torchvision==0.21.0",
-        "transformers==4.51.3",
-        "diffusers==0.35.1",
-        "huggingface-hub==0.34.4",
-        "peft==0.15.2",
-        "protobuf",
+    # Cloud training only: use the user's known-working versions for the HF
+    # stack and OpenCV. Do not install the full requirements.txt: it contains
+    # optional UI packages and unconstrained dependency families.
+    from importlib import metadata
+
+    packages = [
+        ("accelerate", "accelerate", "1.10.1"),
+        ("opencv-python", "cv2", "4.11.0.86"),
+        ("diffusers", "diffusers", "0.36.0"),
+        ("transformers", "transformers", "4.57.6"),
+        ("huggingface-hub", "huggingface_hub", "0.36.2"),
+        ("peft", "peft", "0.17.1"),
+        ("protobuf", "google.protobuf", "3.20.3"),
+        ("einops", "einops", "0.8.2"),
+        ("safetensors", "safetensors", "0.7.0"),
+        ("decord", "decord", "0.6.0"),
+        ("omegaconf", "omegaconf", "2.3.0"),
+        ("imageio", "imageio", "2.37.2"),
+        ("imageio-ffmpeg", "imageio_ffmpeg", "0.6.0"),
+        ("av", "av", "15.1.0"),
+        ("ftfy", "ftfy", "6.3.1"),
+        ("tensorboard", "tensorboard", "2.20.0"),
+        ("timm", "timm", None),
+        ("tomesd", "tomesd", None),
+        ("torchdiffeq", "torchdiffeq", None),
+        ("torchsde", "torchsde", None),
+        ("sentencepiece", "sentencepiece", None),
+        ("albumentations", "albumentations", None),
+        ("scikit-image", "skimage", None),
+        ("librosa", "librosa", "0.11.0"),
+        ("func-timeout", "func_timeout", "4.3.5"),
     ]
     constraints = CACHE_ROOT / "torch_constraints.txt"
     constraints.write_text(
-        f"torch=={torch.__version__}\n",
+        f"torch=={torch.__version__}\n"
+        "opencv-python==4.11.0.86\n"
+        "opencv-contrib-python==4.11.0.86\n"
+        "opencv-python-headless==4.11.0.86\n"
+        "opencv-contrib-python-headless==4.11.0.86\n",
         encoding="utf-8",
     )
-    print("[env] Installing training dependencies (preserving existing accelerate; no Gradio)", flush=True)
-    subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-c", str(constraints), *pinned, *filtered],
-        check=True,
-    )
+    for package, module, version in packages:
+        try:
+            installed = metadata.version(package)
+        except metadata.PackageNotFoundError:
+            installed = None
+        if installed is not None:
+            print(f"[env] Keeping {package}=={installed}", flush=True)
+            continue
+        spec = f"{package}=={version}" if version else package
+        print(f"[env] Installing missing {spec}", flush=True)
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install",
+             "--prefer-binary", "--upgrade-strategy", "only-if-needed",
+             "-c", str(constraints), spec],
+            check=True,
+        )
     remove_broken_optional_datasets()
 
 
