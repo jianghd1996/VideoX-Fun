@@ -254,9 +254,8 @@ def install_training_environment() -> None:
     requirements = REPO_DIR / "requirements.txt"
     if not requirements.is_file():
         raise FileNotFoundError(f"Missing repository requirements: {requirements}")
-    # The cloud image supplies CUDA PyTorch. Avoid replacing it and skip the
-    # optional 'datasets' package, which breaks on some Python 3.9 images.
-    excluded = {"torch", "datasets"}
+    # Preserve the installed CUDA PyTorch and skip the optional 'datasets' package, which breaks on some Python 3.9 images.
+    excluded = {"torch", "torchvision", "torchaudio", "datasets"}
     filtered = []
     for raw in requirements.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
@@ -265,14 +264,16 @@ def install_training_environment() -> None:
         name = line.split("[", 1)[0].split("=", 1)[0].split(">", 1)[0].split("<", 1)[0].strip().lower().replace("_", "-")
         if name not in excluded:
             filtered.append(line)
-    print(f"[env] Installing {len(filtered)} repository dependencies", flush=True)
+    constraints = CACHE_ROOT / "torch_constraints.txt"
+    constraints.write_text(f"torch=={torch.__version__}\n", encoding="utf-8")
+    print(f"[env] Installing {len(filtered)} repository dependencies with torch pinned", flush=True)
     subprocess.run(
-        [sys.executable, "-m", "pip", "install", *filtered],
+        [sys.executable, "-m", "pip", "install", "-c", str(constraints), *filtered],
         check=True,
     )
     # These are used by the training/validation code and may not be in requirements.txt.
     subprocess.run(
-        [sys.executable, "-m", "pip", "install", "peft", "protobuf"],
+        [sys.executable, "-m", "pip", "install", "-c", str(constraints), "peft", "protobuf"],
         check=True,
     )
     remove_broken_optional_datasets()
