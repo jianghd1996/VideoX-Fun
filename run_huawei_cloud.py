@@ -274,7 +274,6 @@ def install_training_environment() -> None:
             filtered.append(line)
     pinned = [
         "torchvision==0.21.0",
-        "accelerate==1.7.0",
         "transformers==4.51.3",
         "diffusers==0.35.1",
         "huggingface-hub==0.34.4",
@@ -286,7 +285,7 @@ def install_training_environment() -> None:
         f"torch=={torch.__version__}\n",
         encoding="utf-8",
     )
-    print("[env] Installing pinned training dependencies (no Gradio)", flush=True)
+    print("[env] Installing training dependencies (preserving existing accelerate; no Gradio)", flush=True)
     subprocess.run(
         [sys.executable, "-m", "pip", "install", "-c", str(constraints), *pinned, *filtered],
         check=True,
