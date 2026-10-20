@@ -302,12 +302,18 @@ def install_training_environment() -> None:
             continue
         spec = f"{package}=={version}" if version else package
         print(f"[env] Installing missing {spec}", flush=True)
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install",
-             "--prefer-binary", "--upgrade-strategy", "only-if-needed",
-             "-c", str(constraints), spec],
-            check=True,
-        )
+        command = [
+            sys.executable, "-m", "pip", "install",
+            "--prefer-binary", "--upgrade-strategy", "only-if-needed",
+            "-c", str(constraints),
+        ]
+        # The Huawei mirror may not expose the already installed CUDA torch
+        # wheel to pip's resolver. PEFT's torch>=1.13 requirement is satisfied
+        # by our checked torch 2.6; do not make pip resolve it again.
+        if package == "peft":
+            command.append("--no-deps")
+        command.append(spec)
+        subprocess.run(command, check=True)
     remove_broken_optional_datasets()
 
 
