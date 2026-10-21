@@ -43,6 +43,8 @@ DEFAULT_ARGS = {
     "lora_path": str(Path(__file__).resolve().parent / "Cloud_Models/Wan2.2-TI2V-5B/lora_ckpts_single8/checkpoint-9600.safetensors"),
     "lora_weight": 0.55,
     "use_lightvae": True,
+    "condition_vae_fast_encode": True,  # False: original full 121-frame condition VAE encode
+    "condition_vae_encode_frames": 49,  # only used when condition_vae_fast_encode=True
     "prompt_embeds_path": None,  # use T5 text encoder for benchmark
     "lightvae_path": str(Path(__file__).resolve().parent / "Cloud_Models/transformer_w_skybox_sla/MG-LightVAE.pth"),
     "external_code_root": None,
