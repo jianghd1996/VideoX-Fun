@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -39,6 +40,8 @@ class ReconstructionConfig:
     mode: str = "default"
     circle: bool = False
     max_frames: int = 121
+    external_code_root: Path | None = None
+    da3_model_path: Path | None = None
 
 
 def load_callable(spec: str) -> Callable[..., Any]:
@@ -50,6 +53,40 @@ def load_callable(spec: str) -> Callable[..., Any]:
     if not callable(fn):
         raise TypeError(f"Adapter is not callable: {spec}")
     return fn
+
+
+def _external_import_root(root: Path) -> Path:
+    root = Path(root).expanduser().resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"External code root does not exist: {root}")
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    return root
+
+
+def create_da3(root: Path, model_path: Path | None = None) -> Any:
+    """Initialize the external DA3 implementation only when stage 2 runs."""
+    root = _external_import_root(root)
+    from DA3.run_da3_full_crop_dev import run_DA3
+    checkpoint = (Path(model_path).expanduser().resolve() if model_path else
+                  root / "Cloud_Models/Saliency-Face-DA3/besthumanmodel_lr1e_6_ckpt2.pt")
+    if not checkpoint.is_file():
+        raise FileNotFoundError(f"DA3 checkpoint not found: {checkpoint}")
+    return run_DA3(str(checkpoint))
+
+
+def create_full_reconstruction(root: Path) -> Callable[..., Any]:
+    """Initialize the camera-optimizing dense reconstruction backend."""
+    _external_import_root(root)
+    from Reconstruction_full import Reconstruction
+    return Reconstruction(preload=True, dense_init_scene=False)
+
+
+def create_vanilla_reconstruction(root: Path) -> Callable[..., Any]:
+    """Optional vanilla backend for later stages."""
+    _external_import_root(root)
+    from Reconstruction import Reconstruction
+    return Reconstruction(preload=True, dense_init_scene=False)
 
 
 class ReconstructionPipeline:
@@ -120,6 +157,8 @@ class ReconstructionPipeline:
             json.dumps(list(FRAME_INDICES), indent=2), encoding="utf-8")
 
     def stage_da3(self) -> Any:
+        if self.run_DA3 is None and self.args.external_code_root is not None:
+            self.run_DA3 = create_da3(self.args.external_code_root, self.args.da3_model_path)
         if self.run_DA3 is None:
             raise RuntimeError("DA3 adapter missing; inject object with .infer(args=DA3Params(...))")
         if len(list(self.img_path.glob("*.jpg"))) != len(FRAME_INDICES):
@@ -136,6 +175,8 @@ class ReconstructionPipeline:
         ))
 
     def stage_dense(self) -> Any:
+        if self.recon_iter_full is None and self.args.external_code_root is not None:
+            self.recon_iter_full = create_full_reconstruction(self.args.external_code_root)
         if self.recon_iter_full is None:
             raise RuntimeError("Dense reconstruction adapter missing; inject recon_iter_full")
         if not self.img_path.is_dir() or not self.colmap_path.is_dir():
@@ -176,12 +217,15 @@ def main() -> None:
     parser.add_argument("--mode", default="default")
     parser.add_argument("--circle", action="store_true")
     parser.add_argument("--max-frames", type=int, default=121)
+    parser.add_argument("--external-code-root", type=Path, help="Root containing DA3 and Reconstruction_full.py")
+    parser.add_argument("--da3-model-path", type=Path, help="Override default DA3 checkpoint")
     args = parser.parse_args()
     cfg = ReconstructionConfig(
         case_dir=args.case_dir, view_num=args.view_num, crop_ratio=args.crop_ratio,
         use_view_extrapolation=args.use_view_extrapolation,
         is_livephoto=not args.no_livephoto, mode=args.mode,
-        circle=args.circle, max_frames=args.max_frames)
+        circle=args.circle, max_frames=args.max_frames,
+        external_code_root=args.external_code_root, da3_model_path=args.da3_model_path)
     if args.dry_run:
         pipeline = ReconstructionPipeline(cfg)
         print(json.dumps({"paths": pipeline.paths(), "frame_indices": FRAME_INDICES,
