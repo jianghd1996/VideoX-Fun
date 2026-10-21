@@ -566,6 +566,7 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
         _t_text_end = _sync_clock()
         print(f"[VIDEO TIMING][rank={int(__import__('os').environ.get('RANK', '0'))}] text_encode={_t_text_end - _t_text_start:.3f}s", flush=True)
 
+        _t_scheduler_start = _sync_clock()
         # 4. Prepare timesteps
         if isinstance(self.scheduler, FlowMatchEulerDiscreteScheduler):
             timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps, mu=1)
@@ -585,6 +586,9 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
             from comfy.utils import ProgressBar
             pbar = ProgressBar(num_inference_steps + 2)
 
+        _t_scheduler_end = _sync_clock()
+        print(f"[VIDEO TIMING][rank={int(__import__('os').environ.get('RANK','0'))}] scheduler_setup={_t_scheduler_end - _t_scheduler_start:.3f}s", flush=True)
+        _t_condition_start = _sync_clock()
         # 5. Prepare latents.
         if video is not None:
             video_length = video.shape[2]
@@ -594,6 +598,9 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
         else:
             init_video = None
 
+        _t_video_condition_end = _sync_clock()
+        print(f"[VIDEO TIMING][rank={int(__import__('os').environ.get('RANK','0'))}] video_condition_preprocess={_t_video_condition_end - _t_condition_start:.3f}s", flush=True)
+        _t_latents_start = _sync_clock()
         latent_channels = self.vae.config.latent_channels
         latents = self.prepare_latents(
             batch_size * num_videos_per_prompt,
@@ -609,6 +616,9 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
         if comfyui_progressbar:
             pbar.update(1)
 
+        _t_latents_end = _sync_clock()
+        print(f"[VIDEO TIMING][rank={int(__import__('os').environ.get('RANK','0'))}] prepare_latents={_t_latents_end - _t_latents_start:.3f}s", flush=True)
+        _t_mask_start = _sync_clock()
         # Prepare mask latent variables
         if init_video is not None and not (mask_video == 255).all():
             bs, _, video_length, height, width = video.size()
@@ -617,6 +627,7 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
             mask_condition = rearrange(mask_condition, "(b f) c h w -> b c f h w", f=video_length)
 
             masked_video = init_video * (torch.tile(mask_condition, [1, 3, 1, 1, 1]) < 0.5)
+            _t_vae_encode_start = _sync_clock()
             _, masked_video_latents = self.prepare_mask_latents(
                 None,
                 masked_video,
@@ -630,6 +641,8 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
                 noise_aug_strength=None,
             )
             
+            _t_vae_encode_end = _sync_clock()
+            print(f"[VIDEO TIMING][rank={int(__import__('os').environ.get('RANK','0'))}] condition_vae_encode={_t_vae_encode_end - _t_vae_encode_start:.3f}s", flush=True)
             mask_condition = torch.concat(
                 [
                     torch.repeat_interleave(mask_condition[:, :, 0:1], repeats=4, dim=2), 
@@ -647,14 +660,18 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
         if comfyui_progressbar:
             pbar.update(1)
 
+        _t_mask_end = _sync_clock()
+        print(f"[VIDEO TIMING][rank={int(__import__('os').environ.get('RANK','0'))}] mask_and_condition_total={_t_mask_end - _t_mask_start:.3f}s", flush=True)
         # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
 
-        target_shape = (self.vae.latent_channels, (num_frames - 1) // self.vae.config.temporal_compression_ratio + 1, width // self.vae.config.spatial_compression_ratio, height // self.vae.config.spatial_compression_ratio)
+        target_shape = (self.vae.config.latent_channels, (num_frames - 1) // self.vae.config.temporal_compression_ratio + 1, width // self.vae.config.spatial_compression_ratio, height // self.vae.config.spatial_compression_ratio)
         seq_len = math.ceil((target_shape[2] * target_shape[3]) / (self.transformer.config.patch_size[1] * self.transformer.config.patch_size[2]) * target_shape[1]) 
         # 7. Denoising loop
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
         self.transformer.num_inference_steps = num_inference_steps
+        _t_pre_denoise_end = _sync_clock()
+        print(f"[VIDEO TIMING][rank={int(__import__('os').environ.get('RANK','0'))}] denoise_setup={_t_pre_denoise_end - _t_mask_end:.3f}s", flush=True)
         _t_diffusion_start = _sync_clock()
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
