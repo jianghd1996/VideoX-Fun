@@ -38,9 +38,9 @@ class SparseRecon:
         self.args = json_args.copy()
         root = self.args.get("external_code_root")
         video_root = Path(self.args.get("video_code_root") or
-                          (Path(__file__).resolve().parent.parent / "VideoX-Fun")).resolve()
+                          (Path(__file__).resolve().parent / "VideoX-Fun")).resolve()
         if not video_root.is_dir():
-            video_root = Path(__file__).resolve().parents[2]
+            raise FileNotFoundError(f"VideoX-Fun directory not found: {video_root}")
         if str(video_root) not in sys.path:
             sys.path.insert(0, str(video_root))
         os.environ["SINGLERECON_WORLD_SIZE"] = str(self.args.get("world_size", 1))
