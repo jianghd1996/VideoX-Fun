@@ -100,7 +100,7 @@ def sinusoidal_embedding_1d(dim, position):
     return x
 
 
-@amp.autocast(enabled=False)
+@torch.amp.autocast("cuda", enabled=False)
 def rope_params(max_seq_len, dim, theta=10000):
     assert dim % 2 == 0
     freqs = torch.outer(
@@ -111,7 +111,7 @@ def rope_params(max_seq_len, dim, theta=10000):
     return freqs
 
 
-@amp.autocast(enabled=False)
+@torch.amp.autocast("cuda", enabled=False)
 def rope_apply(x, grid_sizes, freqs, start=None):
     n, c = x.size(2), x.size(3) // 2
 
