@@ -76,7 +76,7 @@ def run_cases(work_dir: Path, options: dict) -> None:
 
 if __name__ == "__main__":
     # Edit these paths directly, then run: python scripts/reconstruction/run_cases.py
-    WORK_DIR = "/home/z00566689/dev/mnt/jiang_test/00_0825_test"
+    WORK_DIR = "/home/z00566689/dev/mnt/jiang_test/00_1019_livephoto_test"
     CONFIG_PATH = None  # Optional JSON file; None uses DEFAULT_ARGS above.
 
     config = (json.loads(Path(CONFIG_PATH).read_text(encoding="utf-8"))
