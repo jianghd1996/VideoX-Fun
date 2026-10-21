@@ -28,7 +28,17 @@ def main():
     parser.add_argument("--steps", type=int, default=8)
     parser.add_argument("--fps", type=int, default=30)
     args = parser.parse_args()
-    work_dir = Path("/home/z00566689/dev/mnt/jiang_test/00_1021_test")\n    if args.case is not None:\n        cases = [args.case.resolve()]\n    elif (work_dir / "image").is_dir():\n        cases = [work_dir]\n    else:\n        cases = [p for p in sorted(work_dir.iterdir()) if p.is_dir() and (p / "image").is_dir()\n                 and p.name not in {"collect", "test"} and "." not in p.name]\n    if not cases:\n        raise ValueError(f"No cases found under {work_dir}")
+    work_dir = Path("/home/z00566689/dev/mnt/jiang_test/00_1021_test")
+    if args.case is not None:
+        cases = [args.case.resolve()]
+    elif (work_dir / "image").is_dir():
+        cases = [work_dir]
+    else:
+        cases = [p for p in sorted(work_dir.iterdir())
+                 if p.is_dir() and (p / "image").is_dir()
+                 and p.name not in {"collect", "test"} and "." not in p.name]
+    if not cases:
+        raise ValueError(f"No cases found under {work_dir}")
     rank = int(os.environ.get("RANK", "0"))
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
@@ -99,4 +109,33 @@ if __name__ == "__main__":
 
 
 if __name__ == "__main__":
-    main()
+    main()    for case in cases:
+        prompt_path = case / "prompt.txt"
+        if not prompt_path.is_file() or not prompt_path.read_text(encoding="utf-8").strip():
+            raise FileNotFoundError(f"Provide a nonempty {prompt_path}")
+        images = sorted(p for p in (case / "image").iterdir()
+                        if p.suffix.lower() in (".jpg", ".jpeg"))
+        if len(images) != 1:
+            raise ValueError(f"Expected one JPG in {case / 'image'}, got {len(images)}")
+    dist.destroy_process_group()
+
+
+if __name__ == "__main__":
+    main()    for case in cases:\n        if not (case / "prompt.txt").is_file() or not (case / "prompt.txt").read_text(encoding="utf-8").strip():
+            raise FileNotFoundError(f"Provide a nonempty {case / 'prompt.txt'} before the distributed benchmark")
+        images = sorted(p for p in (case / "image").iterdir() if p.suffix.lower() in (".jpg", ".jpeg"))
+        if len(images) != 1:
+            raise ValueError(f"Expected one JPG in {case / 'image'}, got {len(images)}")
+    dist.destroy_process_group()
+
+
+if __name__ == "__main__":
+    main()    for case in cases:
+        prompt_path = case / "prompt.txt"
+        if not prompt_path.is_file() or not prompt_path.read_text(encoding="utf-8").strip():
+            raise FileNotFoundError(f"Provide a nonempty {prompt_path}")
+        images = sorted(p for p in (case / "image").iterdir()
+                        if p.suffix.lower() in (".jpg", ".jpeg"))
+        if len(images) != 1:
+            raise ValueError(f"Expected one JPG in {case / 'image'}, got {len(images)}")
+\n\nif __name__ == "__main__":\n    main()\n
