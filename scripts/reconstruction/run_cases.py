@@ -32,7 +32,7 @@ DEFAULT_ARGS = {
     "gen_vid_fps": 30,
     "world_size": 1,
     "multi_gpu": False,  # True: same-case sequence parallelism via torchrun (2 GPUs)
-    "run_3dgs_iter": False,
+    "run_3dgs_iter": True,
     "mode": "scene",
     "crop_ratio": 1.0,
     "max_frames": 121,
@@ -48,6 +48,7 @@ DEFAULT_ARGS = {
     "prompt_embeds_path": None,  # use T5 text encoder for benchmark
     "lightvae_path": str(Path(__file__).resolve().parent / "Cloud_Models/transformer_w_skybox_sla/MG-LightVAE.pth"),
     "external_code_root": str(Path(__file__).resolve().parent / "DA3_custom"),
+    "dense_code_root": str(Path(__file__).resolve().parent),
     "da3_model_path": str(Path(__file__).resolve().parent / "Cloud_Models/Saliency-Face-DA3/besthumanmodel_lr1e_6_ckpt2.pt"),
     "da3_factory": None,
     "dense_adapter": None,
