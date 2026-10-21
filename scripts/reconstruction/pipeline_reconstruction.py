@@ -100,6 +100,7 @@ class SparseRecon:
                 circle=bool(self.args.get("circle", False)),
                 max_frames=int(self.args.get("max_frames", 121)),
                 external_code_root=Path(root),
+                dense_code_root=Path(self.args.get("dense_code_root") or Path(__file__).resolve().parent),
                 da3_model_path=(Path(self.args["da3_model_path"])
                                 if self.args.get("da3_model_path") else None),
             ),
