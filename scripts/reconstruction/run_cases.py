@@ -33,6 +33,7 @@ DEFAULT_ARGS = {
     "max_frames": 121,
     "is_livephoto": True,
     "reuse_video": False,
+    "resume_stages": False,
     "video_adapter": None,
     "lora_path": str(Path(__file__).resolve().parent / "Cloud_Models/Wan2.2-TI2V-5B/lora_ckpts_single8/checkpoint-9600.safetensors"),
     "lora_weight": 0.55,
