@@ -10,6 +10,7 @@ from contextlib import redirect_stdout, redirect_stderr
 from datetime import datetime
 import traceback
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -30,6 +31,7 @@ DEFAULT_ARGS = {
     "gen_vid_infer_step": 8,
     "gen_vid_fps": 30,
     "world_size": 1,
+    "multi_gpu": False,  # True: same-case sequence parallelism via torchrun (2 GPUs)
     "run_3dgs_iter": True,
     "mode": "scene",
     "crop_ratio": 1.0,
@@ -110,6 +112,29 @@ def run_cases(work_dir: Path, options: dict) -> None:
                      and p.name not in skip_list and "." not in p.name]
             if not cases:
                 raise ValueError(f"No matching cases under {work_dir}")
+
+            rank = int(os.environ.get("RANK", "0"))
+            distributed_requested = bool(opts.get("multi_gpu", False))
+            launched_world_size = int(os.environ.get("WORLD_SIZE", "1"))
+            if distributed_requested:
+                if launched_world_size != 2:
+                    raise RuntimeError("multi_gpu=True requires torchrun --nproc_per_node=2")
+                opts["world_size"] = launched_world_size
+                import torch
+                torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+            elif launched_world_size > 1:
+                raise RuntimeError("torchrun detected but multi_gpu=False; enable the multi_gpu switch")
+            if distributed_requested and rank != 0:
+                # Secondary rank participates only in Wan sequence-parallel video inference.
+                # Never writes the case journal, sampled frames, or reconstruction outputs.
+                worker_opts = {**opts, "run_captioner": False, "run_DA3": False,
+                               "run_3dgs_iter": False}
+                recon_worker = SparseRecon(json.dumps(worker_opts))
+                for case in cases:
+                    print(f"[GPU WORKER rank={rank}] {case}", flush=True)
+                    recon_worker.pipeline.set_case(case)
+                    recon_worker.pipeline.stage_video(reuse=False)
+                return
 
             summary = {}
             recon = None
