@@ -20,8 +20,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 DEFAULT_ARGS = {
     "run_DA3": True,
     "use_enhance_crop": True,
-    "use_view_extrapolation": True,
-    "run_gen_video": True,
+    "use_view_extrapolation": False,
+    "run_gen_video": False,
     "run_captioner": False,  # benchmark: skip image captioning
     "captioner_cpu_swap": True,
     "captioner_model_path": None,
@@ -31,12 +31,12 @@ DEFAULT_ARGS = {
     "gen_vid_infer_step": 8,
     "gen_vid_fps": 30,
     "world_size": 1,
-    "multi_gpu": True,  # True: same-case sequence parallelism via torchrun (2 GPUs)
-    "run_3dgs_iter": True,
+    "multi_gpu": False,  # True: same-case sequence parallelism via torchrun (2 GPUs)
+    "run_3dgs_iter": False,
     "mode": "scene",
     "crop_ratio": 1.0,
     "max_frames": 121,
-    "is_livephoto": True,
+    "is_livephoto": False,
     "reuse_video": False,
     "resume_stages": False,
     "video_adapter": None,
@@ -47,7 +47,7 @@ DEFAULT_ARGS = {
     "condition_vae_encode_frames": 49,  # only used when condition_vae_fast_encode=True
     "prompt_embeds_path": None,  # use T5 text encoder for benchmark
     "lightvae_path": str(Path(__file__).resolve().parent / "Cloud_Models/transformer_w_skybox_sla/MG-LightVAE.pth"),
-    "external_code_root": None,
+    "external_code_root": str(Path(__file__).resolve().parents[3] / "DA3_custom"),
     "da3_model_path": None,
     "da3_factory": None,
     "dense_adapter": None,
@@ -108,6 +108,18 @@ def run_cases(work_dir: Path, options: dict) -> None:
             print(f"\\n{'=' * 40} RUN {datetime.now().isoformat(timespec='seconds')} {'=' * 40}", flush=True)
             print(f"[LOG] {log_path}", flush=True)
             opts = {**DEFAULT_ARGS, **options}
+            da3_root = Path(opts["external_code_root"]).expanduser().resolve()
+            if not (da3_root / "DA3" / "run_da3_full_crop_dev.py").is_file():
+                raise FileNotFoundError(f"DA3_custom runner not found: {da3_root}")
+            for import_root in (da3_root / "src", da3_root):
+                if str(import_root) not in sys.path:
+                    sys.path.insert(0, str(import_root))
+            import DA3.run_da3_full_crop_dev as da3_module
+            print(f"[DA3 IMPORT] {da3_module.__file__}", flush=True)
+            if not Path(da3_module.__file__).resolve().is_relative_to(da3_root):
+                raise ImportError("DA3 resolved outside DA3_custom")
+            opts["da3_backend"] = "legacy"
+            opts["da3_factory"] = None
             cases = [work_dir] if (work_dir / "image").is_dir() else [
                 p for p in sorted(work_dir.iterdir()) if p.is_dir() and (p / "image").is_dir()
             ]
@@ -143,6 +155,11 @@ def run_cases(work_dir: Path, options: dict) -> None:
                     recon_worker.pipeline.stage_video(reuse=False)
                 return
 
+            if not opts["run_gen_video"]:
+                for case in cases:
+                    frame_dir = case / "reconstruction" / "image"
+                    if not frame_dir.is_dir() or not any(frame_dir.glob("*.jpg")):
+                        raise FileNotFoundError(f"DA3-only needs sampled JPG frames: {frame_dir}")
             summary = {}
             recon = None
             try:

@@ -64,6 +64,29 @@ class SparseRecon:
             "predict_ti2v:Wan_5b" if self.args.get("run_gen_video", True) else None
         )
         da3_spec = self.args.get("da3_factory")
+        da3_backend = self.args.get("da3_backend", "legacy")
+        if da3_backend not in ("legacy", "official"):
+            raise ValueError(f"Unsupported da3_backend: {da3_backend}")
+        if da3_backend == "official" and da3_spec:
+            raise ValueError("Use either da3_backend=official or da3_factory, not both")
+        da3_instance = None
+        if da3_backend == "official" and self.args.get("run_DA3", True):
+            try:
+                from .da3_official_adapter import create_official_da3
+            except ImportError:
+                from da3_official_adapter import create_official_da3
+            da3_repo_root = self.args.get("da3_repo_root")
+            da3_model_path = self.args.get("da3_model_path")
+            if not da3_repo_root or not da3_model_path:
+                raise ValueError("official DA3 requires da3_repo_root and da3_model_path")
+            da3_instance = create_official_da3(
+                repo_root=da3_repo_root,
+                model_path=da3_model_path,
+                process_res=int(self.args.get("da3_process_res", 504)),
+                process_res_method=self.args.get("da3_process_res_method", "upper_bound_resize"),
+                preprocess_workers=int(self.args.get("da3_preprocess_workers", 8)),
+                profile=bool(self.args.get("da3_profile", True)),
+            )
         dense_spec = self.args.get("dense_adapter")
         self.pipeline = ReconstructionPipeline(
             ReconstructionConfig(
@@ -81,7 +104,7 @@ class SparseRecon:
                                 if self.args.get("da3_model_path") else None),
             ),
             generate_video=(load_callable(video_spec)() if video_spec else None),
-            run_DA3=load_callable(da3_spec)() if da3_spec else None,
+            run_DA3=da3_instance if da3_instance is not None else (load_callable(da3_spec)() if da3_spec else None),
             recon_iter_full=load_callable(dense_spec) if dense_spec else None,
         )
         self.pipeline.captioner_cpu_swap = bool(self.args.get("captioner_cpu_swap", False))
