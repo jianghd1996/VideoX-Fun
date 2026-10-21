@@ -132,7 +132,7 @@ class SparseRecon:
 
         def colmap_valid():
             base = pipeline.colmap_path
-            for folder in (base / "0", base):
+            for folder in (base,):
                 if all((folder / f"{name}.txt").is_file() for name in ("cameras", "images", "points3D")):
                     if (folder / "images.txt").stat().st_size > 0:
                         return True
