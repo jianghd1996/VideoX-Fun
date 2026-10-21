@@ -52,7 +52,7 @@ def torch_dfs(model: nn.Module, parent_name='root'):
     return modules, module_names
 
 
-@amp.autocast(enabled=False)
+@torch.amp.autocast("cuda", enabled=False)
 @torch.compiler.disable()
 def s2v_rope_apply(x, grid_sizes, freqs, start=None):
     dtype = x.dtype
