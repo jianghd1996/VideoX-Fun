@@ -405,7 +405,10 @@ class Wan_5b:
             mask_video=input_video_mask, shift=shift,
         ).videos
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        save_videos_grid(sample, output_path, fps=int(getattr(args, "fps", 30)))
+        # In sequence-parallel inference all ranks execute the model, but only
+        # rank zero writes the shared video file.
+        if not (torch.distributed.is_available() and torch.distributed.is_initialized()) or torch.distributed.get_rank() == 0:
+            save_videos_grid(sample, output_path, fps=int(getattr(args, "fps", 30)))
         del sample
         return output_path
 
