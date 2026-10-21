@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -35,7 +37,21 @@ class SparseRecon:
             raise TypeError("SparseRecon expects JSON string or dict")
         self.args = json_args.copy()
         root = self.args.get("external_code_root")
-        video_spec = self.args.get("video_adapter")
+        video_root = Path(self.args.get("video_code_root") or
+                          (Path(__file__).resolve().parent / "VideoX-Fun")).resolve()
+        if not video_root.is_dir():
+            video_root = Path(__file__).resolve().parents[2]
+        if str(video_root) not in sys.path:
+            sys.path.insert(0, str(video_root))
+        os.environ["SINGLERECON_WORLD_SIZE"] = str(self.args.get("world_size", 1))
+        os.environ["SINGLERECON_FPS"] = str(self.args.get("gen_vid_fps", 30))
+        if self.args.get("lora_path"):
+            os.environ["SINGLERECON_LORA_PATH"] = str(self.args["lora_path"])
+        if self.args.get("lora_weight") is not None:
+            os.environ["SINGLERECON_LORA_WEIGHT"] = str(self.args["lora_weight"])
+        video_spec = self.args.get("video_adapter") or (
+            "predict_ti2v:video_generator" if self.args.get("run_gen_video", True) else None
+        )
         da3_spec = self.args.get("da3_factory")
         dense_spec = self.args.get("dense_adapter")
         self.pipeline = ReconstructionPipeline(
