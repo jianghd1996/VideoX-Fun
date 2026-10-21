@@ -675,7 +675,7 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
                     })
                 # Shorter input sequences must respect temporal compression alignment.
                 # Compare their produced prefix to the corresponding full-encode prefix.
-                for _n in (5, 9, 17, 33):
+                for _n in (5, 9, 17, 33, 49, 65, 81, 97):
                     if _n >= masked_video.shape[2]:
                         continue
                     try:
@@ -685,14 +685,27 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
                             )[0].mode().detach().float()
                         _k = min(_short.shape[2], _zt)
                         _delta = (_short[:, :, :_k] - _z[:, :, :_k]).abs()
+                        # Candidate: preserve exact prefix, repeat its final latent.
+                        _candidate = torch.cat(
+                            [_short[:, :, :_k],
+                             _short[:, :, _k-1:_k].expand(-1, -1, _zt-_k, -1, -1)],
+                            dim=2
+                        )
+                        _full_delta = (_candidate - _z).abs()
+                        _tail_delta = _full_delta[:, :, _k:]
                         _stats["prefix_tests"].append({
                             "input_frames": _n,
                             "latent_frames": int(_short.shape[2]),
                             "prefix_mae": float(_delta.mean().item()),
                             "prefix_max_abs": float(_delta.max().item()),
                             "prefix_relative_mae": float(_delta.mean().item() / _scale),
+                            "repeat_tail_full_mae": float(_full_delta.mean().item()),
+                            "repeat_tail_full_relative_mae": float(_full_delta.mean().item() / _scale),
+                            "repeat_tail_max_abs": float(_full_delta.max().item()),
+                            "repeat_tail_mae": float(_tail_delta.mean().item()),
+                            "repeat_tail_relative_mae": float(_tail_delta.mean().item() / _scale),
                         })
-                        del _short, _delta
+                        del _short, _delta, _candidate, _full_delta, _tail_delta
                     except Exception as _exc:
                         _stats["prefix_tests"].append({
                             "input_frames": _n, "error": str(_exc)
