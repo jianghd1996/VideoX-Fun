@@ -716,8 +716,17 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
                     pbar.update(1)
 
         if output_type == "pil":
-            video = self.decode_latents(latents)
-            video = torch.from_numpy(video)
+            # Ulysses produces replicated final latents. Decode only on rank 0:
+            # decoding and GPU-to-CPU transfer on worker ranks are wasted.
+            import torch.distributed as dist
+            is_worker = (
+                dist.is_available() and dist.is_initialized()
+                and dist.get_world_size() > 1 and dist.get_rank() != 0
+            )
+            if is_worker:
+                video = None
+            else:
+                video = torch.from_numpy(self.decode_latents(latents))
         else:
             video = latents
 
