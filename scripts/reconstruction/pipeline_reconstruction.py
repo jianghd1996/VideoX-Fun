@@ -15,7 +15,7 @@ try:
     )
 except ImportError:
     from multistage_pipeline import (
-        ReconstructionConfig, ReconstructionPipeline, load_callable, _synchronize_cuda
+        ReconstructionConfig, ReconstructionPipeline, FRAME_INDICES, load_callable, _synchronize_cuda
     )
 
 
@@ -170,7 +170,7 @@ class SparseRecon:
             for enabled, label, operation in operations:
                 if not enabled:
                     continue
-                if stage_valid(label) and (stages.get(label, {}).get("status") == "ok" or label != "dense"):
+                if self.args.get("resume_stages", False) and stage_valid(label) and (stages.get(label, {}).get("status") == "ok" or label != "dense"):
                     print(f"[RESUME] {pipeline.case_dir.name}: skip completed {label}", flush=True)
                     stages[label] = {"status": "ok", "reused": True}
                     persist()
