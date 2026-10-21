@@ -160,7 +160,7 @@ class SparseRecon:
 
         operations = (
             (bool(self.args.get("run_captioner", True) and self.args.get("run_gen_video", True)), "caption", pipeline.stage_caption),
-            (bool(self.args.get("run_gen_video", True)), "video_and_sampling", lambda: pipeline.stage_video(reuse=video_valid())),
+            (bool(self.args.get("run_gen_video", True)), "video_and_sampling", lambda: pipeline.stage_video(reuse=bool(self.args.get("resume_stages", False)) and video_valid())),
             (bool(self.args.get("run_DA3", True)), "da3", pipeline.stage_da3),
             (bool(self.args.get("run_3dgs_iter", True)), "dense", pipeline.stage_dense),
         )
