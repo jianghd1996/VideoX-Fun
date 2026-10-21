@@ -51,6 +51,9 @@ class SparseRecon:
         if self.args.get("lora_weight") is not None:
             os.environ["SINGLERECON_LORA_WEIGHT"] = str(self.args["lora_weight"])
         os.environ["SINGLERECON_USE_LIGHTVAE"] = "1" if self.args.get("use_lightvae", False) else "0"
+        condition_frames = int(self.args.get("condition_vae_encode_frames", 49)) if self.args.get("condition_vae_fast_encode", False) else 0
+        os.environ["SINGLERECON_CONDITION_PREFIX_FRAMES"] = str(condition_frames)
+        print(f"[CONDITION VAE] fast_encode={condition_frames > 0}, encode_frames={condition_frames or 121}", flush=True)
         if self.args.get("lightvae_path"):
             os.environ["SINGLERECON_LIGHTVAE_PATH"] = str(self.args["lightvae_path"])
         if self.args.get("prompt_embeds_path"):
