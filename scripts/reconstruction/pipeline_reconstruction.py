@@ -41,7 +41,8 @@ class SparseRecon:
         self.pipeline = ReconstructionPipeline(
             ReconstructionConfig(
                 case_dir=Path("."),
-                view_num=int(self.args.get("view_num", 40)),
+                view_num=int(self.args.get("view_num", 121)),
+                recon_view_num=int(self.args.get("recon_view_num", 40)),
                 crop_ratio=float(self.args.get("crop_ratio", 1.0)),
                 use_view_extrapolation=bool(self.args.get("use_view_extrapolation", False)),
                 is_livephoto=bool(self.args.get("is_livephoto", True)),
