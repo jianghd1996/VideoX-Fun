@@ -274,7 +274,7 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
         if prompt is not None:
             batch_size = len(prompt)
         else:
-            batch_size = prompt_embeds.shape[0]
+            batch_size = len(prompt_embeds) if isinstance(prompt_embeds, (list, tuple)) else prompt_embeds.shape[0]
 
         if prompt_embeds is None:
             prompt_embeds = self._get_t5_prompt_embeds(
@@ -531,7 +531,7 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
         elif prompt is not None and isinstance(prompt, list):
             batch_size = len(prompt)
         else:
-            batch_size = prompt_embeds.shape[0]
+            batch_size = len(prompt_embeds) if isinstance(prompt_embeds, (list, tuple)) else prompt_embeds.shape[0]
 
         device = self._execution_device
         weight_dtype = self.text_encoder.dtype if self.text_encoder is not None else self.transformer.dtype
