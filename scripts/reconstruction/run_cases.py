@@ -22,7 +22,7 @@ DEFAULT_ARGS = {
     "use_enhance_crop": True,
     "use_view_extrapolation": True,
     "run_gen_video": True,
-    "run_captioner": True,
+    "run_captioner": False,  # benchmark: skip image captioning
     "captioner_cpu_swap": True,
     "captioner_model_path": None,
     "captioner_code_root": None,
@@ -31,7 +31,7 @@ DEFAULT_ARGS = {
     "gen_vid_infer_step": 8,
     "gen_vid_fps": 30,
     "world_size": 1,
-    "multi_gpu": False,  # True: same-case sequence parallelism via torchrun (2 GPUs)
+    "multi_gpu": True,  # True: same-case sequence parallelism via torchrun (2 GPUs)
     "run_3dgs_iter": True,
     "mode": "scene",
     "crop_ratio": 1.0,
@@ -43,6 +43,7 @@ DEFAULT_ARGS = {
     "lora_path": str(Path(__file__).resolve().parent / "Cloud_Models/Wan2.2-TI2V-5B/lora_ckpts_single8/checkpoint-9600.safetensors"),
     "lora_weight": 0.55,
     "use_lightvae": True,
+    "prompt_embeds_path": str(Path(__file__).resolve().parent / "Cloud_Models/Wan2.2-Fun-5B-Control/prompt.pt"),
     "lightvae_path": str(Path(__file__).resolve().parent / "Cloud_Models/transformer_w_skybox_sla/MG-LightVAE.pth"),
     "external_code_root": None,
     "da3_model_path": None,
