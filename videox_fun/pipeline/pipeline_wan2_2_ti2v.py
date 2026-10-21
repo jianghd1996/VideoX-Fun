@@ -627,10 +627,26 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
             mask_condition = rearrange(mask_condition, "(b f) c h w -> b c f h w", f=video_length)
 
             masked_video = init_video * (torch.tile(mask_condition, [1, 3, 1, 1, 1]) < 0.5)
+            # Optional accelerated condition encoding for first-frame-only I2V.
+            # Off by default; compare 33/49/65 against the full 121-frame baseline.
+            import os as _condition_os
+            _condition_prefix_frames = int(_condition_os.environ.get("SINGLERECON_CONDITION_PREFIX_FRAMES", "0"))
+            _condition_use_prefix = (
+                _condition_prefix_frames > 0
+                and _condition_prefix_frames < masked_video.shape[2]
+                and (_condition_prefix_frames - 1) % 4 == 0
+            )
+            if _condition_use_prefix:
+                # Only valid for the single-known-first-frame mask pattern.
+                _known_first = bool((mask_condition[:, :, :1] < 0.5).all().item())
+                _unknown_rest = bool((mask_condition[:, :, 1:] >= 0.5).all().item())
+                if not (_known_first and _unknown_rest):
+                    print("[CONDITION PREFIX] unsupported mask; using full encode", flush=True)
+                    _condition_use_prefix = False
             _t_vae_encode_start = _sync_clock()
             _, masked_video_latents = self.prepare_mask_latents(
                 None,
-                masked_video,
+                masked_video[:, :, :_condition_prefix_frames] if _condition_use_prefix else masked_video,
                 batch_size,
                 height,
                 width,
@@ -640,6 +656,19 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
                 do_classifier_free_guidance,
                 noise_aug_strength=None,
             )
+            if _condition_use_prefix:
+                _full_latent_frames = (masked_video.shape[2] - 1) // self.vae.config.temporal_compression_ratio + 1
+                _encoded_frames = masked_video_latents.shape[2]
+                if _encoded_frames > _full_latent_frames:
+                    raise ValueError("Condition prefix produced more latent frames than target")
+                masked_video_latents = torch.cat([
+                    masked_video_latents,
+                    masked_video_latents[:, :, -1:].expand(
+                        -1, -1, _full_latent_frames - _encoded_frames, -1, -1
+                    ),
+                ], dim=2)
+                print(f"[CONDITION PREFIX] input_frames={_condition_prefix_frames} "
+                      f"latent_frames={_encoded_frames}->{_full_latent_frames}", flush=True)
             
             # Optional diagnostic: analyze temporal redundancy of the actual VAE
             # condition latents. This never changes the latents used for generation.
