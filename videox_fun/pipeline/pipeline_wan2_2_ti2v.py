@@ -541,6 +541,12 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance = guidance_scale > 1.0
 
+        import time
+        def _sync_clock():
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(device)
+            return time.perf_counter()
+        _t_text_start = _sync_clock()
         # 3. Encode input prompt
         prompt_embeds, negative_prompt_embeds = self.encode_prompt(
             prompt,
@@ -556,6 +562,9 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
             in_prompt_embeds = negative_prompt_embeds + prompt_embeds
         else:
             in_prompt_embeds = prompt_embeds
+
+        _t_text_end = _sync_clock()
+        print(f"[VIDEO TIMING][rank={int(__import__('os').environ.get('RANK', '0'))}] text_encode={_t_text_end - _t_text_start:.3f}s", flush=True)
 
         # 4. Prepare timesteps
         if isinstance(self.scheduler, FlowMatchEulerDiscreteScheduler):
@@ -646,6 +655,7 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
         # 7. Denoising loop
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
         self.transformer.num_inference_steps = num_inference_steps
+        _t_diffusion_start = _sync_clock()
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 self.transformer.current_steps = i
@@ -715,6 +725,9 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
                 if comfyui_progressbar:
                     pbar.update(1)
 
+        _t_diffusion_end = _sync_clock()
+        print(f"[VIDEO TIMING][rank={int(__import__('os').environ.get('RANK', '0'))}] diffusion={_t_diffusion_end - _t_diffusion_start:.3f}s", flush=True)
+        _t_decode_start = _sync_clock()
         if output_type == "pil":
             # Ulysses produces replicated final latents. Decode only on rank 0:
             # decoding and GPU-to-CPU transfer on worker ranks are wasted.
@@ -729,6 +742,9 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
                 video = torch.from_numpy(self.decode_latents(latents))
         else:
             video = latents
+
+        _t_decode_end = _sync_clock()
+        print(f"[VIDEO TIMING][rank={int(__import__('os').environ.get('RANK', '0'))}] vae_decode_and_cpu_copy={_t_decode_end - _t_decode_start:.3f}s", flush=True)
 
         # Offload all models
         self.maybe_free_model_hooks()
