@@ -36,7 +36,7 @@ from videox_fun.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 from videox_fun.utils.fp8_optimization import (convert_model_weight_to_float8,
                                                convert_weight_dtype_wrapper,
                                                replace_parameters_by_name)
-from videox_fun.utils.lora_utils import merge_lora, unmerge_lora
+from videox_fun.utils.lora_utils_new import merge_lora, unmerge_lora
 from videox_fun.utils.utils import (filter_kwargs, get_image_to_video_latent,
                                     save_videos_grid)
 
