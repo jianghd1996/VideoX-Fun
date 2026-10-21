@@ -65,7 +65,7 @@ ulysses_degree      = int(os.environ.get("SINGLERECON_WORLD_SIZE", "1"))
 ring_degree         = 1
 # Use FSDP to save more GPU memory in multi gpus.
 fsdp_dit            = False
-fsdp_text_encoder   = True
+fsdp_text_encoder   = False
 # Compile will give a speedup in fixed resolution and need a little GPU memory. 
 # The compile_dit is not compatible with the fsdp_dit and sequential_cpu_offload.
 compile_dit         = False
@@ -248,13 +248,18 @@ class Wan_5b:
             os.path.join(model_name, config['text_encoder_kwargs'].get('tokenizer_subpath', 'tokenizer')),
         )
         
-        # Get Text encoder
-        text_encoder = WanT5EncoderModel.from_pretrained(
-            os.path.join(model_name, config['text_encoder_kwargs'].get('text_encoder_subpath', 'text_encoder')),
-            additional_kwargs=OmegaConf.to_container(config['text_encoder_kwargs']),
-            low_cpu_mem_usage=True,
-            torch_dtype=weight_dtype,
-        )
+        # Optional precomputed embedding benchmark: skip loading T5 entirely.
+        precomputed_path = os.environ.get("SINGLERECON_PROMPT_EMBEDS_PATH")
+        if precomputed_path:
+            text_encoder = None
+            tokenizer = None
+        else:
+            text_encoder = WanT5EncoderModel.from_pretrained(
+                os.path.join(model_name, config['text_encoder_kwargs'].get('text_encoder_subpath', 'text_encoder')),
+                additional_kwargs=OmegaConf.to_container(config['text_encoder_kwargs']),
+                low_cpu_mem_usage=True,
+                torch_dtype=weight_dtype,
+            )
         
         # Get Scheduler
         Chosen_Scheduler = scheduler_dict = {
@@ -379,13 +384,14 @@ class Wan_5b:
         if self.pipeline is None:
             raise RuntimeError("Call video_generator.load() before inference")
         image_path, output_path = str(image_path), str(output_path)
+        precomputed_path = os.environ.get("SINGLERECON_PROMPT_EMBEDS_PATH")
         prompt_file = os.path.join(os.path.dirname(os.path.dirname(image_path)), "prompt.txt")
         if os.path.isfile(prompt_file):
             with open(prompt_file, "r", encoding="utf-8") as f:
                 prompt = f.read().strip()
         else:
             prompt = os.environ.get("SINGLERECON_DEFAULT_PROMPT", "")
-        if not prompt:
+        if not prompt and not precomputed_path:
             raise ValueError(f"Missing prompt.txt and SINGLERECON_DEFAULT_PROMPT for {image_path}")
         if (num_frames - 1) % self.vae.config.temporal_compression_ratio:
             raise ValueError("Frame count must match VAE temporal compression")
@@ -397,12 +403,24 @@ class Wan_5b:
         input_video, input_video_mask, _ = get_image_to_video_latent(
             image_path, None, video_length=num_frames, sample_size=[height, width])
         generator = torch.Generator(device=self.device).manual_seed(seed)
+        precomputed_kwargs = {}
+        if precomputed_path:
+            embeddings = torch.load(precomputed_path, map_location="cpu", weights_only=True)
+            embedding = embeddings["prompt"]
+            if embedding.ndim == 2 and embedding.shape[0] == 1 and embedding.shape[1] == 4096:
+                # Pooled [1,4096] vector is NOT a proper T5 token sequence.
+                # One-token conversion is strictly for latency benchmarking.
+                print("[BENCHMARK WARNING] pooled [1,4096] prompt expanded to one token; generation semantics differ from T5.", flush=True)
+                embedding = embedding.unsqueeze(1)
+            if embedding.ndim != 3 or embedding.shape[0] != 1 or embedding.shape[-1] != 4096:
+                raise ValueError(f"Expected prompt [1,seq,4096], got {tuple(embedding.shape)}")
+            precomputed_kwargs["prompt_embeds"] = [embedding[0].to(device=self.device, dtype=weight_dtype)]
         sample = self.pipeline(
-            prompt, num_frames=num_frames, negative_prompt=negative_prompt,
+            None if precomputed_path else prompt, num_frames=num_frames, negative_prompt=negative_prompt,
             height=height, width=width, generator=generator,
             guidance_scale=guidance_scale, num_inference_steps=int(getattr(args, "num_inference_steps", num_inference_steps)),
             boundary=self.boundary, video=input_video,
-            mask_video=input_video_mask, shift=shift,
+            mask_video=input_video_mask, shift=shift, **precomputed_kwargs,
         ).videos
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         # In sequence-parallel inference all ranks execute the model, but only
