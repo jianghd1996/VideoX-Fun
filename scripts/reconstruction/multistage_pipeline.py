@@ -124,7 +124,7 @@ class ReconstructionPipeline:
         """Load all requested backends before case timing starts."""
         times = {}
         for name, enabled, load in (
-            ("video", start_stage <= 1 <= end_stage, lambda: None),
+            ("video", start_stage <= 1 <= end_stage, self._preload_video),
             ("da3", start_stage <= 2 <= end_stage, self._preload_da3),
             ("dense", start_stage <= 3 <= end_stage, self._preload_dense),
         ):
@@ -134,6 +134,14 @@ class ReconstructionPipeline:
                 times[name] = time.perf_counter() - t0
                 print(f"[PRELOAD] {name}: {times[name]:.2f}s", flush=True)
         return times
+
+    def _preload_video(self) -> None:
+        if self.generate_video is None:
+            raise RuntimeError("Video adapter not provided")
+        # An adapter can expose load() to initialize and retain its model once.
+        preload = getattr(self.generate_video, "load", None)
+        if callable(preload):
+            preload()
 
     def _preload_da3(self) -> None:
         if self.run_DA3 is None and self.args.external_code_root is not None:
@@ -265,8 +273,8 @@ def _synchronize_cuda() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("case_dir", type=Path)
-    parser.add_argument("--video-adapter", help="module:function(image_path, output_path, num_frames)")
+    parser.add_argument("case_dir", type=Path, nargs="?", help="Case directory; optional with --cases-root")
+    parser.add_argument("--video-adapter", help="module:object with __call__ and optional load() for preload")
     parser.add_argument("--da3-factory", help="module:function() -> object with infer(args=...)")
     parser.add_argument("--dense-adapter", help="module:function(work_dir, export_dir, mode, circle, max_frames)")
     parser.add_argument("--start-stage", type=int, default=1)
@@ -284,8 +292,10 @@ def main() -> None:
     parser.add_argument("--cases-root", type=Path, help="Run all immediate child cases, reusing preloaded models")
     parser.add_argument("--da3-model-path", type=Path, help="Override default DA3 checkpoint")
     args = parser.parse_args()
+    if args.case_dir is None and args.cases_root is None:
+        parser.error("Provide case_dir or --cases-root")
     cfg = ReconstructionConfig(
-        case_dir=args.case_dir, view_num=args.view_num, crop_ratio=args.crop_ratio,
+        case_dir=args.case_dir or args.cases_root, view_num=args.view_num, crop_ratio=args.crop_ratio,
         use_view_extrapolation=args.use_view_extrapolation,
         is_livephoto=not args.no_livephoto, mode=args.mode,
         circle=args.circle, max_frames=args.max_frames,
