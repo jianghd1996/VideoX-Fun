@@ -182,7 +182,7 @@ class ReconstructionPipeline:
         if self.captioner_cpu_swap:
             self.img_captioner.model.to("cuda")
         try:
-            prompt = self.img_captioner.read_image_caption(str(self.input_image()))
+            prompt = self.img_captioner.read_image_caption(str(self.source_img_path))
             if not isinstance(prompt, str) or not prompt.strip():
                 raise ValueError("ImagesCaptioner returned an empty caption")
             prompt = prompt.strip()
