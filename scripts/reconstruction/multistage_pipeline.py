@@ -103,7 +103,7 @@ class ReconstructionPipeline:
         self.gen_vid_path = self.case_dir / "reconstruction"
         self.img_path = self.gen_vid_path / "image"
         self.video_path = self.gen_vid_path / "generated.mp4"
-        self.colmap_path = self.gen_vid_path / "sparse"
+        self.colmap_path = self.gen_vid_path / "sparse" / "0"
         self.gs_render_vid_path = self.gen_vid_path / "gs_render.mp4"
         self.export_dir = self.gen_vid_path / "dense"
         self.max_frames = config.max_frames
@@ -120,7 +120,7 @@ class ReconstructionPipeline:
         self.gen_vid_path = self.case_dir / "reconstruction"
         self.img_path = self.gen_vid_path / "image"
         self.video_path = self.gen_vid_path / "generated.mp4"
-        self.colmap_path = self.gen_vid_path / "sparse"
+        self.colmap_path = self.gen_vid_path / "sparse" / "0"
         self.gs_render_vid_path = self.gen_vid_path / "gs_render.mp4"
         self.export_dir = self.gen_vid_path / "dense"
 
