@@ -3,7 +3,7 @@
 
 Run from SingleRecon:
   CUDA_VISIBLE_DEVICES=4,5 torchrun --standalone --nproc_per_node=2 run_case_multi_gpu.py \
-    --case /home/z00566689/dev/mnt/jiang_test/00_1021_test/CASE_NAME
+
 
 Requires an existing nonempty case/prompt.txt. This benchmark measures video
 generation only (including VAE decode and MP4 encoding on rank 0).
@@ -20,7 +20,7 @@ from pathlib import Path
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--case", type=Path, required=True)
+    parser.add_argument("--case", type=Path, default=None, help="Optional single-case override")
     parser.add_argument("--video-root", type=Path, default=Path(__file__).resolve().parent / "VideoX-Fun")
     parser.add_argument("--lora-path", type=Path, default=Path(__file__).resolve().parent / "Cloud_Models/Wan2.2-TI2V-5B/lora_ckpts_single8/checkpoint-9600.safetensors")
     parser.add_argument("--lightvae-path", type=Path, default=Path(__file__).resolve().parent / "Cloud_Models/transformer_w_skybox_sla/MG-LightVAE.pth")
@@ -28,17 +28,12 @@ def main():
     parser.add_argument("--steps", type=int, default=8)
     parser.add_argument("--fps", type=int, default=30)
     args = parser.parse_args()
-    case = args.case.resolve()
+    work_dir = Path("/home/z00566689/dev/mnt/jiang_test/00_1021_test")\n    if args.case is not None:\n        cases = [args.case.resolve()]\n    elif (work_dir / "image").is_dir():\n        cases = [work_dir]\n    else:\n        cases = [p for p in sorted(work_dir.iterdir()) if p.is_dir() and (p / "image").is_dir()\n                 and p.name not in {"collect", "test"} and "." not in p.name]\n    if not cases:\n        raise ValueError(f"No cases found under {work_dir}")
     rank = int(os.environ.get("RANK", "0"))
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     if world_size != 2:
         raise RuntimeError("Expected two processes: torchrun --nproc_per_node=2")
-    if not (case / "prompt.txt").is_file() or not (case / "prompt.txt").read_text(encoding="utf-8").strip():
-        raise FileNotFoundError(f"Provide a nonempty {case / 'prompt.txt'} before the distributed benchmark")
-    images = sorted(p for p in (case / "image").iterdir() if p.suffix.lower() in (".jpg", ".jpeg"))
-    if len(images) != 1:
-        raise ValueError(f"Expected one JPG in {case / 'image'}, got {len(images)}")
     os.environ["SINGLERECON_WORLD_SIZE"] = str(world_size)
     os.environ["SINGLERECON_LORA_PATH"] = str(args.lora_path.resolve())
     os.environ["SINGLERECON_LORA_WEIGHT"] = "0.55"
@@ -91,6 +86,15 @@ def main():
         report.write_text(json.dumps(result, indent=2), encoding="utf-8")
         print("[MULTI GPU BENCHMARK] " + json.dumps(result, indent=2), flush=True)
     dist.barrier()
+    dist.destroy_process_group()
+
+
+if __name__ == "__main__":
+    main()    for case in cases:\n        if not (case / "prompt.txt").is_file() or not (case / "prompt.txt").read_text(encoding="utf-8").strip():
+            raise FileNotFoundError(f"Provide a nonempty {case / 'prompt.txt'} before the distributed benchmark")
+        images = sorted(p for p in (case / "image").iterdir() if p.suffix.lower() in (".jpg", ".jpeg"))
+        if len(images) != 1:
+            raise ValueError(f"Expected one JPG in {case / 'image'}, got {len(images)}")
     dist.destroy_process_group()
 
 
