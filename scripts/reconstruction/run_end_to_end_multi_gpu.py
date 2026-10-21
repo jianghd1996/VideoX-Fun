@@ -11,7 +11,6 @@ import os
 from pathlib import Path
 import sys
 import time
-from datetime import timedelta
 
 
 def main():
@@ -43,8 +42,8 @@ def main():
     print(f'[CPU THREADS rank={rank}] torch/BLAS/OpenMP/OpenCV={args.cpu_threads}, interop=1', flush=True)
     torch.cuda.set_device(local_rank)
     torch.manual_seed(0)
-    if size > 1:
-        dist.init_process_group('nccl', timeout=timedelta(minutes=60))
+    # Wan owns default-process-group and xfuser initialization.
+    # Do not initialize here: older deployed fuser.py does so unconditionally.
     os.environ['DA3_SEQUENCE_PARALLEL'] = '0'
     da3_root = args.da3_root.expanduser().resolve()
     if not (da3_root / 'DA3/run_da3_full_crop_dev.py').is_file():
@@ -86,6 +85,8 @@ def main():
             dist.barrier()
     try:
         recon = SparseRecon(worker_options)
+        if size > 1 and (not dist.is_initialized() or dist.get_world_size() != size):
+            raise RuntimeError('Wan did not initialize the expected multi-GPU process group')
         import DA3.run_da3_full_crop_dev as runner_module
         if not Path(runner_module.__file__).resolve().is_relative_to(da3_root):
             raise ImportError(f'Unexpected DA3 import: {runner_module.__file__}')
