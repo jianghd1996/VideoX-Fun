@@ -38,7 +38,7 @@ class SparseRecon:
         self.args = json_args.copy()
         root = self.args.get("external_code_root")
         video_root = Path(self.args.get("video_code_root") or
-                          (Path(__file__).resolve().parent / "VideoX-Fun")).resolve()
+                          (Path(__file__).resolve().parent.parent / "VideoX-Fun")).resolve()
         if not video_root.is_dir():
             video_root = Path(__file__).resolve().parents[2]
         if str(video_root) not in sys.path:
