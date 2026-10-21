@@ -173,7 +173,7 @@ class ReconstructionPipeline:
     def stage_caption(self) -> str:
         """Reuse an existing prompt or generate it once per case."""
         prompt_path = self.case_dir / "prompt.txt"
-        if prompt_path.is_file():
+        if prompt_path.is_file() and not getattr(self, "caption_force_regenerate", False):
             prompt = prompt_path.read_text(encoding="utf-8").strip()
             if prompt:
                 return prompt

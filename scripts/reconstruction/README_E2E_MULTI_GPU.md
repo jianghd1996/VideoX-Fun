@@ -11,7 +11,8 @@ use separate copies of the same case when comparing outputs.
 Use your existing SparseRecon JSON with correct video_code_root,
 da3_model_path, dense_code_root, LoRA and LightVAE paths. video_code_root must
 point to the updated VideoX-Fun checkout (includes the process-group reuse fix).
-Set run_gen_video=true, run_DA3=true, run_captioner=false and provide prompt.txt.
+Set run_gen_video=true, run_DA3=true, run_captioner=true. Configure your existing
+captioner_code_root and captioner_model_path when they differ from the defaults.
 run_3dgs_iter=false measures video + DA3 only; true includes your dense backend.
 
 If you currently edit DEFAULT_ARGS instead of using JSON, export your settings:
@@ -22,7 +23,7 @@ python - <<'PY'
 import json
 from run_cases import DEFAULT_ARGS
 cfg = dict(DEFAULT_ARGS)
-cfg.update(run_gen_video=True, run_DA3=True, run_captioner=False)
+cfg.update(run_gen_video=True, run_DA3=True, run_captioner=True, caption_force_regenerate=True)
 with open('e2e_config.json', 'w') as f:
     json.dump(cfg, f, indent=2)
 PY
@@ -68,15 +69,14 @@ python scripts/reconstruction/run_e2e.py
 ```
 
 Defaults: GPU_IDS="4,5", CPU_THREADS=32, WORK_DIR=/home/z00566689/dev/mnt/jiang_test/00_1021_test,
-DA3_ROOT=/mnt/DataPart/jianghongda/Depth-Anything-3. Verify your actual paths.
+DA3_ROOT=/home/z00566689/dev/mnt/jiang_dev/SingleRecon/DA3_custom. Verify your actual paths.
 Set CONFIG_PATH to your working JSON or BASE_RUN_CASES to the existing
 SingleRecon/run_cases.py containing your edited DEFAULT_ARGS. The latter is
 used by default, pointing to the sibling run_cases.py. Its model/dense paths
 are inherited, while video_code_root is validated before torchrun starts. VIDEO_ROOT=None first
 uses config.video_code_root, then checks a sibling VideoX-Fun directory and
 enclosing checkouts. An explicit VIDEO_ROOT overrides these choices. Both
-predict_ti2v.py and videox_fun/ must exist in the chosen directory. Prompt
-captioning is disabled (provide prompt.txt); RUN_DENSE toggles the dense stage.
+predict_ti2v.py and videox_fun/ must exist in the chosen directory. RUN_CAPTIONER=True enables rank-0 caption inference; RUN_DENSE toggles the dense stage.
 DRY_RUN=True prints the generated config and command without inference.
 Change GPU_IDS="4" for the single-GPU baseline; use copies of the same cases
 if both generated outputs should be retained.
@@ -108,3 +108,22 @@ VIDEO_ROOT = Path(__file__).resolve().parent / "VideoX-Fun"
 
 The previous parents[2] assumption only applied inside the repository and was
 removed because it selected an unrelated ancestor when the script was copied.
+
+## Caption performance measurement
+
+The editable launcher defaults to RUN_CAPTIONER=True and
+CAPTION_FORCE_REGENERATE=True, so repeated benchmarks include real caption
+inference even if prompt.txt already exists. The caption is overwritten by the
+new generated text. Set CAPTION_FORCE_REGENERATE=False to reuse existing prompts
+and generate only missing/empty prompts during ordinary batch processing.
+Rank 0 uses one GPU for captioning; rank 1 does not load the captioner and waits
+at the video-stage barrier. Caption device transfers and inference are measured
+by the caption stage, which is included in total and end_to_end_wall. Model
+construction/preload remains excluded, as for the video and DA3 backends.
+Update all four Python files together when copying them into SingleRecon:
+run_e2e.py, run_end_to_end_multi_gpu.py, pipeline_reconstruction.py,
+and multistage_pipeline.py.
+
+Checks include actual caption cache/regeneration/missing-prompt behavior and
+SparseRecon timing output, plus mocked one/two-rank orchestration with new cases.
+Full Qwen captioner inference and GPU-memory behavior require local validation.

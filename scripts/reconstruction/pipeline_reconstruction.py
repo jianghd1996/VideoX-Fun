@@ -109,6 +109,7 @@ class SparseRecon:
             recon_iter_full=load_callable(dense_spec) if dense_spec else None,
         )
         self.pipeline.captioner_cpu_swap = bool(self.args.get("captioner_cpu_swap", False))
+        self.pipeline.caption_force_regenerate = bool(self.args.get("caption_force_regenerate", False))
         captioner_enabled = bool(self.args.get("run_captioner", True))
         if captioner_enabled:
             captioner_root = Path(self.args.get("captioner_code_root") or
@@ -119,10 +120,10 @@ class SparseRecon:
             captioner_model = Path(self.args.get("captioner_model_path") or
                                    (Path(__file__).resolve().parent /
                                     "Cloud_Models/Qwen3-VL-8B-Instruct"))
-            gpu_count = int(self.args.get("world_size", 1))
+            gpu_count = int(self.args.get("captioner_num_gpus", self.args.get("world_size", 1)))
             self.pipeline.img_captioner = ImagesCaptioner(
                 model_path=str(captioner_model),
-                num_gpus=min(gpu_count, 4),
+                num_gpus=max(1, min(gpu_count, 4)),
             )
         self.pipeline.video_infer_steps = int(self.args.get("gen_vid_infer_step", 8))
         self.pipeline.video_fps = int(self.args.get("gen_vid_fps", 30))

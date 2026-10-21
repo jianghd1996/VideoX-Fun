@@ -29,6 +29,8 @@ CONFIG_PATH = None             # e.g. Path("/path/to/SingleRecon/e2e_config.json
 BASE_RUN_CASES = Path(__file__).with_name("run_cases.py")
 # If you keep the working configuration in SingleRecon/run_cases.py, change
 # BASE_RUN_CASES to that file so model/dense paths are copied from your setup.
+RUN_CAPTIONER = True          # Include caption inference in per-case total
+CAPTION_FORCE_REGENERATE = True # Benchmark caption even when prompt.txt exists
 RUN_DENSE = True               # False measures only video + DA3
 DRY_RUN = False                # True prints config/command without loading models
 # ===============================================================
@@ -77,7 +79,9 @@ def main():
     if not launcher.is_file():
         raise FileNotFoundError(f'End-to-end launcher missing: {launcher}')
     config.update(video_code_root=str(video_root),
-                  run_gen_video=True, run_DA3=True, run_captioner=False,
+                  run_gen_video=True, run_DA3=True, run_captioner=RUN_CAPTIONER,
+                  caption_force_regenerate=CAPTION_FORCE_REGENERATE,
+                  captioner_num_gpus=1,
                   run_3dgs_iter=RUN_DENSE, world_size=len(gpus), multi_gpu=len(gpus) > 1,
                   external_code_root=str(DA3_ROOT.expanduser().resolve()))
     env = os.environ.copy()

@@ -79,9 +79,9 @@ def main():
                    resume_stages=False, reuse_video=False)
     options.setdefault('run_gen_video', True)
     options.setdefault('run_DA3', True)
-    options.setdefault('run_captioner', False)
-    if options['run_captioner']:
-        raise ValueError('Prepare prompt.txt first and set run_captioner=false for this benchmark')
+    options.setdefault('run_captioner', True)
+    # Caption runs on rank 0 only; keep its device layout independent of Wan SP.
+    options['captioner_num_gpus'] = 1
     if not options['run_gen_video'] or not options['run_DA3']:
         raise ValueError('End-to-end benchmark requires run_gen_video=true and run_DA3=true')
     root = args.work_dir.expanduser().resolve()
