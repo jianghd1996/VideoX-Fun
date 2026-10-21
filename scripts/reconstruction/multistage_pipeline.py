@@ -108,6 +108,8 @@ class ReconstructionPipeline:
         self.export_dir = self.gen_vid_path / "dense"
         self.max_frames = config.max_frames
         self.generate_video = generate_video
+        self.img_captioner = None
+        self.captioner_cpu_swap = False
         self.run_DA3 = run_DA3
         self.recon_iter_full = recon_iter_full
 
@@ -166,6 +168,32 @@ class ReconstructionPipeline:
             "sampled_images": self.img_path, "colmap": self.colmap_path,
             "gs_render_video": self.gs_render_vid_path, "dense": self.export_dir,
         }.items()}
+
+    def stage_caption(self) -> str:
+        """Reuse an existing prompt or generate it once per case."""
+        prompt_path = self.case_dir / "prompt.txt"
+        if prompt_path.is_file():
+            prompt = prompt_path.read_text(encoding="utf-8").strip()
+            if prompt:
+                return prompt
+        if self.img_captioner is None:
+            raise RuntimeError("Missing prompt.txt and captioner is not initialized")
+        import torch
+        if self.captioner_cpu_swap:
+            self.img_captioner.model.to("cuda")
+        try:
+            prompt = self.img_captioner.read_image_caption(str(self.input_image()))
+            if not isinstance(prompt, str) or not prompt.strip():
+                raise ValueError("ImagesCaptioner returned an empty caption")
+            prompt = prompt.strip()
+            prompt_path.write_text(prompt, encoding="utf-8")
+            print(f"[CAPTION] {self.case_dir.name}: {prompt}", flush=True)
+            return prompt
+        finally:
+            if self.captioner_cpu_swap:
+                self.img_captioner.model.to("cpu")
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
     def stage_video(self, *, reuse: bool = False) -> None:
         if self.args.view_num != VIDEO_FRAMES or self.args.recon_view_num != RECON_VIEW_NUM:
