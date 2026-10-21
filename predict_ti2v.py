@@ -4,6 +4,7 @@ Place this file at SingleRecon/VideoX-Fun/predict_ti2v.py.
 Use video_adapter='predict_ti2v:video_generator'.
 """
 import json
+from dataclasses import dataclass
 import os
 import sys
 from datetime import datetime
@@ -139,9 +140,10 @@ save_path           = os.path.join(
 
 
 
-class WanTI2VAdapter:
+class Wan_5b:
     def __init__(self):
         self.pipeline = None
+        self.load()
 
     def load(self):
         if self.pipeline is not None:
@@ -339,7 +341,11 @@ class WanTI2VAdapter:
         self.vae = vae
 
     @torch.no_grad()
-    def __call__(self, image_path, output_path, num_frames=121):
+    def infer(self, args):
+        """Infer one case from TI2VParams or a compatible argument object."""
+        image_path = args.image_path
+        output_path = args.output_path
+        num_frames = int(args.view_num)
         if self.pipeline is None:
             raise RuntimeError("Call video_generator.load() before inference")
         image_path, output_path = str(image_path), str(output_path)
@@ -364,13 +370,24 @@ class WanTI2VAdapter:
         sample = self.pipeline(
             prompt, num_frames=num_frames, negative_prompt=negative_prompt,
             height=height, width=width, generator=generator,
-            guidance_scale=guidance_scale, num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale, num_inference_steps=int(getattr(args, "num_inference_steps", num_inference_steps)),
             boundary=self.boundary, video=input_video,
             mask_video=input_video_mask, shift=shift,
         ).videos
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        save_videos_grid(sample, output_path, fps=int(os.environ.get("SINGLERECON_FPS", "30")))
+        save_videos_grid(sample, output_path, fps=int(getattr(args, "fps", 30)))
         del sample
+        return output_path
 
 
-video_generator = WanTI2VAdapter()
+@dataclass
+class TI2VParams:
+    image_path: str
+    output_path: str
+    view_num: int = 121
+    num_inference_steps: int = 8
+    fps: int = 30
+
+
+# The object is constructed by SparseRecon once, never at module import.
+
