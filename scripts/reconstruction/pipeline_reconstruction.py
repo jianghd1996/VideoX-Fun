@@ -36,7 +36,7 @@ class SparseRecon:
         if not isinstance(json_args, dict):
             raise TypeError("SparseRecon expects JSON string or dict")
         self.args = json_args.copy()
-        root = self.args.get("external_code_root")
+        root = self.args.get("external_code_root") or str(Path(__file__).resolve().parent)
         video_root = Path(self.args.get("video_code_root") or
                           (Path(__file__).resolve().parent / "VideoX-Fun")).resolve()
         if not video_root.is_dir():
@@ -65,7 +65,7 @@ class SparseRecon:
                 mode=str(self.args.get("mode", "scene")),
                 circle=bool(self.args.get("circle", False)),
                 max_frames=int(self.args.get("max_frames", 121)),
-                external_code_root=Path(root) if root else None,
+                external_code_root=Path(root),
                 da3_model_path=(Path(self.args["da3_model_path"])
                                 if self.args.get("da3_model_path") else None),
             ),
