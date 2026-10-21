@@ -10,6 +10,7 @@ import argparse
 import importlib
 import json
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -108,6 +109,40 @@ class ReconstructionPipeline:
         self.run_DA3 = run_DA3
         self.recon_iter_full = recon_iter_full
 
+    def set_case(self, case_dir: Path) -> None:
+        """Switch case paths without reloading any model."""
+        self.case_dir = Path(case_dir).resolve()
+        self.source_img_path = self.case_dir / "image"
+        self.gen_vid_path = self.case_dir / "reconstruction"
+        self.img_path = self.gen_vid_path / "image"
+        self.video_path = self.gen_vid_path / "generated.mp4"
+        self.colmap_path = self.gen_vid_path / "sparse"
+        self.gs_render_vid_path = self.gen_vid_path / "gs_render.mp4"
+        self.export_dir = self.gen_vid_path / "dense"
+
+    def preload(self, *, start_stage: int = 1, end_stage: int = 3) -> dict[str, float]:
+        """Load all requested backends before case timing starts."""
+        times = {}
+        for name, enabled, load in (
+            ("video", start_stage <= 1 <= end_stage, lambda: None),
+            ("da3", start_stage <= 2 <= end_stage, self._preload_da3),
+            ("dense", start_stage <= 3 <= end_stage, self._preload_dense),
+        ):
+            if enabled:
+                t0 = time.perf_counter()
+                load()
+                times[name] = time.perf_counter() - t0
+                print(f"[PRELOAD] {name}: {times[name]:.2f}s", flush=True)
+        return times
+
+    def _preload_da3(self) -> None:
+        if self.run_DA3 is None and self.args.external_code_root is not None:
+            self.run_DA3 = create_da3(self.args.external_code_root, self.args.da3_model_path)
+
+    def _preload_dense(self) -> None:
+        if self.recon_iter_full is None and self.args.external_code_root is not None:
+            self.recon_iter_full = create_full_reconstruction(self.args.external_code_root)
+
     def input_image(self) -> Path:
         images = sorted(p for p in self.source_img_path.iterdir()
                         if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg"})
@@ -157,8 +192,6 @@ class ReconstructionPipeline:
             json.dumps(list(FRAME_INDICES), indent=2), encoding="utf-8")
 
     def stage_da3(self) -> Any:
-        if self.run_DA3 is None and self.args.external_code_root is not None:
-            self.run_DA3 = create_da3(self.args.external_code_root, self.args.da3_model_path)
         if self.run_DA3 is None:
             raise RuntimeError("DA3 adapter missing; inject object with .infer(args=DA3Params(...))")
         if len(list(self.img_path.glob("*.jpg"))) != len(FRAME_INDICES):
@@ -175,8 +208,6 @@ class ReconstructionPipeline:
         ))
 
     def stage_dense(self) -> Any:
-        if self.recon_iter_full is None and self.args.external_code_root is not None:
-            self.recon_iter_full = create_full_reconstruction(self.args.external_code_root)
         if self.recon_iter_full is None:
             raise RuntimeError("Dense reconstruction adapter missing; inject recon_iter_full")
         if not self.img_path.is_dir() or not self.colmap_path.is_dir():
@@ -191,13 +222,45 @@ class ReconstructionPipeline:
         if not 1 <= start_stage <= end_stage <= 3:
             raise ValueError("Stages must satisfy 1 <= start_stage <= end_stage <= 3")
         results: dict[str, Any] = {}
-        if start_stage <= 1 <= end_stage:
-            self.stage_video(reuse=reuse_video)
-        if start_stage <= 2 <= end_stage:
-            results["gen_index"] = self.stage_da3()
-        if start_stage <= 3 <= end_stage:
-            results["dense_result"] = self.stage_dense()
+        timings: dict[str, float] = {}
+        stages = [
+            ("video_and_sampling", lambda: self.stage_video(reuse=reuse_video)),
+            ("da3", self.stage_da3),
+            ("dense", self.stage_dense),
+        ]
+        total_start = time.perf_counter()
+        try:
+            for number, (name, operation) in enumerate(stages, 1):
+                if start_stage <= number <= end_stage:
+                    started = time.perf_counter()
+                    try:
+                        value = operation()
+                        if number == 2:
+                            results["gen_index"] = value
+                        elif number == 3:
+                            results["dense_result"] = value
+                    finally:
+                        _synchronize_cuda()
+                        timings[name] = time.perf_counter() - started
+                        print(f"[{self.case_dir.name}] {name}: {timings[name]:.2f}s", flush=True)
+        finally:
+            _synchronize_cuda()
+            timings["total"] = time.perf_counter() - total_start
+            print(f"[{self.case_dir.name}] TOTAL (excluding preload): {timings['total']:.2f}s", flush=True)
+            self.gen_vid_path.mkdir(parents=True, exist_ok=True)
+            (self.gen_vid_path / "timings.json").write_text(
+                json.dumps(timings, indent=2), encoding="utf-8")
+        results["timings"] = timings
         return results
+
+
+def _synchronize_cuda() -> None:
+    try:
+        import torch
+        if torch.cuda.is_available() and torch.cuda.is_initialized():
+            torch.cuda.synchronize()
+    except ImportError:
+        pass
 
 
 def main() -> None:
@@ -218,6 +281,7 @@ def main() -> None:
     parser.add_argument("--circle", action="store_true")
     parser.add_argument("--max-frames", type=int, default=121)
     parser.add_argument("--external-code-root", type=Path, help="Root containing DA3 and Reconstruction_full.py")
+    parser.add_argument("--cases-root", type=Path, help="Run all immediate child cases, reusing preloaded models")
     parser.add_argument("--da3-model-path", type=Path, help="Override default DA3 checkpoint")
     args = parser.parse_args()
     cfg = ReconstructionConfig(
@@ -238,8 +302,19 @@ def main() -> None:
         run_DA3=load_callable(args.da3_factory)() if args.da3_factory else None,
         recon_iter_full=load_callable(args.dense_adapter) if args.dense_adapter else None,
     )
-    print(pipeline.run(start_stage=args.start_stage, end_stage=args.end_stage,
-                       reuse_video=args.reuse_video))
+    cases = ([p for p in sorted(args.cases_root.iterdir())
+              if p.is_dir() and (p / "image").is_dir()]
+             if args.cases_root else [args.case_dir])
+    if not cases:
+        parser.error("No cases found")
+    # External video adapter must initialize its model when loaded; a plain
+    # function that reloads weights on every call cannot guarantee reuse.
+    preload_times = pipeline.preload(start_stage=args.start_stage, end_stage=args.end_stage)
+    print(f"[PRELOAD] total: {sum(preload_times.values()):.2f}s", flush=True)
+    for case in cases:
+        pipeline.set_case(case)
+        pipeline.run(start_stage=args.start_stage, end_stage=args.end_stage,
+                     reuse_video=args.reuse_video)
 
 
 if __name__ == "__main__":
