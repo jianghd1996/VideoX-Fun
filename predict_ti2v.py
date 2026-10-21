@@ -324,6 +324,9 @@ class Wan_5b:
                 pipeline.transformer_2.share_cfg_skip(transformer=pipeline.transformer)
         
         if lora_path is not None:
+            if not os.path.isfile(lora_path):
+                raise FileNotFoundError(f"LoRA checkpoint not found: {lora_path}")
+            print(f"[TI2V] Loading LoRA: {lora_path} (weight={lora_weight})", flush=True)
             pipeline = merge_lora(
                 pipeline, lora_path, lora_weight, device=device, dtype=weight_dtype
             )
