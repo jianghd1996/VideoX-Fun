@@ -38,8 +38,9 @@ def set_multi_gpus_devices(ulysses_degree, ring_degree, classifier_free_guidance
     if ulysses_degree > 1 or ring_degree > 1 or classifier_free_guidance_degree > 1:
         if get_sp_group is None:
             raise RuntimeError("xfuser is not installed.")
-        dist.init_process_group("nccl")
-        print('parallel inference enabled: ulysses_degree=%d ring_degree=%d classifier_free_guidance_degree=% rank=%d world_size=%d' % (
+        if not dist.is_initialized():
+            dist.init_process_group("nccl")
+        print('parallel inference enabled: ulysses_degree=%d ring_degree=%d classifier_free_guidance_degree=%d rank=%d world_size=%d' % (
             ulysses_degree, ring_degree, classifier_free_guidance_degree, dist.get_rank(),
             dist.get_world_size()))
         assert dist.get_world_size() == ring_degree * ulysses_degree * classifier_free_guidance_degree, \
