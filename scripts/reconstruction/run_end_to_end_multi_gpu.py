@@ -19,14 +19,28 @@ def main():
     parser.add_argument('--config', type=Path, required=True, help='Existing SparseRecon JSON config')
     parser.add_argument('--work-dir', type=Path, required=True)
     parser.add_argument('--da3-root', type=Path, required=True)
+    parser.add_argument('--cpu-threads', type=int, default=1,
+                        help='CPU threads per rank for Torch/BLAS/OpenMP/OpenCV (default: 1)')
     args = parser.parse_args()
+    if args.cpu_threads < 1:
+        parser.error('--cpu-threads must be >= 1')
+    # Set before importing numerical libraries; each torchrun rank otherwise
+    # creates independent CPU thread pools, which can oversubscribe the host.
+    for name in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS',
+                 'NUMEXPR_NUM_THREADS', 'BLIS_NUM_THREADS', 'VECLIB_MAXIMUM_THREADS'):
+        os.environ[name] = str(args.cpu_threads)
     import torch
+    torch.set_num_threads(args.cpu_threads)
+    torch.set_num_interop_threads(1)
+    import cv2
+    cv2.setNumThreads(args.cpu_threads)
     import torch.distributed as dist
     rank = int(os.environ.get('RANK', '0'))
     local_rank = int(os.environ.get('LOCAL_RANK', '0'))
     size = int(os.environ.get('WORLD_SIZE', '1'))
     if size not in (1, 2):
         raise ValueError('This launcher supports one or two GPUs; Wan path is validated for two ranks')
+    print(f'[CPU THREADS rank={rank}] torch/BLAS/OpenMP/OpenCV={args.cpu_threads}, interop=1', flush=True)
     torch.cuda.set_device(local_rank)
     torch.manual_seed(0)
     if size > 1:

@@ -44,6 +44,12 @@ CUDA_VISIBLE_DEVICES=4,5 torchrun --standalone --nproc_per_node=2 \
   --da3-root /PATH/TO/Depth-Anything-3
 ```
 
+CPU thread pools are explicitly limited before numerical-library imports:
+Torch intra-op, OpenMP, MKL, OpenBLAS, NumExpr, BLIS and OpenCV default to one
+thread per rank; Torch inter-op is one. Override with --cpu-threads 4 if needed.
+The launcher prints the configured limit for every rank. This is independent of
+DA3 image-preprocessing worker counts and does not disable GPU parallelism.
+
 Reports: work-dir/end_to_end_1gpu.json and end_to_end_2gpu.json;
 per-case reconstruction/timings.json and stage_status.json retain stage details.
 Model preload is excluded. Compare repeated runs after the first kernel warmup.
