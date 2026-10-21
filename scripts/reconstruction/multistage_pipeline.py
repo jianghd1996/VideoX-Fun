@@ -199,6 +199,11 @@ class ReconstructionPipeline:
         if self.args.view_num != VIDEO_FRAMES or self.args.recon_view_num != RECON_VIEW_NUM:
             raise ValueError("Current fixed sampling requires view_num=121 and recon_view_num=40")
         self.gen_vid_path.mkdir(parents=True, exist_ok=True)
+        import torch.distributed as dist
+        distributed = dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1
+        if distributed:
+            # Rank 1 waits here while rank 0 finishes captioning.
+            dist.barrier()
         if not (reuse and self.video_path.is_file()):
             if self.generate_video is None:
                 raise RuntimeError("Video generator missing; inject generate_video(image_path, output_path, num_frames)")
@@ -214,6 +219,11 @@ class ReconstructionPipeline:
             else:
                 self.generate_video(image_path=self.input_image(),
                                     output_path=self.video_path, num_frames=self.args.view_num)
+        if distributed:
+            # Both ranks finish DiT/LightVAE before rank 0 samples frames.
+            dist.barrier()
+            if dist.get_rank() != 0:
+                return
         if not self.video_path.is_file():
             raise FileNotFoundError(f"Video generator did not create {self.video_path}")
         self.extract_frames()
