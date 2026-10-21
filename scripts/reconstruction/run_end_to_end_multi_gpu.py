@@ -23,7 +23,11 @@ def bind_da3_package(root):
     for name in list(sys.modules):
         if name == 'DA3' or name.startswith('DA3.'):
             del sys.modules[name]
+    # Freeze namespace search locations: _NamespacePath otherwise recomputes
+    # them when the video adapter modifies sys.path and can restore the old DA3.
+    spec.submodule_search_locations = list(spec.submodule_search_locations)
     package = importlib.util.module_from_spec(spec)
+    package.__path__ = list(spec.submodule_search_locations)
     sys.modules['DA3'] = package
     if spec.loader is not None:
         spec.loader.exec_module(package)
