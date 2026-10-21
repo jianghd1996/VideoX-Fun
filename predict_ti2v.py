@@ -378,6 +378,13 @@ class Wan_5b:
     @torch.no_grad()
     def infer(self, args):
         """Infer one case from TI2VParams or a compatible argument object."""
+        import time
+        def _clock():
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(self.device)
+            return time.perf_counter()
+        _t_total_start = _clock()
+        _rank = int(os.environ.get("RANK", "0"))
         image_path = args.image_path
         output_path = args.output_path
         num_frames = int(args.view_num)
@@ -395,6 +402,7 @@ class Wan_5b:
             raise ValueError(f"Missing prompt.txt and SINGLERECON_DEFAULT_PROMPT for {image_path}")
         if (num_frames - 1) % self.vae.config.temporal_compression_ratio:
             raise ValueError("Frame count must match VAE temporal compression")
+        _t_preprocess_start = _clock()
         with Image.open(image_path) as im:
             w, h = im.size
         scale = target_short_edge / min(w, h)
@@ -415,6 +423,8 @@ class Wan_5b:
             if embedding.ndim != 3 or embedding.shape[0] != 1 or embedding.shape[-1] != 4096:
                 raise ValueError(f"Expected prompt [1,seq,4096], got {tuple(embedding.shape)}")
             precomputed_kwargs["prompt_embeds"] = [embedding[0].to(device=self.device, dtype=weight_dtype)]
+        _t_preprocess_end = _clock()
+        print(f"[VIDEO TIMING][rank={_rank}] video_preprocess={_t_preprocess_end - _t_preprocess_start:.3f}s", flush=True)
         sample = self.pipeline(
             None if precomputed_path else prompt, num_frames=num_frames, negative_prompt=negative_prompt,
             height=height, width=width, generator=generator,
@@ -422,11 +432,14 @@ class Wan_5b:
             boundary=self.boundary, video=input_video,
             mask_video=input_video_mask, shift=shift, **precomputed_kwargs,
         ).videos
+        _t_pipeline_end = _clock()
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         # In sequence-parallel inference all ranks execute the model, but only
         # rank zero writes the shared video file.
         if not (torch.distributed.is_available() and torch.distributed.is_initialized()) or torch.distributed.get_rank() == 0:
             save_videos_grid(sample, output_path, fps=int(getattr(args, "fps", 30)))
+        _t_save_end = _clock()
+        print(f"[VIDEO TIMING][rank={_rank}] mp4_save={_t_save_end - _t_pipeline_end:.3f}s total_infer={_t_save_end - _t_total_start:.3f}s", flush=True)
         del sample
         return output_path
 
