@@ -98,7 +98,8 @@ def run_cases(work_dir: Path, options: dict) -> None:
     from pipeline_reconstruction import SparseRecon
 
     work_dir.mkdir(parents=True, exist_ok=True)
-    log_path = work_dir / "reconstruction_run.log"
+    rank_for_log = int(os.environ.get("RANK", "0"))
+    log_path = work_dir / ("reconstruction_run_rank1.log" if rank_for_log else "reconstruction_run.log")
     with log_path.open("a", encoding="utf-8", buffering=1) as log_file:
         with redirect_stdout(Tee(sys.stdout, log_file)), redirect_stderr(Tee(sys.stderr, log_file)):
             print(f"\\n{'=' * 40} RUN {datetime.now().isoformat(timespec='seconds')} {'=' * 40}", flush=True)
@@ -120,6 +121,9 @@ def run_cases(work_dir: Path, options: dict) -> None:
                 if launched_world_size != 2:
                     raise RuntimeError("multi_gpu=True requires torchrun --nproc_per_node=2")
                 opts["world_size"] = launched_world_size
+                # Both ranks must enter video inference for every case.
+                opts["resume_stages"] = False
+                opts["reuse_video"] = False
                 import torch
                 torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
             elif launched_world_size > 1:
