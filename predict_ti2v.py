@@ -28,7 +28,7 @@ from videox_fun.models import (AutoencoderKLWan, AutoencoderKLWan3_8,
                                AutoTokenizer, Wan2_2Transformer3DModel,
                                WanT5EncoderModel)
 from videox_fun.models.cache_utils import get_teacache_coefficients
-from videox_fun.pipeline import Wan2_2TI2VPipeline
+from videox_fun.pipeline.pipeline_wan2_2_ti2v import Wan2_2TI2VPipeline
 from videox_fun.utils import (register_auto_device_hook,
                               safe_enable_group_offload)
 from videox_fun.utils.fm_solvers import FlowDPMSolverMultistepScheduler
