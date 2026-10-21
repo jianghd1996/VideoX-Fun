@@ -19,7 +19,8 @@ DEFAULT_ARGS = {
     "use_enhance_crop": True,
     "use_view_extrapolation": True,
     "run_gen_video": True,
-    "view_num": 40,
+    "view_num": 121,
+    "recon_view_num": 40,
     "gen_vid_infer_step": 8,
     "gen_vid_fps": 30,
     "world_size": 1,
@@ -55,6 +56,7 @@ def run_cases(work_dir: Path, options: dict) -> None:
         raise ValueError(f"No matching case directories under {work_dir}")
     cfg = ReconstructionConfig(
         case_dir=cases[0], view_num=int(opts["view_num"]),
+        recon_view_num=int(opts["recon_view_num"]),
         crop_ratio=float(opts["crop_ratio"]),
         use_view_extrapolation=bool(opts["use_view_extrapolation"]),
         is_livephoto=bool(opts["is_livephoto"]),
