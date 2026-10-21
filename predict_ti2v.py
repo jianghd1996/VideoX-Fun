@@ -120,7 +120,7 @@ lora_high_path          = None
 # Batch test configuration
 test_data_dir       = "/mnt/DataPart/jianghongda/VideoX-Fun-dev/test_data/livephoto_test"
 prompt_json_path    = None  # Auto-detect the unique JSON file in test_data_dir.
-target_short_edge   = 704
+target_short_edge   = 1088
 align_to             = 32
 video_length        = 121
 fps                 = 24
@@ -128,7 +128,7 @@ fps                 = 24
 # Use torch.float16 if GPU does not support torch.bfloat16.
 weight_dtype        = torch.bfloat16
 negative_prompt     = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
-guidance_scale      = 6.0
+guidance_scale      = 0.0
 seed                = 42
 num_inference_steps = 8
 # PEFT LoRA checkpoints are evaluated at their trained strength.
