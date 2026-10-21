@@ -73,6 +73,22 @@ class SparseRecon:
             run_DA3=load_callable(da3_spec)() if da3_spec else None,
             recon_iter_full=load_callable(dense_spec) if dense_spec else None,
         )
+        self.pipeline.captioner_cpu_swap = bool(self.args.get("captioner_cpu_swap", False))
+        captioner_enabled = bool(self.args.get("run_captioner", True))
+        if captioner_enabled:
+            captioner_root = Path(self.args.get("captioner_code_root") or
+                                  Path(__file__).resolve().parent).resolve()
+            if str(captioner_root) not in sys.path:
+                sys.path.insert(0, str(captioner_root))
+            from qwen_vl3_images_caption_parallel import ImagesCaptioner
+            captioner_model = Path(self.args.get("captioner_model_path") or
+                                   (Path(__file__).resolve().parent /
+                                    "Cloud_Models/Qwen3-VL-8B-Instruct"))
+            gpu_count = int(self.args.get("world_size", 1))
+            self.pipeline.img_captioner = ImagesCaptioner(
+                model_path=str(captioner_model),
+                num_gpus=min(gpu_count, 4),
+            )
         self.pipeline.video_infer_steps = int(self.args.get("gen_vid_infer_step", 8))
         self.pipeline.video_fps = int(self.args.get("gen_vid_fps", 30))
         start = time.perf_counter()
@@ -101,6 +117,10 @@ class SparseRecon:
         started = time.perf_counter()
         try:
             for enabled, label, operation in (
+                (self.args.get("run_captioner", True) and
+                 self.args.get("run_gen_video", True) and
+                 not (self.args.get("reuse_video", False) and pipeline.video_path.is_file()),
+                 "caption", pipeline.stage_caption),
                 (self.args.get("run_gen_video", True), "video_and_sampling",
                  lambda: pipeline.stage_video(reuse=bool(self.args.get("reuse_video", False)))),
                 (self.args.get("run_DA3", True), "da3", pipeline.stage_da3),
