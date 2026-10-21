@@ -111,6 +111,8 @@ shift               = 5
 transformer_path        = None
 transformer_high_path   = None
 vae_path                = None
+use_lightvae            = os.environ.get("SINGLERECON_USE_LIGHTVAE", "0") == "1"
+lightvae_path           = os.environ.get("SINGLERECON_LIGHTVAE_PATH")
 # Load lora model if need
 # The lora_path is used for low noise model, the lora_high_path is used for high noise model.
 # Since Wan2.2-5b consists of only one model, only lora_path is used.
@@ -197,28 +199,50 @@ class Wan_5b:
                 m, u = transformer_2.load_state_dict(state_dict, strict=False)
                 print(f"missing keys: {len(m)}, unexpected keys: {len(u)}")
         
-        # Get Vae
-        Chosen_AutoencoderKL = {
-            "AutoencoderKLWan": AutoencoderKLWan,
-            "AutoencoderKLWan3_8": AutoencoderKLWan3_8
-        }[config['vae_kwargs'].get('vae_type', 'AutoencoderKLWan')]
-        vae = Chosen_AutoencoderKL.from_pretrained(
-            os.path.join(model_name, config['vae_kwargs'].get('vae_subpath', 'vae')),
-            additional_kwargs=OmegaConf.to_container(config['vae_kwargs']),
-        ).to(weight_dtype)
-        
-        if vae_path is not None:
-            print(f"From checkpoint: {vae_path}")
-            if vae_path.endswith("safetensors"):
-                from safetensors.torch import load_file, safe_open
-                state_dict = load_file(vae_path)
-            else:
-                state_dict = torch.load(vae_path, map_location="cpu")
-            state_dict = state_dict["state_dict"] if "state_dict" in state_dict else state_dict
-        
-            m, u = vae.load_state_dict(state_dict, strict=False)
-            print(f"missing keys: {len(m)}, unexpected keys: {len(u)}")
-        
+        # Get VAE: optionally use the teacher encoder + pruned LightVAE decoder.
+        if use_lightvae:
+            if not lightvae_path or not os.path.isfile(lightvae_path):
+                raise FileNotFoundError(f"LightVAE checkpoint not found: {lightvae_path!r}")
+            try:
+                from videox_fun.models.wan_vae_first_encoder_lightvae_decoder import AutoencoderKLWan3_8Stream
+            except ImportError as exc:
+                raise ImportError(
+                    "LightVAE requires videox_fun/models/wan_vae_first_encoder_lightvae_decoder.py "
+                    "and its dependencies in your local VideoX-Fun checkout."
+                ) from exc
+            print(f"[TI2V] Loading LightVAE decoder: {lightvae_path}", flush=True)
+            vae = AutoencoderKLWan3_8Stream.from_teacher_and_lightvae(
+                teacher_vae_path=os.path.join(model_name, "Wan2.2_VAE.pth"),
+                lightvae_decoder_path=lightvae_path,
+                additional_kwargs={
+                    "latent_channels": 48,
+                    "c_dim": 160,
+                    "dim_mult": [1, 2, 4, 4],
+                    "temperal_downsample": [False, True, True],
+                },
+                decoder_pruning_rate=None,
+            ).eval().requires_grad_(False).to(dtype=weight_dtype)
+        else:
+            Chosen_AutoencoderKL = {
+                "AutoencoderKLWan": AutoencoderKLWan,
+                "AutoencoderKLWan3_8": AutoencoderKLWan3_8
+            }[config['vae_kwargs'].get('vae_type', 'AutoencoderKLWan')]
+            vae = Chosen_AutoencoderKL.from_pretrained(
+                os.path.join(model_name, config['vae_kwargs'].get('vae_subpath', 'vae')),
+                additional_kwargs=OmegaConf.to_container(config['vae_kwargs']),
+            ).to(weight_dtype)
+
+            if vae_path is not None:
+                print(f"From checkpoint: {vae_path}")
+                if vae_path.endswith("safetensors"):
+                    from safetensors.torch import load_file
+                    state_dict = load_file(vae_path)
+                else:
+                    state_dict = torch.load(vae_path, map_location="cpu")
+                state_dict = state_dict["state_dict"] if "state_dict" in state_dict else state_dict
+                m, u = vae.load_state_dict(state_dict, strict=False)
+                print(f"missing keys: {len(m)}, unexpected keys: {len(u)}")
+
         # Get Tokenizer
         tokenizer = AutoTokenizer.from_pretrained(
             os.path.join(model_name, config['text_encoder_kwargs'].get('tokenizer_subpath', 'tokenizer')),
