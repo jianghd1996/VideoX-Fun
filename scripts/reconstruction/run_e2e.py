@@ -19,7 +19,7 @@ import tempfile
 GPU_IDS = "4,5"                 # "4" for the single-GPU baseline
 CPU_THREADS = 32               # per rank; use 16 on a busy server
 WORK_DIR = Path("/home/z00566689/dev/mnt/jiang_test/00_1021_test")
-DA3_ROOT = Path("/mnt/DataPart/jianghongda/Depth-Anything-3")
+DA3_ROOT = Path("/home/z00566689/dev/mnt/jiang_dev/SingleRecon/DA3_custom")
 VIDEO_ROOT = None              # Auto: config, sibling VideoX-Fun, or enclosing checkout
 # Explicit example when copied into SingleRecon:
 # VIDEO_ROOT = Path(__file__).resolve().parent / "VideoX-Fun"
