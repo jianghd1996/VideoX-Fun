@@ -53,6 +53,10 @@ class SparseRecon:
         os.environ["SINGLERECON_USE_LIGHTVAE"] = "1" if self.args.get("use_lightvae", False) else "0"
         if self.args.get("lightvae_path"):
             os.environ["SINGLERECON_LIGHTVAE_PATH"] = str(self.args["lightvae_path"])
+        if self.args.get("prompt_embeds_path"):
+            os.environ["SINGLERECON_PROMPT_EMBEDS_PATH"] = str(Path(self.args["prompt_embeds_path"]).resolve())
+        else:
+            os.environ.pop("SINGLERECON_PROMPT_EMBEDS_PATH", None)
         video_spec = self.args.get("video_adapter") or (
             "predict_ti2v:Wan_5b" if self.args.get("run_gen_video", True) else None
         )
