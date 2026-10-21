@@ -20,7 +20,9 @@ GPU_IDS = "4,5"                 # "4" for the single-GPU baseline
 CPU_THREADS = 32               # per rank; use 16 on a busy server
 WORK_DIR = Path("/home/z00566689/dev/mnt/jiang_test/00_1021_test")
 DA3_ROOT = Path("/mnt/DataPart/jianghongda/Depth-Anything-3")
-VIDEO_ROOT = Path(__file__).resolve().parents[2]
+VIDEO_ROOT = None              # Auto: config, sibling VideoX-Fun, or enclosing checkout
+# Explicit example when copied into SingleRecon:
+# VIDEO_ROOT = Path(__file__).resolve().parent / "VideoX-Fun"
 
 # Reuse an existing JSON, or leave None to import your edited DEFAULT_ARGS.
 CONFIG_PATH = None             # e.g. Path("/path/to/SingleRecon/e2e_config.json")
@@ -30,6 +32,30 @@ BASE_RUN_CASES = Path(__file__).with_name("run_cases.py")
 RUN_DENSE = True               # False measures only video + DA3
 DRY_RUN = False                # True prints config/command without loading models
 # ===============================================================
+
+
+def resolve_video_root(script_path, config, explicit=None):
+    """Support both checkout/scripts/reconstruction and copied SingleRecon scripts."""
+    base = Path(script_path).resolve().parent
+    def normalize(value):
+        path = Path(value).expanduser()
+        return (path if path.is_absolute() else base / path).resolve()
+    def valid(path):
+        return (path / 'predict_ti2v.py').is_file() and (path / 'videox_fun').is_dir()
+    for label, value in (('VIDEO_ROOT', explicit),
+                         ('config.video_code_root', config.get('video_code_root'))):
+        if value is not None:
+            path = normalize(value)
+            if not valid(path):
+                raise FileNotFoundError(f'{label}={path}: expected predict_ti2v.py and videox_fun/. '
+                                        'Set VIDEO_ROOT to your VideoX-Fun checkout.')
+            return path
+    candidates = [base / 'VideoX-Fun', base, *base.parents]
+    for candidate in candidates:
+        if valid(candidate):
+            return candidate
+    raise FileNotFoundError('Cannot locate VideoX-Fun. Set VIDEO_ROOT to the directory '
+                            f'containing predict_ti2v.py and videox_fun/; script directory: {base}')
 
 
 def main():
@@ -47,7 +73,10 @@ def main():
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         config = dict(module.DEFAULT_ARGS)
-    config.update(video_code_root=str(VIDEO_ROOT.expanduser().resolve()),
+    video_root = resolve_video_root(__file__, config, VIDEO_ROOT)
+    if not launcher.is_file():
+        raise FileNotFoundError(f'End-to-end launcher missing: {launcher}')
+    config.update(video_code_root=str(video_root),
                   run_gen_video=True, run_DA3=True, run_captioner=False,
                   run_3dgs_iter=RUN_DENSE, world_size=len(gpus), multi_gpu=len(gpus) > 1,
                   external_code_root=str(DA3_ROOT.expanduser().resolve()))

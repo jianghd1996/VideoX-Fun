@@ -72,7 +72,10 @@ DA3_ROOT=/mnt/DataPart/jianghongda/Depth-Anything-3. Verify your actual paths.
 Set CONFIG_PATH to your working JSON or BASE_RUN_CASES to the existing
 SingleRecon/run_cases.py containing your edited DEFAULT_ARGS. The latter is
 used by default, pointing to the sibling run_cases.py. Its model/dense paths
-are inherited, while video_code_root is set to the current checkout. Prompt
+are inherited, while video_code_root is validated before torchrun starts. VIDEO_ROOT=None first
+uses config.video_code_root, then checks a sibling VideoX-Fun directory and
+enclosing checkouts. An explicit VIDEO_ROOT overrides these choices. Both
+predict_ti2v.py and videox_fun/ must exist in the chosen directory. Prompt
 captioning is disabled (provide prompt.txt); RUN_DENSE toggles the dense stage.
 DRY_RUN=True prints the generated config and command without inference.
 Change GPU_IDS="4" for the single-GPU baseline; use copies of the same cases
@@ -94,3 +97,14 @@ These are previous video-inference measurements, not new end-to-end DA3 results.
 repeat runs to distinguish load/encoding variation. The previous measurements
 set OMP_NUM_THREADS, MKL_NUM_THREADS and OPENBLAS_NUM_THREADS. This launcher also
 controls the other pools listed above; it has not yet been GPU-benchmarked.
+
+When copying run_e2e.py into SingleRecon, the sibling layout is supported:
+SingleRecon/run_e2e.py and SingleRecon/VideoX-Fun/predict_ti2v.py. Keep
+VIDEO_ROOT=None for automatic discovery, or set it explicitly:
+
+```python
+VIDEO_ROOT = Path(__file__).resolve().parent / "VideoX-Fun"
+```
+
+The previous parents[2] assumption only applied inside the repository and was
+removed because it selected an unrelated ancestor when the script was copied.
