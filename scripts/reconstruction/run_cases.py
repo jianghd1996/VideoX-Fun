@@ -34,6 +34,8 @@ DEFAULT_ARGS = {
     "is_livephoto": True,
     "reuse_video": False,
     "video_adapter": None,
+    "lora_path": str(Path(__file__).resolve().parent / "Cloud_Models/Wan2.2-TI2V-5B/lora_ckpts_single8/checkpoint-9600.safetensors"),
+    "lora_weight": 0.55,
     "external_code_root": None,
     "da3_model_path": None,
     "da3_factory": None,
