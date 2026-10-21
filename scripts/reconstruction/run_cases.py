@@ -48,7 +48,7 @@ DEFAULT_ARGS = {
     "prompt_embeds_path": None,  # use T5 text encoder for benchmark
     "lightvae_path": str(Path(__file__).resolve().parent / "Cloud_Models/transformer_w_skybox_sla/MG-LightVAE.pth"),
     "external_code_root": str(Path(__file__).resolve().parent / "DA3_custom"),
-    "da3_model_path": None,
+    "da3_model_path": str(Path(__file__).resolve().parent / "Cloud_Models/Saliency-Face-DA3/besthumanmodel_lr1e_6_ckpt2.pt"),
     "da3_factory": None,
     "dense_adapter": None,
     "run_list": [],
