@@ -45,6 +45,7 @@ class ReconstructionConfig:
     max_frames: int = 121
     external_code_root: Path | None = None
     da3_model_path: Path | None = None
+    dense_code_root: Path | None = None
 
 
 def load_callable(spec: str) -> Callable[..., Any]:
@@ -153,7 +154,7 @@ class ReconstructionPipeline:
 
     def _preload_dense(self) -> None:
         if self.recon_iter_full is None and self.args.external_code_root is not None:
-            self.recon_iter_full = create_full_reconstruction(self.args.external_code_root)
+            self.recon_iter_full = create_full_reconstruction(self.args.dense_code_root or self.args.external_code_root)
 
     def input_image(self) -> Path:
         images = sorted(p for p in self.source_img_path.iterdir()
