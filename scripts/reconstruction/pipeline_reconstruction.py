@@ -11,7 +11,7 @@ from typing import Any
 
 try:
     from .multistage_pipeline import (
-        ReconstructionConfig, ReconstructionPipeline, load_callable, _synchronize_cuda
+        ReconstructionConfig, ReconstructionPipeline, FRAME_INDICES, load_callable, _synchronize_cuda
     )
 except ImportError:
     from multistage_pipeline import (
@@ -143,8 +143,7 @@ class SparseRecon:
 
         def video_valid():
             return pipeline.video_path.is_file() and pipeline.video_path.stat().st_size > 0 and all(
-                (pipeline.img_path / f"{i:06d}.jpg").is_file() for i in __import__(
-                    "multistage_pipeline").FRAME_INDICES
+                (pipeline.img_path / f"{i:06d}.jpg").is_file() for i in FRAME_INDICES
             )
 
         def stage_valid(name):
