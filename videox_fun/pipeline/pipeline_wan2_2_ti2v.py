@@ -641,6 +641,81 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
                 noise_aug_strength=None,
             )
             
+            # Optional diagnostic: analyze temporal redundancy of the actual VAE
+            # condition latents. This never changes the latents used for generation.
+            # Enable with SINGLERECON_ANALYZE_CONDITION_Z=1 (rank 0 only).
+            import os as _os
+            if (_os.environ.get("SINGLERECON_ANALYZE_CONDITION_Z") == "1"
+                    and int(_os.environ.get("RANK", "0")) == 0):
+                import json as _json
+                import time as _time
+                _analysis_start = _time.perf_counter()
+                _z = masked_video_latents.detach().float()
+                _zt = _z.shape[2]
+                _ref = _z[:, :, -1:]
+                _scale = _z.abs().mean().item() + 1e-8
+                _stats = {
+                    "input_frames": int(masked_video.shape[2]),
+                    "latent_shape": list(_z.shape),
+                    "latent_abs_mean": float(_scale),
+                    "frames": [],
+                    "prefix_tests": [],
+                }
+                for _i in range(_zt):
+                    _frame = _z[:, :, _i:_i+1]
+                    _stats["frames"].append({
+                        "t": _i,
+                        "mean": float(_frame.mean().item()),
+                        "std": float(_frame.std().item()),
+                        "abs_mean": float(_frame.abs().mean().item()),
+                        "mae_to_last": float((_frame - _ref).abs().mean().item()),
+                        "relative_mae_to_last": float((_frame - _ref).abs().mean().item() / _scale),
+                        "mae_to_prev": (float((_frame - _z[:, :, _i-1:_i]).abs().mean().item())
+                                        if _i else None),
+                    })
+                # Shorter input sequences must respect temporal compression alignment.
+                # Compare their produced prefix to the corresponding full-encode prefix.
+                for _n in (5, 9, 17, 33):
+                    if _n >= masked_video.shape[2]:
+                        continue
+                    try:
+                        with torch.no_grad():
+                            _short = self.vae.encode(
+                                masked_video[:, :, :_n].to(device=device, dtype=self.vae.dtype)
+                            )[0].mode().detach().float()
+                        _k = min(_short.shape[2], _zt)
+                        _delta = (_short[:, :, :_k] - _z[:, :, :_k]).abs()
+                        _stats["prefix_tests"].append({
+                            "input_frames": _n,
+                            "latent_frames": int(_short.shape[2]),
+                            "prefix_mae": float(_delta.mean().item()),
+                            "prefix_max_abs": float(_delta.max().item()),
+                            "prefix_relative_mae": float(_delta.mean().item() / _scale),
+                        })
+                        del _short, _delta
+                    except Exception as _exc:
+                        _stats["prefix_tests"].append({
+                            "input_frames": _n, "error": str(_exc)
+                        })
+                _out_dir = _os.environ.get("SINGLERECON_Z_ANALYSIS_DIR", "condition_z_analysis")
+                _os.makedirs(_out_dir, exist_ok=True)
+                # Unique per-case filename based on the input's first-frame pixels.
+                import hashlib as _hashlib
+                _fingerprint = _hashlib.sha1(
+                    masked_video[0, :, 0, ::32, ::32].detach().cpu().numpy().tobytes()
+                ).hexdigest()[:12]
+                _out_file = _os.path.join(_out_dir, f"condition_z_{_fingerprint}.json")
+                with open(_out_file, "w", encoding="utf-8") as _f:
+                    _json.dump(_stats, _f, indent=2)
+                print(f"[CONDITION Z] shape={tuple(_z.shape)} "
+                      f"last_vs_first_mae={_stats['frames'][0]['mae_to_last']:.6f} "
+                      f"last_vs_prev_mae={_stats['frames'][-1]['mae_to_prev']:.6f} "
+                      f"analysis_time={_time.perf_counter()-_analysis_start:.3f}s "
+                      f"saved={_out_file}", flush=True)
+                for _test in _stats["prefix_tests"]:
+                    print(f"[CONDITION Z] prefix_test={_test}", flush=True)
+                del _z, _ref
+
             _t_vae_encode_end = _sync_clock()
             print(f"[VIDEO TIMING][rank={int(__import__('os').environ.get('RANK','0'))}] condition_vae_encode={_t_vae_encode_end - _t_vae_encode_start:.3f}s", flush=True)
             mask_condition = torch.concat(
