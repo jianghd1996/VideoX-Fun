@@ -123,9 +123,10 @@ def run_cases(work_dir: Path, options: dict) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("work_dir", type=Path)
-    parser.add_argument("--config", type=Path, help="JSON file with SparseRecon-style options")
-    args = parser.parse_args()
-    config = json.loads(args.config.read_text(encoding="utf-8")) if args.config else {}
-    run_cases(args.work_dir.resolve(), config)
+    # Edit these paths directly, then run: python scripts/reconstruction/run_cases.py
+    WORK_DIR = "/home/z00566689/dev/mnt/jiang_test/00_0825_test"
+    CONFIG_PATH = None  # Optional JSON file; None uses DEFAULT_ARGS above.
+
+    config = (json.loads(Path(CONFIG_PATH).read_text(encoding="utf-8"))
+              if CONFIG_PATH else {})
+    run_cases(Path(WORK_DIR).expanduser().resolve(), config)
