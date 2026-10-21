@@ -19,8 +19,8 @@ def main():
     parser.add_argument('--config', type=Path, required=True, help='Existing SparseRecon JSON config')
     parser.add_argument('--work-dir', type=Path, required=True)
     parser.add_argument('--da3-root', type=Path, required=True)
-    parser.add_argument('--cpu-threads', type=int, default=1,
-                        help='CPU threads per rank for Torch/BLAS/OpenMP/OpenCV (default: 1)')
+    parser.add_argument('--cpu-threads', type=int, default=32,
+                        help='CPU threads per rank for Torch/BLAS/OpenMP/OpenCV (default: 32)')
     args = parser.parse_args()
     if args.cpu_threads < 1:
         parser.error('--cpu-threads must be >= 1')

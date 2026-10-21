@@ -45,8 +45,8 @@ CUDA_VISIBLE_DEVICES=4,5 torchrun --standalone --nproc_per_node=2 \
 ```
 
 CPU thread pools are explicitly limited before numerical-library imports:
-Torch intra-op, OpenMP, MKL, OpenBLAS, NumExpr, BLIS and OpenCV default to one
-thread per rank; Torch inter-op is one. Override with --cpu-threads 4 if needed.
+Torch intra-op, OpenMP, MKL, OpenBLAS, NumExpr, BLIS and OpenCV default to 32
+threads per rank; Torch inter-op is one. Override with --cpu-threads 16 if needed.
 The launcher prints the configured limit for every rank. This is independent of
 DA3 image-preprocessing worker counts and does not disable GPU parallelism.
 
@@ -58,3 +58,39 @@ Validation: Python compilation and CLI help passed. A mocked two-rank
 orchestration test checks frame-sampling/DA3/dense barriers and primary-only
 DA3 execution. No GPU, NCCL, model weights or complete external dense backend
 were available on the build host; full inference/performance needs local testing.
+
+## Editable standalone launcher
+
+Edit the settings at the top of `scripts/reconstruction/run_e2e.py`, then:
+
+```bash
+python scripts/reconstruction/run_e2e.py
+```
+
+Defaults: GPU_IDS="4,5", CPU_THREADS=32, WORK_DIR=/home/z00566689/dev/mnt/jiang_test/00_1021_test,
+DA3_ROOT=/mnt/DataPart/jianghongda/Depth-Anything-3. Verify your actual paths.
+Set CONFIG_PATH to your working JSON or BASE_RUN_CASES to the existing
+SingleRecon/run_cases.py containing your edited DEFAULT_ARGS. The latter is
+used by default, pointing to the sibling run_cases.py. Its model/dense paths
+are inherited, while video_code_root is set to the current checkout. Prompt
+captioning is disabled (provide prompt.txt); RUN_DENSE toggles the dense stage.
+DRY_RUN=True prints the generated config and command without inference.
+Change GPU_IDS="4" for the single-GPU baseline; use copies of the same cases
+if both generated outputs should be retained.
+
+Thread default follows the historical experiment shared by the user:
+https://chatgpt.com/share/6ad88d69-c734-83ec-b881-a970965789bd
+
+| CPU threads per rank | Historical Total Infer (s) |
+| --- | ---: |
+| 2 | 71.056 |
+| 4 | 67.042 |
+| 8 | 63.149 |
+| 16 | 61.438 |
+| 32 | 60.629 |
+
+These are previous video-inference measurements, not new end-to-end DA3 results.
+32 was the fastest measured configuration; the small 16-to-32 difference needs
+repeat runs to distinguish load/encoding variation. The previous measurements
+set OMP_NUM_THREADS, MKL_NUM_THREADS and OPENBLAS_NUM_THREADS. This launcher also
+controls the other pools listed above; it has not yet been GPU-benchmarked.
