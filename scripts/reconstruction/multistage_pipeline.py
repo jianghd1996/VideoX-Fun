@@ -19,6 +19,7 @@ FRAME_INDICES = (0, 6, 14, 16, 17, 18, 19, 20, 21, 23, 28, 30, 34, 39,
                  40, 41, 42, 43, 44, 45, 54, 75, 76, 77, 78, 79, 80, 81,
                  82, 88, 91, 95, 99, 100, 101, 102, 103, 104, 105, 106)
 VIDEO_FRAMES = 121
+RECON_VIEW_NUM = len(FRAME_INDICES)
 
 
 @dataclass
@@ -34,7 +35,8 @@ class DA3Params:
 @dataclass
 class ReconstructionConfig:
     case_dir: Path
-    view_num: int = 40
+    view_num: int = VIDEO_FRAMES
+    recon_view_num: int = RECON_VIEW_NUM
     crop_ratio: float = 1.0
     use_view_extrapolation: bool = False
     is_livephoto: bool = True
@@ -166,12 +168,14 @@ class ReconstructionPipeline:
         }.items()}
 
     def stage_video(self, *, reuse: bool = False) -> None:
+        if self.args.view_num != VIDEO_FRAMES or self.args.recon_view_num != RECON_VIEW_NUM:
+            raise ValueError("Current fixed sampling requires view_num=121 and recon_view_num=40")
         self.gen_vid_path.mkdir(parents=True, exist_ok=True)
         if not (reuse and self.video_path.is_file()):
             if self.generate_video is None:
                 raise RuntimeError("Video generator missing; inject generate_video(image_path, output_path, num_frames)")
             self.generate_video(image_path=self.input_image(),
-                                output_path=self.video_path, num_frames=VIDEO_FRAMES)
+                                output_path=self.video_path, num_frames=self.args.view_num)
         if not self.video_path.is_file():
             raise FileNotFoundError(f"Video generator did not create {self.video_path}")
         self.extract_frames()
@@ -183,8 +187,8 @@ class ReconstructionPipeline:
             raise RuntimeError(f"Cannot open generated video: {self.video_path}")
         try:
             count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            if count != VIDEO_FRAMES:
-                raise ValueError(f"Expected {VIDEO_FRAMES} frames, got {count}")
+            if count != self.args.view_num:
+                raise ValueError(f"Expected {self.args.view_num} frames, got {count}")
             self.img_path.mkdir(parents=True, exist_ok=True)
             for index in FRAME_INDICES:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, index)
@@ -210,7 +214,7 @@ class ReconstructionPipeline:
             data_path=str(self.img_path),
             colmap_path=str(self.colmap_path),
             gs_render_vid_path=str(self.gs_render_vid_path),
-            view_num=self.args.view_num,
+            view_num=self.args.recon_view_num,
             crop_ratio=crop_ratio,
             extra_view=[self.args.use_view_extrapolation, self.args.is_livephoto],
         ))
@@ -281,7 +285,8 @@ def main() -> None:
     parser.add_argument("--end-stage", type=int, default=3)
     parser.add_argument("--reuse-video", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--view-num", type=int, default=40)
+    parser.add_argument("--view-num", type=int, default=121, help="Generated video frame count")
+    parser.add_argument("--recon-view-num", type=int, default=40, help="DA3 input view count (currently fixed sampling indices)")
     parser.add_argument("--crop-ratio", type=float, default=1.0)
     parser.add_argument("--use-view-extrapolation", action="store_true")
     parser.add_argument("--no-livephoto", action="store_true")
@@ -295,7 +300,8 @@ def main() -> None:
     if args.case_dir is None and args.cases_root is None:
         parser.error("Provide case_dir or --cases-root")
     cfg = ReconstructionConfig(
-        case_dir=args.case_dir or args.cases_root, view_num=args.view_num, crop_ratio=args.crop_ratio,
+        case_dir=args.case_dir or args.cases_root, view_num=args.view_num,
+        recon_view_num=args.recon_view_num, crop_ratio=args.crop_ratio,
         use_view_extrapolation=args.use_view_extrapolation,
         is_livephoto=not args.no_livephoto, mode=args.mode,
         circle=args.circle, max_frames=args.max_frames,
