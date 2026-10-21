@@ -10,6 +10,8 @@ from contextlib import redirect_stdout, redirect_stderr
 from datetime import datetime
 import traceback
 import json
+import os
+import multiprocessing as mp
 import sys
 import time
 from pathlib import Path
@@ -30,6 +32,7 @@ DEFAULT_ARGS = {
     "gen_vid_infer_step": 8,
     "gen_vid_fps": 30,
     "world_size": 1,
+    "parallel_gpus": [0, 1],  # Physical GPU IDs; set [] for sequential execution.
     "run_3dgs_iter": True,
     "mode": "scene",
     "crop_ratio": 1.0,
@@ -92,11 +95,13 @@ def _print_summary(summary, preload_seconds=None):
     print("=" * 105, flush=True)
 
 
-def run_cases(work_dir: Path, options: dict) -> None:
+def run_cases(work_dir: Path, options: dict, assigned_cases=None, worker_id=None) -> None:
     from pipeline_reconstruction import SparseRecon
 
     work_dir.mkdir(parents=True, exist_ok=True)
-    log_path = work_dir / "reconstruction_run.log"
+    suffix = f"_gpu{worker_id}" if worker_id is not None else ""
+    log_path = work_dir / f"reconstruction_run{suffix}.log"
+    summary_path = work_dir / f"reconstruction_summary{suffix}.json"
     with log_path.open("a", encoding="utf-8", buffering=1) as log_file:
         with redirect_stdout(Tee(sys.stdout, log_file)), redirect_stderr(Tee(sys.stderr, log_file)):
             print(f"\\n{'=' * 40} RUN {datetime.now().isoformat(timespec='seconds')} {'=' * 40}", flush=True)
@@ -108,6 +113,8 @@ def run_cases(work_dir: Path, options: dict) -> None:
             run_list, skip_list = set(opts["run_list"]), set(opts["skip_list"])
             cases = [p for p in cases if (not run_list or p.name in run_list)
                      and p.name not in skip_list and "." not in p.name]
+            if assigned_cases is not None:
+                cases = [Path(p) for p in assigned_cases]
             if not cases:
                 raise ValueError(f"No matching cases under {work_dir}")
 
@@ -133,15 +140,71 @@ def run_cases(work_dir: Path, options: dict) -> None:
                         traceback.print_exc()
                     finally:
                         # Keep a usable summary even if the process is interrupted later.
-                        (work_dir / "reconstruction_summary.json").write_text(
+                        summary_path.write_text(
                             json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
             finally:
                 _print_summary(summary, getattr(recon, "load_seconds", None))
-                (work_dir / "reconstruction_summary.json").write_text(
+                summary_path.write_text(
                     json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
                 print(f"[LOG SAVED] {log_path}", flush=True)
             if any(row["status"] != "ok" for row in summary.values()):
                 raise SystemExit(1)
+
+
+def _gpu_worker(gpu_id, cases, work_dir, options):
+    # CUDA_VISIBLE_DEVICES must be set before importing torch or constructing models.
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    options = {**options, "world_size": 1, "parallel_gpus": []}
+    run_cases(work_dir, options, assigned_cases=cases, worker_id=gpu_id)
+
+
+def run_parallel(work_dir: Path, options: dict) -> None:
+    opts = {**DEFAULT_ARGS, **options}
+    gpu_ids = [int(g) for g in opts.get("parallel_gpus", [])]
+    if len(gpu_ids) != len(set(gpu_ids)):
+        raise ValueError("parallel_gpus contains duplicate GPU IDs")
+    if not gpu_ids:
+        return run_cases(work_dir, opts)
+    if "CUDA_VISIBLE_DEVICES" in os.environ:
+        raise RuntimeError(
+            "For parallel_gpus, do not set CUDA_VISIBLE_DEVICES externally; "
+            "configure physical GPU IDs in parallel_gpus instead."
+        )
+    cases = [work_dir] if (work_dir / "image").is_dir() else [
+        p for p in sorted(work_dir.iterdir()) if p.is_dir() and (p / "image").is_dir()
+    ]
+    run_list, skip_list = set(opts["run_list"]), set(opts["skip_list"])
+    cases = [p for p in cases if (not run_list or p.name in run_list)
+             and p.name not in skip_list and "." not in p.name]
+    if not cases:
+        raise ValueError(f"No matching cases under {work_dir}")
+    if len(cases) == 1:
+        print("[PARALLEL] Only one case: running on one GPU; case-level parallelism is unavailable.")
+    gpu_ids = gpu_ids[:len(cases)]
+    assignments = [cases[i::len(gpu_ids)] for i in range(len(gpu_ids))]
+    ctx = mp.get_context("spawn")
+    start = time.perf_counter()
+    workers = []
+    for gpu, assigned in zip(gpu_ids, assignments):
+        print(f"[PARALLEL] GPU {gpu}: {len(assigned)} cases", flush=True)
+        p = ctx.Process(target=_gpu_worker, args=(gpu, assigned, work_dir, opts))
+        p.start()
+        workers.append((gpu, p))
+    for _, p in workers:
+        p.join()
+    summary = {}
+    for gpu, _ in workers:
+        path = work_dir / f"reconstruction_summary_gpu{gpu}.json"
+        if path.exists():
+            summary.update(json.loads(path.read_text(encoding="utf-8")))
+    (work_dir / "reconstruction_summary.json").write_text(
+        json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    _print_summary(summary)
+    elapsed = time.perf_counter() - start
+    print(f"[PARALLEL] Wall time: {elapsed:.3f}s; worker logs: reconstruction_run_gpu*.log", flush=True)
+    failed = [gpu for gpu, p in workers if p.exitcode != 0]
+    if failed or len(summary) != len(cases):
+        raise SystemExit(f"Parallel workers failed or incomplete: GPUs {failed}, completed {len(summary)}/{len(cases)}")
 
 
 if __name__ == "__main__":
@@ -151,4 +214,4 @@ if __name__ == "__main__":
 
     config = (json.loads(Path(CONFIG_PATH).read_text(encoding="utf-8"))
               if CONFIG_PATH else {})
-    run_cases(Path(WORK_DIR).expanduser().resolve(), config)
+    run_parallel(Path(WORK_DIR).expanduser().resolve(), config)
