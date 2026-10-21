@@ -244,7 +244,7 @@ class Wan_5b:
                 print(f"missing keys: {len(m)}, unexpected keys: {len(u)}")
 
         # Get Tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer = None if os.environ.get("SINGLERECON_PROMPT_EMBEDS_PATH") else AutoTokenizer.from_pretrained(
             os.path.join(model_name, config['text_encoder_kwargs'].get('tokenizer_subpath', 'tokenizer')),
         )
         
