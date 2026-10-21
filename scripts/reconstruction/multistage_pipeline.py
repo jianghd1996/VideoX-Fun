@@ -174,8 +174,18 @@ class ReconstructionPipeline:
         if not (reuse and self.video_path.is_file()):
             if self.generate_video is None:
                 raise RuntimeError("Video generator missing; inject generate_video(image_path, output_path, num_frames)")
-            self.generate_video(image_path=self.input_image(),
-                                output_path=self.video_path, num_frames=self.args.view_num)
+            if hasattr(self.generate_video, "infer"):
+                from predict_ti2v import TI2VParams
+                self.generate_video.infer(args=TI2VParams(
+                    image_path=str(self.input_image()),
+                    output_path=str(self.video_path),
+                    view_num=self.args.view_num,
+                    num_inference_steps=getattr(self, "video_infer_steps", 8),
+                    fps=getattr(self, "video_fps", 30),
+                ))
+            else:
+                self.generate_video(image_path=self.input_image(),
+                                    output_path=self.video_path, num_frames=self.args.view_num)
         if not self.video_path.is_file():
             raise FileNotFoundError(f"Video generator did not create {self.video_path}")
         self.extract_frames()
