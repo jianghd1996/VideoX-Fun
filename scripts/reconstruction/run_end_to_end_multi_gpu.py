@@ -6,11 +6,28 @@ Launch with torchrun --standalone --nproc_per_node=2 (or 1 for baseline).
 Uses the legacy-compatible DA3 runner, preserving GS/COLMAP exports.
 """
 import argparse
+import importlib.machinery
+import importlib.util
 import json
 import os
 from pathlib import Path
 import sys
 import time
+
+
+def bind_da3_package(root):
+    """Resolve DA3 only inside the selected checkout, even after sys.path changes."""
+    spec = importlib.machinery.PathFinder.find_spec('DA3', [str(root)])
+    if spec is None or spec.submodule_search_locations is None:
+        raise ImportError(f'DA3 package missing in selected checkout: {root}')
+    for name in list(sys.modules):
+        if name == 'DA3' or name.startswith('DA3.'):
+            del sys.modules[name]
+    package = importlib.util.module_from_spec(spec)
+    sys.modules['DA3'] = package
+    if spec.loader is not None:
+        spec.loader.exec_module(package)
+    return package
 
 
 def main():
@@ -84,13 +101,18 @@ def main():
         if size > 1:
             dist.barrier()
     try:
+        if rank == 0:
+            bind_da3_package(da3_root)
         recon = SparseRecon(worker_options)
         if size > 1 and (not dist.is_initialized() or dist.get_world_size() != size):
             raise RuntimeError('Wan did not initialize the expected multi-GPU process group')
-        import DA3.run_da3_full_crop_dev as runner_module
-        if not Path(runner_module.__file__).resolve().is_relative_to(da3_root):
-            raise ImportError(f'Unexpected DA3 import: {runner_module.__file__}')
-        print(f'[E2E rank={rank}] DA3={runner_module.__file__} DA3=single_gpu', flush=True)
+        if rank == 0:
+            import DA3.run_da3_full_crop_dev as runner_module
+            if not Path(runner_module.__file__).resolve().is_relative_to(da3_root):
+                raise ImportError(f'Unexpected DA3 import: {runner_module.__file__}')
+            print(f'[E2E rank=0] DA3={runner_module.__file__} DA3=single_gpu', flush=True)
+        else:
+            print(f'[E2E rank={rank}] video worker; DA3 disabled', flush=True)
         original_da3 = recon.pipeline.stage_da3
         def joint_da3():
             # Rank 0 must finish frame extraction before any DA3 rank reads files.
