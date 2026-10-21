@@ -534,7 +534,7 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
             batch_size = prompt_embeds.shape[0]
 
         device = self._execution_device
-        weight_dtype = self.text_encoder.dtype
+        weight_dtype = self.text_encoder.dtype if self.text_encoder is not None else self.transformer.dtype
 
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
