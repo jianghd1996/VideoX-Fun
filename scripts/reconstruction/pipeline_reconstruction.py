@@ -50,7 +50,7 @@ class SparseRecon:
         if self.args.get("lora_weight") is not None:
             os.environ["SINGLERECON_LORA_WEIGHT"] = str(self.args["lora_weight"])
         video_spec = self.args.get("video_adapter") or (
-            "predict_ti2v:video_generator" if self.args.get("run_gen_video", True) else None
+            "predict_ti2v:Wan_5b" if self.args.get("run_gen_video", True) else None
         )
         da3_spec = self.args.get("da3_factory")
         dense_spec = self.args.get("dense_adapter")
@@ -69,10 +69,12 @@ class SparseRecon:
                 da3_model_path=(Path(self.args["da3_model_path"])
                                 if self.args.get("da3_model_path") else None),
             ),
-            generate_video=load_callable(video_spec) if video_spec else None,
+            generate_video=(load_callable(video_spec)() if video_spec else None),
             run_DA3=load_callable(da3_spec)() if da3_spec else None,
             recon_iter_full=load_callable(dense_spec) if dense_spec else None,
         )
+        self.pipeline.video_infer_steps = int(self.args.get("gen_vid_infer_step", 8))
+        self.pipeline.video_fps = int(self.args.get("gen_vid_fps", 30))
         start = time.perf_counter()
         if self.args.get("run_gen_video", True):
             self.pipeline._preload_video()
