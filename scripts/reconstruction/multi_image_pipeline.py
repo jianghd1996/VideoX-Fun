@@ -516,7 +516,7 @@ class MultiImagePipeline:
             return result
 
         operations = []
-        if self.run_gen_video:
+        if self.run_gen_video and self.run_captioner:
             operations.append(("caption", lambda: self.stage_caption(case)))
         operations.append(("da3", da3_stage))
         if self.run_gen_video:
