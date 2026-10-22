@@ -1,6 +1,6 @@
 """Single-GPU, persistent Wan2.2-Fun-5B-Control adapter for multi-image reconstruction.
 
-Copy to SingleRecon/VideoX-Fun/predict_v2v_control_5b_multi_image.py.
+Copy to CodexRecon/VideoX-Fun/predict_v2v_control_5b_multi_image.py.
 Called by MultiImagePipeline with:
   (control_video, start_image, end_image, output_video, prompt, num_frames, fps)
 
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 import time
-import importlib
+import sys
 from pathlib import Path
 
 import cv2
@@ -44,39 +44,24 @@ NEGATIVE_PROMPT = (
 
 
 def _sla_primitives():
-    """Resolve SLA kernel / quantization classes from the locally installed Wan code.
-
-    Keeping discovery here avoids modifying wan_transformer3d_sla.py.  The
-    accelerated primitives vary between VideoX-Fun SLA checkouts; fail
-    explicitly instead of silently falling back to ordinary attention.
-    """
-    names = ("SparseLinearAttention", "Int8Linear", "FastRMSNorm", "FastLayerNorm")
-    candidates = (
-        "videox_fun.models.wan_transformer3d_sla",
-        "videox_fun.models.attention_kernel",
-        "videox_fun.models.attention_utils",
-        "videox_fun.models.sla",
-        "videox_fun.models.sla_utils",
-        "videox_fun.models.sparse_linear_attention",
-        "videox_fun.models.quantization",
-        "videox_fun.utils.sla",
-        "sla",
-    )
-    found = {}
-    for module_name in candidates:
-        try:
-            module = importlib.import_module(module_name)
-        except ImportError:
-            continue
-        for name in names:
-            if name not in found and hasattr(module, name):
-                found[name] = getattr(module, name)
-    missing = set(names) - set(found)
-    if missing:
-        raise ImportError(
-            f"SLA requires {sorted(missing)}. Locate their definitions in the local "
-            "CodexRecon/VideoX-Fun and add those modules to _sla_primitives().")
-    return found
+    """Load installed TurboDiffusion SLA kernels and quantized operators."""
+    sla_root = os.path.join(cur_py_path, "turbodiffusion")
+    if not os.path.isdir(sla_root):
+        raise FileNotFoundError(
+            f"Missing TurboDiffusion root {sla_root}; "
+            "expected SLA/, ops/ and rcm/ under this directory.")
+    if sla_root not in sys.path:
+        sys.path.insert(0, sla_root)
+    # This must run BEFORE importing wan_transformer3d_sla, which imports rcm.
+    from SLA import SparseLinearAttention, SageSparseLinearAttention
+    from ops import FastLayerNorm, FastRMSNorm, Int8Linear
+    return {
+        "SparseLinearAttention": SparseLinearAttention,
+        "SageSparseLinearAttention": SageSparseLinearAttention,
+        "FastLayerNorm": FastLayerNorm,
+        "FastRMSNorm": FastRMSNorm,
+        "Int8Linear": Int8Linear,
+    }
 
 
 def _load_merged_transformer_weights(transformer, path):
@@ -183,6 +168,9 @@ class WanControl5B:
         self.boundary = float(config["transformer_additional_kwargs"].get("boundary", 0.875))
         model_kwargs = OmegaConf.to_container(config["transformer_additional_kwargs"])
         if self.sla_topk <= 0.9:
+            # Initialize TurboDiffusion import path before SLA Transformer
+            # import: wan_transformer3d_sla depends on rcm.utils.a2a_cp.
+            sla_ops = _sla_primitives()
             from videox_fun.models.wan_transformer3d_sla import Wan2_2Transformer3DModel_SLA
             transformer_class = Wan2_2Transformer3DModel_SLA
         else:
@@ -211,7 +199,7 @@ class WanControl5B:
             # modules only after the merged tensor state has been loaded.
             from videox_fun.models.wan_transformer3d_sla import (
                 WanSelfAttention, WanRMSNorm, WanLayerNorm)
-            ops = _sla_primitives()
+            ops = sla_ops
             changed_attention = 0
             for module in transformer.modules():
                 if type(module) is WanSelfAttention:
