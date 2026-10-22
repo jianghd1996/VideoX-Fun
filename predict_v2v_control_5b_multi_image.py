@@ -103,6 +103,14 @@ def _video_rgb(path, expected_frames: int):
             frames.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
     finally:
         capture.release()
+    if len(frames) == expected_frames + 1:
+        # DA3's MoviePy MP4 export can encode one extra terminal frame.
+        # Preserve the first N rendered poses (including the true last pose
+        # at index N-1), and discard only the surplus video frame at index N.
+        print(f"[MULTI CONTROL] {path}: DA3 exported {len(frames)} frames "
+              f"for {expected_frames} poses; discarding extra terminal frame",
+              flush=True)
+        frames.pop()
     if len(frames) != expected_frames:
         raise ValueError(
             f"GS control frame mismatch: {path}: expected {expected_frames}, got {len(frames)}"
