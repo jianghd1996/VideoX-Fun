@@ -68,6 +68,9 @@ class MultiImagePipeline:
                  video_adapter: str | None = None,
                  video_code_root: str | Path | None = None,
                  video_lora_path: str | Path | None = None,
+                 video_transformer_path: str | Path | None = None,
+                 video_sla_topk: float = 1.0,
+                 video_infer_steps: int = 8,
                  video_lora_weight: float = 0.55,
                  video_cfg: float = 0.0,
                  video_short_edge: int = 1088,
@@ -101,7 +104,19 @@ class MultiImagePipeline:
             raise ValueError(f"video_gpu_ids must contain distinct GPU IDs: {self.video_gpu_ids}")
         self.video_code_root = Path(video_code_root or Path(__file__).resolve().parents[2]).expanduser().resolve()
         self.video_adapter = video_adapter
+        if not 0 < float(video_sla_topk) <= 1:
+            raise ValueError(f"video_sla_topk must be in (0, 1], got {video_sla_topk}")
+        if int(video_infer_steps) <= 0:
+            raise ValueError(f"video_infer_steps must be >0, got {video_infer_steps}")
+        if video_transformer_path and video_lora_path:
+            raise ValueError("Merged SLA transformer and separate LoRA must not be enabled together")
+        if video_transformer_path and not Path(video_transformer_path).expanduser().is_file():
+            raise FileNotFoundError(f"Missing merged SLA transformer: {video_transformer_path}")
         self.video_environment = {
+            "SINGLERECON_CONTROL_TRANSFORMER_PATH": (
+                str(Path(video_transformer_path).expanduser().resolve()) if video_transformer_path else ""),
+            "SINGLERECON_CONTROL_SLA_TOPK": str(float(video_sla_topk)),
+            "SINGLERECON_CONTROL_INFER_STEPS": str(int(video_infer_steps)),
             "SINGLERECON_CONTROL_LORA_PATH": str(Path(video_lora_path).expanduser().resolve()) if video_lora_path else "",
             "SINGLERECON_CONTROL_LORA_WEIGHT": str(float(video_lora_weight)),
             "SINGLERECON_CONTROL_CFG": str(float(video_cfg)),
