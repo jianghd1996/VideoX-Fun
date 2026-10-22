@@ -59,12 +59,19 @@ def _worker(gpu_id, video_code_root, adapter_spec, environment, tasks, events):
                     start_image=item["start_image"],
                     end_image=item["end_image"],
                     output_video=item["video"],
-                    prompt=item["prompt"], num_frames=item["frames"], fps=item["fps"])
+                    prompt=item["prompt"], num_frames=item["frames"], fps=item["fps"],
+                    sampled_frame_indices=item["sampled_frame_indices"],
+                    sampled_frames_dir=item["sampled_frames_dir"],
+                    save_mp4=item["save_mp4"])
                 output = Path(item["video"])
-                if result is not None and Path(result).resolve() != output.resolve():
+                if item["save_mp4"] and result is not None and Path(result).resolve() != output.resolve():
                     raise RuntimeError(f"Adapter returned {result}, expected {output}")
-                if not output.is_file() or output.stat().st_size == 0:
+                if item["save_mp4"] and (not output.is_file() or output.stat().st_size == 0):
                     raise FileNotFoundError(f"Generated video missing/empty: {output}")
+                for frame_idx in item["sampled_frame_indices"]:
+                    jpg = Path(item["sampled_frames_dir"]) / f"f{frame_idx:04d}.jpg"
+                    if not jpg.is_file() or jpg.stat().st_size == 0:
+                        raise FileNotFoundError(f"Direct Wan JPG missing/empty: {jpg}")
                 record = {key: value for key, value in item.items() if key != "prompt"}
                 record.update(gpu_id=gpu_id, reused=False,
                               seconds=round(time.perf_counter() - start, 3),
@@ -179,7 +186,8 @@ class WanControlWorkerPool:
 def run_trajectory_videos_multi_gpu(*, reconstruction_dir, source_images,
                                      adapter_spec, video_code_root, gpu_ids,
                                      prompt, fps=30, resume=False,
-                                     env_overrides=None, worker_pool=None):
+                                     env_overrides=None, worker_pool=None,
+                                     sample_plan=None, save_mp4=True):
     """Generate one MP4 per path; save the same result schema as single GPU.
 
     summary.json additionally stores worker loads, GPU assignment and wall time.
@@ -199,6 +207,9 @@ def run_trajectory_videos_multi_gpu(*, reconstruction_dir, source_images,
     if not paths:
         raise ValueError(f"No trajectories in {manifest_file}")
 
+    selected_indices = (sample_plan or {}).get("selected_indices")
+    if selected_indices is None:
+        raise ValueError("Multi-GPU Wan requires preplanned FPS sample indices")
     pending, completed = [], {}
     for item in paths:
         name = Path(item["file"]).stem
@@ -215,16 +226,29 @@ def run_trajectory_videos_multi_gpu(*, reconstruction_dir, source_images,
             raise FileNotFoundError(control)
         dest = generated_root / name / "generated.mp4"
         dest.parent.mkdir(parents=True, exist_ok=True)
+        selected = sorted(set(map(int, selected_indices[name])))
+        frame_dir = dest.parent / "sampled_frames"
         record = {
             "name": name, "video": str(dest), "frames": n,
             "start_index": a, "end_index": b,
             "start_image": str(sources[a]), "end_image": str(sources[b]),
             "control_video": str(control), "pose_file": str(pose_file),
+            "sampled_frame_indices": selected, "sampled_frames_dir": str(frame_dir),
+            "save_mp4": bool(save_mp4),
         }
-        if resume and dest.is_file() and dest.stat().st_size:
+        images_ready = all((frame_dir / f"f{i:04d}.jpg").is_file()
+                           for i in selected)
+        if resume and images_ready and (not save_mp4 or (dest.is_file() and dest.stat().st_size)):
             completed[name] = dict(record, reused=True, seconds=0.0,
                                    inference_timing={}, gpu_id=None)
         else:
+            # Clear old selected JPGs to avoid considering stale output valid
+            # if a worker fails midway through inference.
+            frame_dir.mkdir(parents=True, exist_ok=True)
+            for old in frame_dir.glob("f*.jpg"):
+                old.unlink()
+            if not save_mp4 and dest.is_file():
+                dest.unlink()
             pending.append(dict(record, prompt=prompt, fps=int(fps)))
 
     def persist():
