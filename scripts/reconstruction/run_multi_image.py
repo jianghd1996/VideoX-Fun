@@ -32,7 +32,7 @@ CONFIG = {
     "trajectory_view_num": 81,
     "trajectory_interpolation": "bezier",  # Keep fixed until E2E pipeline works
     "run_gen_video": True,
-    "run_captioner": True,
+    "run_captioner": False,  # no caption model; positive prompt defaults to empty
     "captioner_code_root": "/home/z00566689/dev/mnt/jiang_dev/CodexRecon",
     "captioner_model_path": "/home/z00566689/dev/mnt/jiang_dev/CodexRecon/Cloud_Models/Qwen3-VL-8B-Instruct",
     "captioner_cpu_swap": True,
@@ -55,6 +55,8 @@ CONFIG = {
     # GPU IDs are PHYSICAL CUDA device IDs; 4 trajectories on GPUs 6 and 7.
     # With one GPU, use [0] and select physical GPU via CUDA_VISIBLE_DEVICES=4.
     "video_gpu_ids": [6, 7],
+    "video_cpu_threads": 16,  # per Wan worker; compare with 32
+    "video_positive_prompt": "",  # do not load prompt.txt
     "video_resume": False,  # full E2E benchmark: regenerate all videos
     "video_preload_workers": True,  # preload Wan on GPU 6,7 at pipeline startup
 }
@@ -67,6 +69,8 @@ def main() -> None:
     parser.add_argument("--config", type=Path)
     parser.add_argument("--da3-only", action="store_true")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--video-cpu-threads", type=int, choices=(8, 16, 32),
+                        help="CPU threads per Wan worker; default 16, try 32 as A/B")
     parser.add_argument("--video-gpus", type=str,
                         help="Physical GPUs for Wan workers, e.g. 6,7 (does not change DA3/dense GPU)")
     parser.add_argument("--benchmark-fresh", action="store_true",
@@ -77,6 +81,8 @@ def main() -> None:
     opts = dict(CONFIG)
     if args.config:
         opts.update(json.loads(args.config.read_text(encoding="utf-8")))
+    if args.video_cpu_threads is not None:
+        opts["video_cpu_threads"] = args.video_cpu_threads
     if args.video_gpus:
         opts["video_gpu_ids"] = [int(x.strip()) for x in args.video_gpus.split(",") if x.strip()]
         if len(opts["video_gpu_ids"]) != len(set(opts["video_gpu_ids"])) or not opts["video_gpu_ids"]:
@@ -109,7 +115,10 @@ def main() -> None:
             raise FileExistsError(
                 "Fresh benchmark would reuse/overwrite existing reconstruction. "
                 "Create a separate test case containing only image/: " + ", ".join(collisions))
-    print(f"[BENCHMARK] gpus={opts['video_gpu_ids']} fresh={args.benchmark_fresh} "
+    print(f"[BENCHMARK] gpus={opts['video_gpu_ids']} "
+          f"worker_cpu_threads={opts['video_cpu_threads']} "
+          f"captioner={opts['run_captioner']} positive_prompt={opts['video_positive_prompt']!r} "
+          f"fresh={args.benchmark_fresh} "
           f"video_resume={opts['video_resume']} resume_stages={opts['resume_stages']}", flush=True)
     wall_started = time.perf_counter()
     pipeline = MultiImagePipeline(**opts)
