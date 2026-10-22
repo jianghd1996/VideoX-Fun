@@ -69,6 +69,9 @@ class MultiImagePipeline:
                  video_lora_weight: float = 0.55,
                  video_cfg: float = 0.0,
                  video_short_edge: int = 1088,
+                 video_use_lightvae: bool = True,
+                 video_lightvae_path: str | Path | None = None,
+                 video_teacher_vae_path: str | Path | None = None,
                  video_fps: int = 30,
                  video_gpu_ids: list[int] | None = None,
                  video_resume: bool = False,
@@ -97,6 +100,15 @@ class MultiImagePipeline:
             "SINGLERECON_CONTROL_LORA_WEIGHT": str(float(video_lora_weight)),
             "SINGLERECON_CONTROL_CFG": str(float(video_cfg)),
             "SINGLERECON_CONTROL_SHORT_EDGE": str(int(video_short_edge)),
+            "SINGLERECON_CONTROL_USE_LIGHTVAE": "1" if video_use_lightvae else "0",
+            "SINGLERECON_CONTROL_LIGHTVAE_PATH": str(
+                Path(video_lightvae_path or
+                     (dense_root / "Cloud_Models/transformer_w_skybox_sla/MG-LightVAE.pth"))
+                .expanduser().resolve()),
+            "SINGLERECON_CONTROL_TEACHER_VAE_PATH": str(
+                Path(video_teacher_vae_path or
+                     (dense_root / "Cloud_Models/Wan2.2-TI2V-5B/Wan2.2_VAE.pth"))
+                .expanduser().resolve()),
         }
         self.video_model_load_seconds = 0.0
         self.video_resume = bool(video_resume)
