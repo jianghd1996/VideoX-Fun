@@ -20,7 +20,7 @@ CONFIG = {
     "dense_code_root": "/home/z00566689/dev/mnt/jiang_dev/SingleRecon",
     "da3_model_path": "/home/z00566689/dev/mnt/jiang_dev/SingleRecon/Cloud_Models/Saliency-Face-DA3/besthumanmodel_lr1e_6_ckpt2.pt",
     "run_3dgs_iter": True,  # full pipeline: generated videos -> COLMAP -> Reconstruction_full
-    "dense_generated_frames": 40,  # distribute 40 intermediate views over all trajectories
+    "dense_generated_frames": 80,  # globally sample 80 novel camera poses across all trajectories
     "resume_stages": False,
     "crop_ratio": 1.0,
     "mode": "scene",
