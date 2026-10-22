@@ -323,8 +323,8 @@ class WanControl5B:
         num_frames = int(num_frames)
         if (num_frames - 1) % 4:
             raise ValueError(f"Wan 5B requires 4n+1 frames, received {num_frames}")
-        if not prompt or not str(prompt).strip():
-            raise ValueError("Missing nonempty prompt.txt for multi-image video generation")
+        # Empty positive prompt is intentional for the text-free SLA workflow.
+        prompt = "" if prompt is None else str(prompt)
         torch.cuda.synchronize(self.device)
         segment_started = time.perf_counter()
         frames = _video_rgb(control_video, num_frames)
