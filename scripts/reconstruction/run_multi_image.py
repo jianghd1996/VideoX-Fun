@@ -42,7 +42,7 @@ CONFIG = {
     "video_cfg": 0.0,
     "video_short_edge": 1088,
     "video_fps": 30,
-    "video_resume": True,
+    "video_resume": False,  # regenerate to ensure CFG=0 and short-edge=1088 take effect
 }
 WORK_DIR = "/home/z00566689/dev/mnt/jiang_test/00_1022_test"
 
