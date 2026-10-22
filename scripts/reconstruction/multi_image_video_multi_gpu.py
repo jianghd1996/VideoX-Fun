@@ -69,10 +69,105 @@ def _worker(gpu_id, video_code_root, adapter_spec, environment, tasks, events):
                     "traceback": traceback.format_exc()})
 
 
+
+class WanControlWorkerPool:
+    """Spawn persistent GPU-bound workers once and reuse across cases.
+
+    No CUDA/model import in parent. Call close() from a finally block.
+    """
+
+    def __init__(self, *, adapter_spec, video_code_root, gpu_ids, env_overrides=None):
+        self.ids = list(map(int, gpu_ids))
+        if len(self.ids) < 2 or len(self.ids) != len(set(self.ids)):
+            raise ValueError(f"Need >=2 unique physical GPUs: {self.ids}")
+        self.ctx = mp.get_context("spawn")
+        self.tasks = self.ctx.Queue()
+        self.events = self.ctx.Queue()
+        self.workers = []
+        self.loads = {}
+        self.closed = False
+        self.started_at = time.perf_counter()
+        try:
+            for gpu in self.ids:
+                proc = self.ctx.Process(
+                    target=_worker,
+                    args=(gpu, str(Path(video_code_root).resolve()), adapter_spec,
+                          dict(env_overrides or {}), self.tasks, self.events),
+                    name=f"wan-control-gpu-{gpu}")
+                proc.start()
+                self.workers.append(proc)
+                print(f"[MULTI GPU PRELOAD] GPU {gpu}, pid={proc.pid}", flush=True)
+            while len(self.loads) < len(self.ids):
+                event = self._next_event()
+                if event["kind"] == "error":
+                    raise RuntimeError(
+                        f"GPU {event['gpu']} preload failed:\n{event['traceback']}")
+                if event["kind"] != "ready":
+                    raise RuntimeError(f"Unexpected event during preload: {event['kind']}")
+                self.loads[str(event["gpu"])] = event["seconds"]
+                print(f"[MULTI GPU PRELOAD] GPU {event['gpu']} ready, "
+                      f"model_load={event['seconds']:.3f}s", flush=True)
+        except BaseException:
+            self.close(terminate=True)
+            raise
+        self.preload_wall_seconds = round(time.perf_counter() - self.started_at, 3)
+        print(f"[MULTI GPU PRELOAD] all ready in {self.preload_wall_seconds:.3f}s",
+              flush=True)
+
+    def _next_event(self):
+        while True:
+            try:
+                return self.events.get(timeout=3)
+            except queue.Empty:
+                failed = [(p.name, p.exitcode) for p in self.workers
+                          if p.exitcode not in (None, 0)]
+                if failed or not any(p.is_alive() for p in self.workers):
+                    raise RuntimeError(f"Wan workers unavailable: {failed}")
+
+    def generate(self, pending, completed, persist):
+        if self.closed:
+            raise RuntimeError("Wan pool already closed")
+        start = time.perf_counter()
+        for item in pending:
+            self.tasks.put(item)
+        remaining = len(pending)
+        while remaining:
+            event = self._next_event()
+            if event["kind"] == "error":
+                raise RuntimeError(
+                    f"GPU {event['gpu']}, task {event['task']} failed:\n{event['traceback']}")
+            if event["kind"] != "done":
+                raise RuntimeError(f"Unexpected worker event: {event['kind']}")
+            record = event["record"]
+            completed[record["name"]] = record
+            remaining -= 1
+            persist()
+            print(f"[MULTI GPU] {len(pending)-remaining}/{len(pending)} "
+                  f"{record['name']} GPU {record['gpu_id']} "
+                  f"{record['seconds']:.3f}s", flush=True)
+        return round(time.perf_counter() - start, 3)
+
+    def close(self, terminate=False):
+        if self.closed:
+            return
+        self.closed = True
+        if not terminate:
+            for _ in self.workers:
+                self.tasks.put(None)
+            for proc in self.workers:
+                proc.join(timeout=15)
+        for proc in self.workers:
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=5)
+        self.tasks.close()
+        self.events.close()
+
+
 def run_trajectory_videos_multi_gpu(*, reconstruction_dir, source_images,
                                      adapter_spec, video_code_root, gpu_ids,
                                      prompt, fps=30, resume=False,
-                                     env_overrides=None):
+                                     env_overrides=None, worker_pool=None):
     """Generate one MP4 per path; save the same result schema as single GPU.
 
     summary.json additionally stores worker loads, GPU assignment and wall time.
@@ -140,6 +235,24 @@ def run_trajectory_videos_multi_gpu(*, reconstruction_dir, source_images,
         }, indent=2, ensure_ascii=False), encoding="utf-8")
         print("[MULTI GPU] All videos reused; no workers launched", flush=True)
         return reused_output
+
+    if worker_pool is not None:
+        if ids != worker_pool.ids:
+            raise ValueError(f"GPU mismatch: requested {ids}, pool {worker_pool.ids}")
+        wall = worker_pool.generate(pending, completed, persist)
+        output = [completed[Path(p["file"]).stem] for p in paths]
+        details = {"mode": "multi_gpu_preloaded", "gpu_ids": ids,
+                   "model_load_by_gpu": worker_pool.loads,
+                   "model_preload_wall_seconds": worker_pool.preload_wall_seconds,
+                   "wall_seconds": wall,
+                   "sum_segment_seconds": round(sum(x["seconds"] for x in output), 3),
+                   "trajectories": len(output),
+                   "videos_generated": len(pending)}
+        (generated_root / "summary.json").write_text(
+            json.dumps(details, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"[MULTI GPU PRELOADED SUMMARY] {len(pending)} jobs on {ids}; "
+              f"video_wall={wall:.3f}s; preloaded_before_case=True", flush=True)
+        return output
 
     # Never import the adapter in the parent process: it initializes CUDA.
     ctx = mp.get_context("spawn")
