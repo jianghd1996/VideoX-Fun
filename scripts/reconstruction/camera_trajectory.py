@@ -81,7 +81,7 @@ def plan_trajectories(extrinsics, *, extra=False, extra_pitch_deg=5.0,
     if len(poses) < 2:
         raise ValueError("At least two input poses required")
     centers = _centers(poses)
-    forward = poses[:, 2, :] if False else np.einsum("nji,j->ni", poses[:, :3, :3], np.array([0., 0., 1.]))
+    forward = poses[:, 2, :3]
     forward = np.array([_unit(d) for d in forward])
     origin = _estimate_center(centers, forward)
     # Camera down is +Y in OpenCV. Recover scene up from all camera orientations.
