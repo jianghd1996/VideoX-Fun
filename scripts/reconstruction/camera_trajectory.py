@@ -76,12 +76,53 @@ def _estimate_scene_up(poses):
     return _unit(up)
 
 
-def _interp_poses(controls, count):
-    """Piecewise linear centers + SLERP rotations (no spline smoothing).
+def _corner_round_positions(positions, knots, times, fraction):
+    """Localized C1 corner rounding without global spline overshoot.
 
-    Retains exact DA3 input poses at the beginning and end.
-    Intermediate frames interpolate control poses; only the spherical control
-    poses are guaranteed to be exact look-at orientations.
+    Only a small window adjacent to each interior control pose is modified.
+    All control positions stay fixed; the path outside the windows is linear.
+    """
+    base = np.column_stack([np.interp(times, knots, positions[:, j])
+                            for j in range(3)])
+    if fraction <= 0 or len(positions) < 3:
+        return base
+    fraction = min(float(fraction), 0.24)
+
+    def hermite(p0, p1, v0, v1, t0, t1, ts):
+        dt = t1 - t0
+        u = ((ts - t0) / dt)[:, None]
+        return ((2*u**3 - 3*u**2 + 1)*p0
+                + (u**3 - 2*u**2 + u)*dt*v0
+                + (-2*u**3 + 3*u**2)*p1
+                + (u**3 - u**2)*dt*v1)
+
+    for j in range(1, len(positions)-1):
+        prev_dt = knots[j] - knots[j-1]
+        next_dt = knots[j+1] - knots[j]
+        left = knots[j] - fraction * prev_dt
+        right = knots[j] + fraction * next_dt
+        v_before = (positions[j] - positions[j-1]) / prev_dt
+        v_after = (positions[j+1] - positions[j]) / next_dt
+        # Time-weighted common tangent; avoids speed jumps at the corner.
+        tangent = (v_before * next_dt + v_after * prev_dt) / (prev_dt + next_dt)
+        p_left = positions[j] - (knots[j]-left)*v_before
+        p_right = positions[j] + (right-knots[j])*v_after
+        first = (times >= left) & (times <= knots[j])
+        second = (times > knots[j]) & (times <= right)
+        if np.any(first):
+            base[first] = hermite(p_left, positions[j], v_before, tangent,
+                                  left, knots[j], times[first])
+        if np.any(second):
+            base[second] = hermite(positions[j], p_right, tangent, v_after,
+                                   knots[j], right, times[second])
+    return base
+
+
+def _interp_poses(controls, count, *, corner_smoothing=0.15):
+    """Linear/SLERP baseline with optional gentle local position corner rounding.
+
+    No global spline and no rotation-spline smoothing. Exact end input poses.
+    corner_smoothing=0 reproduces the previous trajectory exactly.
     """
     positions = _centers(controls)
     rotations = Rotation.from_matrix(controls[:, :3, :3])
@@ -91,8 +132,7 @@ def _interp_poses(controls, count):
                          max(np.linalg.norm(positions, axis=1).mean(), 1e-6), 1e-5)
     knots = np.concatenate(([0.0], np.cumsum(lengths)))
     times = np.linspace(0, knots[-1], count)
-    cam_centers = np.column_stack([
-        np.interp(times, knots, positions[:, j]) for j in range(3)])
+    cam_centers = _corner_round_positions(positions, knots, times, corner_smoothing)
     rot = Slerp(knots, rotations)(times).as_matrix()
     result = np.broadcast_to(np.eye(4), (count, 4, 4)).copy()
     result[:, :3, :3] = rot
@@ -103,7 +143,7 @@ def _interp_poses(controls, count):
 
 def plan_trajectories(extrinsics, *, extra=False, extra_pitch_deg=5.0,
                       view_num=81, yaw_threshold=45.0, pitch_threshold=10.0,
-                      circle=False):
+                      circle=False, corner_smoothing=0.15):
     if view_num < 2:
         raise ValueError("view_num must be >= 2")
     poses = _w2c44(extrinsics)
@@ -164,12 +204,14 @@ def plan_trajectories(extrinsics, *, extra=False, extra_pitch_deg=5.0,
                 controls.append(sphere_pose(limit, (a_yaw+b_yaw)/2))
             controls.extend([sphere_pose(limit, b_yaw), poses[b]])
             # Collapse duplicate control points; Slerp requires strictly ascending knots.
-            segment = _interp_poses(np.stack(controls), view_num)
+            segment = _interp_poses(np.stack(controls), view_num,
+                                    corner_smoothing=corner_smoothing)
             trajectories.append({"mode": mode, "start_index": a, "end_index": b,
                                  "start_yaw": a_yaw, "end_yaw": b_yaw,
                                  "extrinsics": segment})
             current = target
-    info = {"interpolation": "piecewise_linear_slerp", "center": origin.tolist(), "estimated_scene_up": up.tolist(), "rotation_normalized_to_world": Q.tolist(),
+    info = {"interpolation": "local_corner_rounding_slerp" if corner_smoothing > 0 else "piecewise_linear_slerp",
+            "corner_smoothing": float(corner_smoothing), "center": origin.tolist(), "estimated_scene_up": up.tolist(), "rotation_normalized_to_world": Q.tolist(),
             "radius": radius, "yaws": yaw_unwrapped.tolist(), "pitches": pitches.tolist(),
             "yaw_min": float(min(yaw_unwrapped)), "yaw_max": float(max(yaw_unwrapped)),
             "pitch_min": lo, "pitch_max": hi, "extra": bool(extra), "circle": bool(circle),
