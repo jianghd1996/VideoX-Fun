@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 import sys
 import traceback
 from pathlib import Path
@@ -38,6 +39,8 @@ CONFIG = {
     "video_code_root": "/home/z00566689/dev/mnt/jiang_dev/SingleRecon/VideoX-Fun",
     "video_lora_path": "/home/z00566689/dev/mnt/jiang_dev/SingleRecon/Cloud_Models/Wan2.2-Fun-5B-Control/12000_lora.safetensors",
     "video_lora_weight": 0.55,
+    "video_cfg": 0.0,
+    "video_short_edge": 1088,
     "video_fps": 30,
     "video_resume": True,
 }
@@ -65,7 +68,9 @@ def main() -> None:
              sorted(p for p in root.iterdir() if p.is_dir() and (p / "image").is_dir()))
     if not cases:
         raise ValueError(f"No case/image folders found in {root}")
+    wall_started = time.perf_counter()
     pipeline = MultiImagePipeline(**opts)
+    print(f"[MULTI PRELOAD] initial={pipeline.load_seconds:.3f}s", flush=True)
     summary = {}
     for case in cases:
         print(f"[MULTI CASE] {case}", flush=True)
@@ -77,6 +82,16 @@ def main() -> None:
             traceback.print_exc()
         (root / "multi_image_summary.json").write_text(
             json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    print("\n[MULTI END-TO-END TIMING SUMMARY] (seconds)", flush=True)
+    keys = ("image_preprocess", "caption", "da3", "video_model_load",
+            "video_generation", "video_inference", "trajectory_video", "dense", "total")
+    print(f"{'Case':<35} {'Status':<8} " + " ".join(f"{key:>19}" for key in keys), flush=True)
+    for name, record in summary.items():
+        print(f"{name[:35]:<35} {record['status']:<8} "
+              + " ".join(f"{record[key]:>18.3f}s" if key in record else f"{'-':>19}"
+                         for key in keys), flush=True)
+    print(f"[MULTI ALL CASES] wall={time.perf_counter() - wall_started:.3f}s "
+          f"initial_model_preload={pipeline.load_seconds:.3f}s", flush=True)
     if any(row["status"] == "failed" for row in summary.values()):
         raise SystemExit(1)
 
