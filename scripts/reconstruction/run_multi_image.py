@@ -42,6 +42,10 @@ CONFIG = {
     "video_cfg": 0.0,
     "video_short_edge": 1088,
     "video_fps": 30,
+    # Automatically dispatch: one ID -> sequential, multiple -> parallel workers.
+    # GPU IDs are PHYSICAL CUDA device IDs; 4 trajectories + 4 GPUs => one each.
+    # With one GPU, use [0] and select physical GPU via CUDA_VISIBLE_DEVICES=4.
+    "video_gpu_ids": [4, 5, 6, 7],
     "video_resume": False,  # regenerate to ensure CFG=0 and short-edge=1088 take effect
 }
 WORK_DIR = "/home/z00566689/dev/mnt/jiang_test/00_1022_test"
