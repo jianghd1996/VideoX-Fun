@@ -81,6 +81,8 @@ class MultiImagePipeline:
                  video_gpu_ids: list[int] | None = None,
                  video_resume: bool = False,
                  video_preload_workers: bool = True,
+                 video_cpu_threads: int = 16,
+                 video_positive_prompt: str = "",
                  run_captioner: bool = True,
                  captioner_code_root: str | Path | None = None,
                  captioner_model_path: str | Path | None = None,
@@ -99,6 +101,10 @@ class MultiImagePipeline:
         self.trajectory_interpolation = trajectory_interpolation
         self.run_gen_video = bool(run_gen_video)
         self.video_fps = int(video_fps)
+        self.video_positive_prompt = str(video_positive_prompt)
+        self.video_cpu_threads = int(video_cpu_threads)
+        if self.video_cpu_threads < 1:
+            raise ValueError("video_cpu_threads must be positive")
         # One GPU: existing sequential adapter; multiple: one process per GPU.
         self.video_gpu_ids = list(video_gpu_ids if video_gpu_ids is not None else [0])
         if not self.video_gpu_ids or len(set(self.video_gpu_ids)) != len(self.video_gpu_ids):
@@ -118,6 +124,7 @@ class MultiImagePipeline:
                 str(Path(video_transformer_path).expanduser().resolve()) if video_transformer_path else ""),
             "SINGLERECON_CONTROL_SLA_TOPK": str(float(video_sla_topk)),
             "SINGLERECON_CONTROL_INFER_STEPS": str(int(video_infer_steps)),
+            "SINGLERECON_CONTROL_CPU_THREADS": str(self.video_cpu_threads),
             "SINGLERECON_CONTROL_LORA_PATH": str(Path(video_lora_path).expanduser().resolve()) if video_lora_path else "",
             "SINGLERECON_CONTROL_LORA_WEIGHT": str(float(video_lora_weight)),
             "SINGLERECON_CONTROL_CFG": str(float(video_cfg)),
@@ -342,10 +349,9 @@ class MultiImagePipeline:
         except ImportError:
             from multi_image_video import run_trajectory_videos
 
-        prompt_file = case_dir / "prompt.txt"
-        prompt = prompt_file.read_text(encoding="utf-8").strip() if prompt_file.is_file() else ""
-        if not prompt:
-            raise FileNotFoundError(f"Missing nonempty {prompt_file}")
+        # Text-free default: never implicitly reuse a stale prompt.txt.
+        # Caller can explicitly set video_positive_prompt for future runs.
+        prompt = self.video_positive_prompt
         arguments = dict(
             reconstruction_dir=case_dir / "reconstruction",
             source_images=input_images(case_dir / "image"),
