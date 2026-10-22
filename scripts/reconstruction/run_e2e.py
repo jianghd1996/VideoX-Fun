@@ -20,7 +20,7 @@ import signal
 GPU_IDS = "4,5"                 # "4" for the single-GPU baseline
 CPU_THREADS = 32               # per rank; use 16 on a busy server
 WORK_DIR = Path("/home/z00566689/dev/mnt/jiang_test/00_1021_test")
-DA3_ROOT = Path("/home/z00566689/dev/mnt/jiang_dev/SingleRecon/DA3_custom")
+DA3_ROOT = Path("/home/z00566689/dev/mnt/jiang_dev/CodexRecon/DA3_custom")
 VIDEO_ROOT = None              # Auto: config, sibling VideoX-Fun, or enclosing checkout
 # Explicit example when copied into SingleRecon:
 # VIDEO_ROOT = Path(__file__).resolve().parent / "VideoX-Fun"
@@ -28,7 +28,7 @@ VIDEO_ROOT = None              # Auto: config, sibling VideoX-Fun, or enclosing 
 # Reuse an existing JSON, or leave None to import your edited DEFAULT_ARGS.
 CONFIG_PATH = None             # e.g. Path("/path/to/SingleRecon/e2e_config.json")
 BASE_RUN_CASES = Path(__file__).with_name("run_cases.py")
-# If you keep the working configuration in SingleRecon/run_cases.py, change
+# If you keep the working configuration in CodexRecon/run_cases.py, change
 # BASE_RUN_CASES to that file so model/dense paths are copied from your setup.
 RUN_CAPTIONER = True          # Include caption inference in per-case total
 CAPTION_FORCE_REGENERATE = True # Benchmark caption even when prompt.txt exists
