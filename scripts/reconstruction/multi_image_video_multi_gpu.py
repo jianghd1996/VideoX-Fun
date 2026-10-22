@@ -16,8 +16,6 @@ import time
 import traceback
 from pathlib import Path
 
-import numpy as np
-
 
 def _worker(gpu_id, video_code_root, adapter_spec, environment, tasks, events):
     # Bind CUDA before importing either torch or the Wan adapter.
@@ -186,6 +184,8 @@ def run_trajectory_videos_multi_gpu(*, reconstruction_dir, source_images,
 
     summary.json additionally stores worker loads, GPU assignment and wall time.
     """
+    import numpy as np
+
     root = Path(reconstruction_dir)
     manifest_file = root / "trajectories" / "manifest.json"
     manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
