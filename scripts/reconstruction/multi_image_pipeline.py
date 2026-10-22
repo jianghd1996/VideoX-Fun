@@ -67,6 +67,8 @@ class MultiImagePipeline:
                  video_code_root: str | Path | None = None,
                  video_lora_path: str | Path | None = None,
                  video_lora_weight: float = 0.55,
+                 video_cfg: float = 0.0,
+                 video_short_edge: int = 1088,
                  video_fps: int = 30,
                  video_resume: bool = False,
                  run_captioner: bool = True,
@@ -83,6 +85,7 @@ class MultiImagePipeline:
         self.trajectory_interpolation = trajectory_interpolation
         self.run_gen_video = bool(run_gen_video)
         self.video_fps = int(video_fps)
+        self.video_model_load_seconds = 0.0
         self.video_resume = bool(video_resume)
         self.run_captioner = bool(run_captioner)
         self.captioner_cpu_swap = bool(captioner_cpu_swap)
@@ -108,6 +111,8 @@ class MultiImagePipeline:
             if video_lora_path is not None:
                 os.environ["SINGLERECON_CONTROL_LORA_PATH"] = str(Path(video_lora_path).expanduser().resolve())
             os.environ["SINGLERECON_CONTROL_LORA_WEIGHT"] = str(float(video_lora_weight))
+            os.environ["SINGLERECON_CONTROL_CFG"] = str(float(video_cfg))
+            os.environ["SINGLERECON_CONTROL_SHORT_EDGE"] = str(int(video_short_edge))
             factory = load_callable(video_adapter)
             # Delay heavyweight Wan loading until after DA3 returns to CPU.
             # Loading both models on GPU during DA3 would otherwise risk OOM.
@@ -272,10 +277,14 @@ class MultiImagePipeline:
             from multi_image_video import run_trajectory_videos
         if self.video_generator is None:
             factory = self.video_generator_factory
+            load_started = time.perf_counter()
             self.video_generator = factory() if isinstance(factory, type) else factory
             preload = getattr(self.video_generator, "load", None)
             if callable(preload):
                 preload()
+            _synchronize_cuda()
+            self.video_model_load_seconds = round(time.perf_counter() - load_started, 3)
+            print(f"[MULTI VIDEO MODEL LOAD] {self.video_model_load_seconds:.3f}s", flush=True)
         prompt_file = case_dir / "prompt.txt"
         prompt = prompt_file.read_text(encoding="utf-8").strip() if prompt_file.is_file() else ""
         return run_trajectory_videos(
@@ -285,6 +294,7 @@ class MultiImagePipeline:
             prompt=prompt, resume=self.video_resume)
 
     def __call__(self, work_dir: str | Path, export_dir: str | Path | None = None) -> dict[str, Any]:
+        case_started = time.perf_counter()
         case = Path(work_dir).expanduser().resolve()
         sources = input_images(case / "image")
         reconstruction = case / "reconstruction"
@@ -295,6 +305,7 @@ class MultiImagePipeline:
         journal_path = reconstruction / "stage_status.json"
         reconstruction.mkdir(parents=True, exist_ok=True)
 
+        image_prep_started = time.perf_counter()
         # Do not reuse single-image generated frames as multi-image DA3 inputs.
         target_images.mkdir(parents=True, exist_ok=True)
         manifest_path = reconstruction / "multi_input_manifest.json"
@@ -339,12 +350,15 @@ class MultiImagePipeline:
         for p in sorted(normalized.glob("*.jpg")):
             shutil.copy2(p, target_images / p.name)
 
+        image_preprocess_seconds = round(time.perf_counter() - image_prep_started, 3)
+        print(f"[MULTI IMAGE PREPROCESS] {case.name}: {image_preprocess_seconds:.3f}s", flush=True)
+
         try:
             journal = json.loads(journal_path.read_text(encoding="utf-8")) if journal_path.exists() else {}
         except (OSError, ValueError):
             journal = {}
         stages = journal.setdefault("stages", {})
-        timings: dict[str, float] = {}
+        timings: dict[str, float] = {"image_preprocess": image_preprocess_seconds}
         results: dict[str, Any] = {"input_views": len(sources), "video_generation": "disabled",
                                    "trajectory_render": self.render_trajectories}
 
@@ -420,6 +434,12 @@ class MultiImagePipeline:
                         results["prompt"] = value
                     elif label == "trajectory_video":
                         results["trajectory_videos"] = value
+                        timings["video_model_load"] = self.video_model_load_seconds
+                        timings["video_generation"] = round(sum(
+                            float(item["seconds"]) for item in value), 3)
+                        timings["video_inference"] = round(sum(
+                            float(item.get("inference_timing", {}).get("inference", 0))
+                            for item in value), 3)
                     else:
                         results["dense_result"] = value
                     stages[label] = {"status": "ok", "finished_at": datetime.now(timezone.utc).isoformat()}
@@ -435,7 +455,13 @@ class MultiImagePipeline:
                     print(f"[MULTI {case.name}] {label}: {timings[label]:.3f}s", flush=True)
         finally:
             _synchronize_cuda()
-            timings["total"] = round(time.perf_counter() - start, 3)
+            _synchronize_cuda()
+            timings["stages_total"] = round(time.perf_counter() - start, 3)
+            timings["total"] = round(time.perf_counter() - case_started, 3)
+            timings["model_preload_once"] = self.load_seconds
             (reconstruction / "timings.json").write_text(json.dumps(timings, indent=2), encoding="utf-8")
+            print(f"[MULTI TIMING] {case.name}: "
+                  + " ".join(f"{key}={value:.3f}s" for key, value in timings.items()),
+                  flush=True)
         results["timings"] = timings
         return results
