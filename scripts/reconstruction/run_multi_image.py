@@ -29,7 +29,7 @@ CONFIG = {
     "max_frames": 121,
     "render_trajectories": True,
     "trajectory_extra": False,
-    "trajectory_view_num": 81,
+    "trajectory_view_num": 49,  # 49-frame speed/quality ablation; use --trajectory-frames 81 for baseline
     "trajectory_interpolation": "bezier",  # Keep fixed until E2E pipeline works
     "run_gen_video": True,
     "run_captioner": False,  # no caption model; positive prompt defaults to empty
@@ -69,6 +69,8 @@ def main() -> None:
     parser.add_argument("--work-dir", type=Path, default=Path(WORK_DIR))
     parser.add_argument("--config", type=Path)
     parser.add_argument("--da3-only", action="store_true")
+    parser.add_argument("--trajectory-frames", type=int,
+                        help="Frames per GS/Wan trajectory (4n+1), default 49 for this ablation")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--no-save-mp4", action="store_true",
                         help="Skip full generated MP4; still save pose-selected JPGs from Wan tensor")
@@ -84,6 +86,10 @@ def main() -> None:
     opts = dict(CONFIG)
     if args.config:
         opts.update(json.loads(args.config.read_text(encoding="utf-8")))
+    if args.trajectory_frames is not None:
+        opts["trajectory_view_num"] = args.trajectory_frames
+    if opts["trajectory_view_num"] < 5 or (opts["trajectory_view_num"] - 1) % 4:
+        parser.error("--trajectory-frames must be >= 5 and equal to 4n+1 (e.g. 49 or 81)")
     if args.no_save_mp4:
         opts["video_save_mp4"] = False
     if args.video_cpu_threads is not None:
@@ -120,7 +126,8 @@ def main() -> None:
             raise FileExistsError(
                 "Fresh benchmark would reuse/overwrite existing reconstruction. "
                 "Create a separate test case containing only image/: " + ", ".join(collisions))
-    print(f"[BENCHMARK] gpus={opts['video_gpu_ids']} "
+    print(f"[BENCHMARK] trajectory_frames={opts['trajectory_view_num']} "
+          f"gpus={opts['video_gpu_ids']} "
           f"worker_cpu_threads={opts['video_cpu_threads']} "
           f"captioner={opts['run_captioner']} positive_prompt={opts['video_positive_prompt']!r} "
           f"save_mp4={opts['video_save_mp4']} "
