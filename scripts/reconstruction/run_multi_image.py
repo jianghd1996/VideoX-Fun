@@ -56,6 +56,7 @@ CONFIG = {
     # With one GPU, use [0] and select physical GPU via CUDA_VISIBLE_DEVICES=4.
     "video_gpu_ids": [6, 7],
     "video_resume": False,  # full E2E benchmark: regenerate all videos
+    "video_preload_workers": True,  # preload Wan on GPU 6,7 at pipeline startup
 }
 WORK_DIR = "/home/z00566689/dev/mnt/jiang_test/00_1022_test/cover2_e2e"
 
@@ -112,18 +113,22 @@ def main() -> None:
           f"video_resume={opts['video_resume']} resume_stages={opts['resume_stages']}", flush=True)
     wall_started = time.perf_counter()
     pipeline = MultiImagePipeline(**opts)
-    print(f"[MULTI PRELOAD] initial={pipeline.load_seconds:.3f}s", flush=True)
+    print(f"[MULTI PRELOAD] initial={pipeline.load_seconds:.3f}s "
+          f"wan_worker_pool={pipeline.video_worker_preload_seconds:.3f}s", flush=True)
     summary = {}
-    for case in cases:
-        print(f"[MULTI CASE] {case}", flush=True)
-        try:
-            result = pipeline(case)
-            summary[case.name] = {"status": "ok", **result["timings"]}
-        except Exception as exc:
-            summary[case.name] = {"status": "failed", "error": str(exc)}
-            traceback.print_exc()
-        (root / "multi_image_summary.json").write_text(
-            json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    try:
+        for case in cases:
+            print(f"[MULTI CASE] {case}", flush=True)
+            try:
+                result = pipeline(case)
+                summary[case.name] = {"status": "ok", **result["timings"]}
+            except Exception as exc:
+                summary[case.name] = {"status": "failed", "error": str(exc)}
+                traceback.print_exc()
+            (root / "multi_image_summary.json").write_text(
+                json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    finally:
+        pipeline.close()
     print("\n[MULTI END-TO-END TIMING SUMMARY] (seconds)", flush=True)
     keys = ("image_preprocess", "caption", "da3", "video_model_load",
             "video_generation", "video_inference", "trajectory_video",
@@ -135,13 +140,15 @@ def main() -> None:
                          for key in keys), flush=True)
     wall = time.perf_counter() - wall_started
     print(f"[MULTI ALL CASES] wall={wall:.3f}s "
-          f"initial_model_preload={pipeline.load_seconds:.3f}s", flush=True)
+          f"initial_model_preload={pipeline.load_seconds:.3f}s "
+          f"wan_worker_preload={pipeline.video_worker_preload_seconds:.3f}s", flush=True)
     for name, record in summary.items():
         if record.get("status") != "ok":
             continue
         print(f"[BENCHMARK {name}] stage_total={record.get('stages_total', float('nan')):.3f}s "
               f"case_total={record.get('total', float('nan')):.3f}s "
               f"initial_preload_once={pipeline.load_seconds:.3f}s "
+              f"wan_preload_once={pipeline.video_worker_preload_seconds:.3f}s "
               f"video_wall={record.get('trajectory_video', float('nan')):.3f}s "
               f"video_sum_segments={record.get('video_generation', float('nan')):.3f}s "
               f"dense={record.get('dense', float('nan')):.3f}s", flush=True)
