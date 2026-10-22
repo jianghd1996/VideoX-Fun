@@ -57,10 +57,16 @@ class MultiImagePipeline:
                  circle: bool = False,
                  max_frames: int = 121,
                  da3_instance: Any = None,
-                 dense_instance: Any = None):
+                 dense_instance: Any = None,
+                 render_trajectories: bool = True,
+                 trajectory_extra: bool = False,
+                 trajectory_view_num: int = 81):
         root = Path(external_code_root).expanduser().resolve()
         dense_root = Path(dense_code_root or root).expanduser().resolve()
         self.run_3dgs_iter = bool(run_3dgs_iter)
+        self.render_trajectories = bool(render_trajectories)
+        self.trajectory_extra = bool(trajectory_extra)
+        self.trajectory_view_num = int(trajectory_view_num)
         self.resume_stages = bool(resume_stages)
         self.crop_ratio = float(crop_ratio)
         self.mode = mode
@@ -76,6 +82,94 @@ class MultiImagePipeline:
                       else create_full_reconstruction(dense_root)) if self.run_3dgs_iter else None
         self.load_seconds = round(time.perf_counter() - start, 3)
         print(f"[MULTI PRELOAD] {self.load_seconds:.3f}s (excluded from case timings)", flush=True)
+
+
+    def _da3_with_trajectory(self, image_dir: Path, colmap: Path, gs_video: Path):
+        """One DA3 inference, then render each planned path from its predicted Gaussians."""
+        import glob
+        import numpy as np
+        import torch
+        import cv2
+        from camera_trajectory import plan_trajectories, save_trajectories
+        from depth_anything_3.utils.export.colmap_init import save_sparserecon
+        from depth_anything_3.utils.export.gs import export_to_gs_video
+
+        images = sorted(glob.glob(str(image_dir / "*.jpg")))
+        device = self.da3.device
+        self.da3.model.to(device=device)
+        try:
+            prediction = self.da3.model.inference(
+                images, infer_gs=True, use_ray_pose=True, process_res=840)
+            # COLMAP exporter applies the same metric scale conversion as the
+            # original DA3 runner. Do not modify prediction or Gaussian positions.
+            recon = save_sparserecon(prediction, images, colmap)
+            paths, info = plan_trajectories(
+                prediction.extrinsics, extra=self.trajectory_extra,
+                view_num=self.trajectory_view_num, circle=self.circle)
+            if not paths:
+                raise RuntimeError("No up/down trajectories generated")
+            out = gs_video.parent / "trajectories"
+            manifest = save_trajectories(paths, info, out)
+            rendered_paths = []
+            for i, path in enumerate(paths):
+                name = manifest["trajectories"][i]["file"].removesuffix(".npy")
+                poses = path["extrinsics"].copy()
+                # GS renderer uses prediction scale, consistent with original
+                # DA3 export_to_gs_video's implicit prediction-extrinsics path.
+                if prediction.is_metric and prediction.scale_factor is not None:
+                    poses[:, :3, 3] /= float(prediction.scale_factor)
+                a, b = path["start_index"], path["end_index"]
+                Ka = np.asarray(prediction.intrinsics[a], dtype=np.float32)
+                Kb = np.asarray(prediction.intrinsics[b], dtype=np.float32)
+                weights = np.linspace(0, 1, len(poses), dtype=np.float32)
+                Ks = np.stack([(1-w)*Ka+w*Kb for w in weights])
+                render_kwargs = dict(
+                    prediction=prediction, export_dir=str(out),
+                    extrinsics=torch.from_numpy(poses).to(prediction.gaussians.means).unsqueeze(0),
+                    intrinsics=torch.from_numpy(Ks).to(prediction.gaussians.means).unsqueeze(0),
+                    trj_mode="original", vis_depth=None, output_name=name,
+                    chunk_size=4)
+                print(f"[TRAJECTORY] {name}: {len(poses)} frames, input {a}->{b}", flush=True)
+                export_to_gs_video(**render_kwargs)
+                rendered = out / "gs_video" / f"{name}.mp4"
+                if not rendered.is_file():
+                    raise FileNotFoundError(rendered)
+                rendered_paths.append(rendered)
+            # A single inspection video concatenates all paths; each clip is
+            # also retained independently to identify its source endpoints.
+            writer = None
+            try:
+                for path in rendered_paths:
+                    cap = cv2.VideoCapture(str(path))
+                    if not cap.isOpened():
+                        raise RuntimeError(f"Cannot open GS trajectory video: {path}")
+                    try:
+                        while True:
+                            ok, frame = cap.read()
+                            if not ok:
+                                break
+                            h, w = frame.shape[:2]
+                            if writer is None:
+                                writer = cv2.VideoWriter(str(gs_video),
+                                    cv2.VideoWriter_fourcc(*"mp4v"), 24, (w, h))
+                                if not writer.isOpened():
+                                    raise RuntimeError(f"Cannot write {gs_video}")
+                            writer.write(frame)
+                    finally:
+                        cap.release()
+            finally:
+                if writer is not None:
+                    writer.release()
+            if not gs_video.is_file() or gs_video.stat().st_size == 0:
+                raise RuntimeError("GS trajectory video was not created")
+            print(f"[TRAJECTORY VIDEO] {gs_video} ({len(rendered_paths)} paths)", flush=True)
+            return recon
+        finally:
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            self.da3.model.to("cpu")
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
 
     def stage_video(self, case_dir: Path) -> None:
         """Reserved for trajectory-conditioned generation; intentionally disabled."""
@@ -142,7 +236,8 @@ class MultiImagePipeline:
             journal = {}
         stages = journal.setdefault("stages", {})
         timings: dict[str, float] = {}
-        results: dict[str, Any] = {"input_views": len(sources), "video_generation": "disabled"}
+        results: dict[str, Any] = {"input_views": len(sources), "video_generation": "disabled",
+                                   "trajectory_render": self.render_trajectories}
 
         def persist() -> None:
             journal["pipeline"] = "multi_image"
@@ -153,6 +248,8 @@ class MultiImagePipeline:
 
         def da3_stage():
             colmap.mkdir(parents=True, exist_ok=True)
+            if self.render_trajectories:
+                return self._da3_with_trajectory(target_images, colmap, gs_video)
             return self.da3.infer(args=DA3Params(
                 data_path=str(target_images), colmap_path=str(colmap),
                 gs_render_vid_path=str(gs_video), view_num=len(sources),
@@ -178,7 +275,7 @@ class MultiImagePipeline:
             for label, operation in operations:
                 valid = (_colmap_valid(colmap) and gs_video.is_file() and gs_video.stat().st_size > 0
                          if label == "da3" else (dense_export / ".dense_complete").is_file())
-                if self.resume_stages and valid and (
+                if self.resume_stages and label == "da3" and self.render_trajectories:\n                    valid = valid and (reconstruction / "trajectories" / "manifest.json").is_file()\n                if self.resume_stages and valid and (
                     label != "dense" or stages.get(label, {}).get("status") == "ok"
                 ):
                     print(f"[MULTI RESUME] {case.name}: skip {label}", flush=True)
