@@ -4,7 +4,7 @@
 Reuses the single-image pipeline's *same* DA3 runner and dense reconstruction
 backend. This is an A/B experiment with multi-image known-pose reconstruction.
 
-Examples (run from SingleRecon after copying this script there):
+Examples (run from CodexRecon after copying this script there):
     CUDA_VISIBLE_DEVICES=4 python run_existing_images_da3_dense.py \
         --work-dir /home/z00566689/dev/mnt/jiang_test/00_1022_test/cover2_compare
 
@@ -28,9 +28,9 @@ from multistage_pipeline import (
 
 # Same external implementations and checkpoints as the original single-image
 # pipeline. Override these from CLI when testing a different checkout.
-SINGLERECON_ROOT = Path("/home/z00566689/dev/mnt/jiang_dev/SingleRecon")
-DA3_ROOT = SINGLERECON_ROOT / "DA3_custom"
-DA3_MODEL = SINGLERECON_ROOT / "Cloud_Models/Saliency-Face-DA3/besthumanmodel_lr1e_6_ckpt2.pt"
+CODEXRECON_ROOT = Path("/home/z00566689/dev/mnt/jiang_dev/CodexRecon")
+DA3_ROOT = CODEXRECON_ROOT / "DA3_custom"
+DA3_MODEL = CODEXRECON_ROOT / "Cloud_Models/Saliency-Face-DA3/besthumanmodel_lr1e_6_ckpt2.pt"
 
 
 def _source_images(root: Path) -> list[Path]:
@@ -76,7 +76,7 @@ def main():
     parser.add_argument("--work-dir", type=Path, default=Path(
         "/home/z00566689/dev/mnt/jiang_test/00_1022_test/cover2_compare"))
     parser.add_argument("--da3-root", type=Path, default=DA3_ROOT)
-    parser.add_argument("--dense-root", type=Path, default=SINGLERECON_ROOT)
+    parser.add_argument("--dense-root", type=Path, default=CODEXRECON_ROOT)
     parser.add_argument("--da3-model", type=Path, default=DA3_MODEL)
     parser.add_argument("--crop-ratio", type=float, default=1.0)
     parser.add_argument("--mode", default="scene")
