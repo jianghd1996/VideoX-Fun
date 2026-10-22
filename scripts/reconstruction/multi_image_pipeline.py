@@ -68,7 +68,12 @@ class MultiImagePipeline:
                  video_lora_path: str | Path | None = None,
                  video_lora_weight: float = 0.55,
                  video_fps: int = 30,
-                 video_resume: bool = False):
+                 video_resume: bool = False,
+                 run_captioner: bool = True,
+                 captioner_code_root: str | Path | None = None,
+                 captioner_model_path: str | Path | None = None,
+                 captioner_cpu_swap: bool = True,
+                 captioner_num_gpus: int = 1):
         root = Path(external_code_root).expanduser().resolve()
         dense_root = Path(dense_code_root or root).expanduser().resolve()
         self.run_3dgs_iter = bool(run_3dgs_iter)
@@ -79,6 +84,12 @@ class MultiImagePipeline:
         self.run_gen_video = bool(run_gen_video)
         self.video_fps = int(video_fps)
         self.video_resume = bool(video_resume)
+        self.run_captioner = bool(run_captioner)
+        self.captioner_cpu_swap = bool(captioner_cpu_swap)
+        self.captioner_num_gpus = int(captioner_num_gpus)
+        self.captioner_code_root = Path(captioner_code_root or dense_root).expanduser().resolve()
+        self.captioner_model_path = Path(captioner_model_path or (dense_root / "Cloud_Models/Qwen3-VL-8B-Instruct")).expanduser().resolve()
+        self.img_captioner = None
         self.video_generator = None
         if self.run_gen_video:
             if not self.render_trajectories:
@@ -206,6 +217,50 @@ class MultiImagePipeline:
             if device.type == "cuda":
                 torch.cuda.empty_cache()
 
+    def stage_caption(self, case_dir: Path) -> str:
+        """Use the same Qwen3-VL ImagesCaptioner as the single-image pipeline.
+
+        Caption the original multi-image folder once per case. Reuse prompt.txt
+        if it is already nonempty; never regenerate for individual trajectories.
+        """
+        prompt_file = case_dir / "prompt.txt"
+        if prompt_file.is_file():
+            prompt = prompt_file.read_text(encoding="utf-8").strip()
+            if prompt:
+                print(f"[MULTI CAPTION] reuse {prompt_file}", flush=True)
+                return prompt
+        if not self.run_captioner:
+            raise FileNotFoundError(
+                f"Missing nonempty {prompt_file}; enable run_captioner or provide prompt.txt"
+            )
+        if str(self.captioner_code_root) not in sys.path:
+            sys.path.insert(0, str(self.captioner_code_root))
+        if self.img_captioner is None:
+            from qwen_vl3_images_caption_parallel import ImagesCaptioner
+            self.img_captioner = ImagesCaptioner(
+                model_path=str(self.captioner_model_path),
+                num_gpus=self.captioner_num_gpus,
+            )
+        import torch
+        model = self.img_captioner.model
+        if self.captioner_cpu_swap:
+            model.to("cuda")
+        try:
+            # The captioner expects an image DIRECTORY, not a single image.
+            # Source images are original; DA3-generated frames are excluded.
+            prompt = self.img_captioner.read_image_caption(str(case_dir / "image"))
+            if not isinstance(prompt, str) or not prompt.strip():
+                raise ValueError(f"Empty image caption for {case_dir}")
+            prompt = prompt.strip()
+            prompt_file.write_text(prompt, encoding="utf-8")
+            print(f"[MULTI CAPTION] {case_dir.name}: {prompt}", flush=True)
+            return prompt
+        finally:
+            if self.captioner_cpu_swap:
+                model.to("cpu")
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
     def stage_video(self, case_dir: Path) -> list[dict[str, Any]]:
         """Use each GS trajectory as video control, then export frame/pose mappings."""
         try:
@@ -317,7 +372,10 @@ class MultiImagePipeline:
             (dense_export / ".dense_complete").write_text("ok\n", encoding="utf-8")
             return result
 
-        operations = [("da3", da3_stage)]
+        operations = []
+        if self.run_gen_video:
+            operations.append(("caption", lambda: self.stage_caption(case)))
+        operations.append(("da3", da3_stage))
         if self.run_gen_video:
             operations.append(("trajectory_video", lambda: self.stage_video(case)))
         if self.run_3dgs_iter:
@@ -326,7 +384,10 @@ class MultiImagePipeline:
         start = time.perf_counter()
         try:
             for label, operation in operations:
-                if label == "da3":
+                if label == "caption":
+                    p = case / "prompt.txt"
+                    valid = p.is_file() and bool(p.read_text(encoding="utf-8").strip())
+                elif label == "da3":
                     valid = (_colmap_valid(colmap) and gs_video.is_file() and gs_video.stat().st_size > 0)
                 elif label == "trajectory_video":
                     valid = (reconstruction / "generated_trajectories" / "manifest.json").is_file()
@@ -352,6 +413,8 @@ class MultiImagePipeline:
                             raise RuntimeError(f"DA3 did not write COLMAP poses: {colmap}")
                         if not gs_video.is_file() or gs_video.stat().st_size == 0:
                             raise RuntimeError(f"DA3 did not write GS video: {gs_video}")
+                    elif label == "caption":
+                        results["prompt"] = value
                     elif label == "trajectory_video":
                         results["trajectory_videos"] = value
                     else:
