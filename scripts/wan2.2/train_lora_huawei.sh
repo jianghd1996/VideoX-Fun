@@ -3,9 +3,9 @@ set -euo pipefail
 
 MODEL_NAME="${MODEL_NAME:-/cache/models/Wan2.2-TI2V-5B}"
 DATASET_NAME="${DATASET_NAME:-/cache/training_data}"
-DATASET_META_NAME="${DATASET_META_NAME:-/cache/training_data/theta30_phi5_self_render_1019_cloud.json}"
+DATASET_META_NAME="${DATASET_META_NAME:-/cache/training_data/theta30_phi5_UE_render_cloud.json}"
 VALIDATION_DATA_DIR="${VALIDATION_DATA_DIR:-/cache/testing_data/livephoto_test}"
-OUTPUT_DIR="${OUTPUT_DIR:-/cache/output/trajectory_lora_theta30_phi5_self_render_1019}"
+OUTPUT_DIR="${OUTPUT_DIR:-/cache/output/trajectory_lora_theta30_phi5_UE_render}"
 
 GPU_IDS="${GPU_IDS:-0,1,2,3,4,5,6,7}"
 NUM_PROCESSES="${NUM_PROCESSES:-8}"
