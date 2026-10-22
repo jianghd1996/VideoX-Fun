@@ -19,7 +19,8 @@ CONFIG = {
     "external_code_root": "/home/z00566689/dev/mnt/jiang_dev/SingleRecon/DA3_custom",
     "dense_code_root": "/home/z00566689/dev/mnt/jiang_dev/SingleRecon",
     "da3_model_path": "/home/z00566689/dev/mnt/jiang_dev/SingleRecon/Cloud_Models/Saliency-Face-DA3/besthumanmodel_lr1e_6_ckpt2.pt",
-    "run_3dgs_iter": False,  # trajectory inspection: DA3 + GS render only
+    "run_3dgs_iter": True,  # full pipeline: generated videos -> COLMAP -> Reconstruction_full
+    "dense_generated_frames": 40,  # distribute 40 intermediate views over all trajectories
     "resume_stages": False,
     "crop_ratio": 1.0,
     "mode": "scene",
@@ -50,7 +51,7 @@ CONFIG = {
     # GPU IDs are PHYSICAL CUDA device IDs; 4 trajectories + 4 GPUs => one each.
     # With one GPU, use [0] and select physical GPU via CUDA_VISIBLE_DEVICES=4.
     "video_gpu_ids": [4, 5, 6, 7],
-    "video_resume": False,  # regenerate to ensure CFG=0 and short-edge=1088 take effect
+    "video_resume": True,  # reuse previously generated MP4s when testing dense stage
 }
 WORK_DIR = "/home/z00566689/dev/mnt/jiang_test/00_1022_test"
 
@@ -92,7 +93,8 @@ def main() -> None:
             json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     print("\n[MULTI END-TO-END TIMING SUMMARY] (seconds)", flush=True)
     keys = ("image_preprocess", "caption", "da3", "video_model_load",
-            "video_generation", "video_inference", "trajectory_video", "dense", "total")
+            "video_generation", "video_inference", "trajectory_video",
+            "dense_prepare", "dense", "total")
     print(f"{'Case':<35} {'Status':<8} " + " ".join(f"{key:>19}" for key in keys), flush=True)
     for name, record in summary.items():
         print(f"{name[:35]:<35} {record['status']:<8} "
