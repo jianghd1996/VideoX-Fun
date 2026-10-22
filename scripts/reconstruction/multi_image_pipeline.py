@@ -51,6 +51,7 @@ class MultiImagePipeline:
                  dense_code_root: str | Path | None = None,
                  da3_model_path: str | Path | None = None,
                  run_3dgs_iter: bool = True,
+                 dense_generated_frames: int = 40,
                  resume_stages: bool = False,
                  crop_ratio: float = 1.0,
                  mode: str = "scene",
@@ -83,6 +84,9 @@ class MultiImagePipeline:
         root = Path(external_code_root).expanduser().resolve()
         dense_root = Path(dense_code_root or root).expanduser().resolve()
         self.run_3dgs_iter = bool(run_3dgs_iter)
+        self.dense_generated_frames = int(dense_generated_frames)
+        if self.dense_generated_frames < 1:
+            raise ValueError("dense_generated_frames must be positive")
         self.render_trajectories = bool(render_trajectories)
         self.trajectory_extra = bool(trajectory_extra)
         self.trajectory_view_num = int(trajectory_view_num)
@@ -422,11 +426,26 @@ class MultiImagePipeline:
                 gs_render_vid_path=str(gs_video), view_num=len(sources),
                 crop_ratio=self.crop_ratio, extra_view=[False, False]))
 
+        def dense_prepare_stage():
+            try:
+                from .multi_image_dense_input import prepare_dense_input
+            except ImportError:
+                from multi_image_dense_input import prepare_dense_input
+            if not (reconstruction / "generated_trajectories" / "manifest.json").is_file():
+                raise FileNotFoundError("Dense reconstruction requires completed generated trajectories")
+            return prepare_dense_input(
+                reconstruction_dir=reconstruction,
+                sample_count=self.dense_generated_frames)
+
         def dense_stage():
-            if not _colmap_valid(colmap):
-                raise RuntimeError(f"Missing DA3 COLMAP initialization: {colmap}")
+            dense_input = reconstruction / "dense_input"
+            dense_colmap = dense_input / "sparse" / "0"
+            if not _colmap_valid(dense_colmap):
+                raise RuntimeError(f"Missing merged generated-video COLMAP: {dense_colmap}")
+            if not any((dense_input / "image").glob("*.jpg")):
+                raise RuntimeError(f"No sampled generated frames in {dense_input / 'image'}")
             dense_export.mkdir(parents=True, exist_ok=True)
-            result = self.dense(work_dir=reconstruction, export_dir=dense_export,
+            result = self.dense(work_dir=dense_input, export_dir=dense_export,
                                 mode=self.mode, circle=self.circle, max_frames=self.max_frames)
             if result is False:
                 raise RuntimeError("Dense reconstruction returned False")
@@ -440,6 +459,7 @@ class MultiImagePipeline:
         if self.run_gen_video:
             operations.append(("trajectory_video", lambda: self.stage_video(case)))
         if self.run_3dgs_iter:
+            operations.append(("dense_prepare", dense_prepare_stage))
             operations.append(("dense", dense_stage))
         _synchronize_cuda()
         start = time.perf_counter()
@@ -451,8 +471,10 @@ class MultiImagePipeline:
                 elif label == "da3":
                     valid = (_colmap_valid(colmap) and gs_video.is_file() and gs_video.stat().st_size > 0)
                 elif label == "trajectory_video":
-                    # Do not skip this stage just because an old manifest exists:
-                    # generation config (CFG/resolution/LoRA) may have changed.
+                    # Video resume is enforced inside the video stage, per MP4.
+                    valid = False
+                elif label == "dense_prepare":
+                    # Regenerate the input mapping to avoid stale frame selections.
                     valid = False
                 else:
                     valid = (dense_export / ".dense_complete").is_file()
@@ -478,6 +500,9 @@ class MultiImagePipeline:
                             raise RuntimeError(f"DA3 did not write GS video: {gs_video}")
                     elif label == "caption":
                         results["prompt"] = value
+                    elif label == "dense_prepare":
+                        results["dense_input"] = value
+                        timings["dense_input_views"] = value["total_views"]
                     elif label == "trajectory_video":
                         results["trajectory_videos"] = value
                         timings["video_model_load"] = self.video_model_load_seconds
