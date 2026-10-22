@@ -317,7 +317,8 @@ class WanControl5B:
 
     @torch.inference_mode()
     def __call__(self, *, control_video, start_image, end_image, output_video,
-                 prompt, num_frames, fps=30):
+                 prompt, num_frames, fps=30, sampled_frame_indices=None,
+                 sampled_frames_dir=None, save_mp4=True):
         if self.pipeline is None:
             self.load()
         num_frames = int(num_frames)
@@ -366,7 +367,30 @@ class WanControl5B:
         save_started = time.perf_counter()
         destination = Path(output_video)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        save_videos_grid(video, str(destination), fps=int(fps))
+        sampled_frame_indices = sorted(set(int(i) for i in (sampled_frame_indices or [])))
+        if any(i < 0 or i >= num_frames for i in sampled_frame_indices):
+            raise ValueError(f"Sample frame outside video length {num_frames}: {sampled_frame_indices}")
+        jpg_started = time.perf_counter()
+        if sampled_frame_indices:
+            frame_dir = Path(sampled_frames_dir or destination.parent / "sampled_frames")
+            frame_dir.mkdir(parents=True, exist_ok=True)
+            if not isinstance(video, torch.Tensor) or video.ndim != 5 or video.shape[0] != 1:
+                raise ValueError(f"Expected Wan output tensor [1,C,T,H,W], got {type(video)} "
+                                 f"{getattr(video, 'shape', None)}")
+            # Wan save_videos_grid uses x * 255 then uint8 for output. Match
+            # its RGB image convention but avoid MP4 lossy encode/decode.
+            for i in sampled_frame_indices:
+                rgb = video[0, :, i].permute(1, 2, 0).detach().float().cpu()
+                rgb = (rgb.clamp(0, 1) * 255).to(torch.uint8).numpy()
+                target = frame_dir / f"f{i:04d}.jpg"
+                if not cv2.imwrite(str(target), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR),
+                                   [cv2.IMWRITE_JPEG_QUALITY, 95]):
+                    raise IOError(f"Cannot save direct Wan JPG {target}")
+        jpg_seconds = time.perf_counter() - jpg_started
+        mp4_started = time.perf_counter()
+        if save_mp4:
+            save_videos_grid(video, str(destination), fps=int(fps))
+        mp4_seconds = time.perf_counter() - mp4_started if save_mp4 else 0.0
         del video
         torch.cuda.synchronize(self.device)
         save_seconds = time.perf_counter() - save_started
@@ -374,11 +398,13 @@ class WanControl5B:
             "preprocess": round(preprocess_seconds, 3),
             "inference": round(inference_seconds, 3),
             "save": round(save_seconds, 3),
+            "save_jpg": round(jpg_seconds, 3),
+            "save_mp4": round(mp4_seconds, 3),
             "total": round(time.perf_counter() - segment_started, 3),
         }
         print(f"[MULTI VIDEO TIMING] {destination.parent.name}: "
               + " ".join(f"{key}={value:.3f}s" for key, value in self.last_timing.items()),
               flush=True)
-        if not destination.is_file() or destination.stat().st_size == 0:
+        if save_mp4 and (not destination.is_file() or destination.stat().st_size == 0):
             raise RuntimeError(f"Video was not written: {destination}")
         return str(destination)
