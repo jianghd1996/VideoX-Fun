@@ -18,12 +18,15 @@ CONFIG = {
     "external_code_root": "/home/z00566689/dev/mnt/jiang_dev/SingleRecon/DA3_custom",
     "dense_code_root": "/home/z00566689/dev/mnt/jiang_dev/SingleRecon",
     "da3_model_path": "/home/z00566689/dev/mnt/jiang_dev/SingleRecon/Cloud_Models/Saliency-Face-DA3/besthumanmodel_lr1e_6_ckpt2.pt",
-    "run_3dgs_iter": True,
+    "run_3dgs_iter": False,  # trajectory inspection: DA3 + GS render only
     "resume_stages": False,
     "crop_ratio": 1.0,
     "mode": "scene",
     "circle": False,
     "max_frames": 121,
+    "render_trajectories": True,
+    "trajectory_extra": False,
+    "trajectory_view_num": 81,
 }
 WORK_DIR = "/home/z00566689/dev/mnt/jiang_test/00_1022_test"
 
