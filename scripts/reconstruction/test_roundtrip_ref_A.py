@@ -254,6 +254,16 @@ def wan(args, output):
     if str(wan_root) not in sys.path:
         sys.path.insert(0, str(wan_root))
     from predict_v2v_control_5b_multi_image import WanControl5B
+    # Fail before the expensive SLA model load if a stale nested adapter is used.
+    import inspect
+    adapter_path = Path(inspect.getfile(WanControl5B)).resolve()
+    if "reference_image" not in inspect.signature(WanControl5B.__call__).parameters:
+        raise RuntimeError(
+            "Wan adapter is outdated: WanControl5B.__call__ lacks reference_image. "
+            f"Loaded from: {adapter_path}. Sync the branch version of "
+            "predict_v2v_control_5b_multi_image.py into CodexRecon/VideoX-Fun/ "
+            "and rerun with --phase wan (or omit --phase to reuse control.mp4).")
+    print(f"[ABLATION A] verified reference_image adapter: {adapter_path}", flush=True)
     spec = json.loads((output / "experiment.json").read_text())
     images = list(map(Path, spec["input_images"]))
     a, b = images[args.a_index], images[args.b_index]
