@@ -80,6 +80,7 @@ class MultiImagePipeline:
                  video_fps: int = 30,
                  video_gpu_ids: list[int] | None = None,
                  video_resume: bool = False,
+                 video_preload_workers: bool = True,
                  run_captioner: bool = True,
                  captioner_code_root: str | Path | None = None,
                  captioner_model_path: str | Path | None = None,
@@ -132,6 +133,9 @@ class MultiImagePipeline:
                 .expanduser().resolve()),
         }
         self.video_model_load_seconds = 0.0
+        self.video_worker_preload_seconds = 0.0
+        self.video_worker_pool = None
+        self.video_preload_workers = bool(video_preload_workers)
         self.video_resume = bool(video_resume)
         self.run_captioner = bool(run_captioner)
         self.captioner_cpu_swap = bool(captioner_cpu_swap)
@@ -175,6 +179,20 @@ class MultiImagePipeline:
                       else create_full_reconstruction(dense_root)) if self.run_3dgs_iter else None
         self.load_seconds = round(time.perf_counter() - start, 3)
         print(f"[MULTI PRELOAD] {self.load_seconds:.3f}s (excluded from case timings)", flush=True)
+        if self.run_gen_video and len(self.video_gpu_ids) > 1 and self.video_preload_workers:
+            try:
+                from .multi_image_video_multi_gpu import WanControlWorkerPool
+            except ImportError:
+                from multi_image_video_multi_gpu import WanControlWorkerPool
+            self.video_worker_pool = WanControlWorkerPool(
+                adapter_spec=self.video_adapter,
+                video_code_root=self.video_code_root,
+                gpu_ids=self.video_gpu_ids,
+                env_overrides=self.video_environment,
+                worker_pool=self.video_worker_pool)
+            self.video_worker_preload_seconds = self.video_worker_pool.preload_wall_seconds
+            self.video_model_load_seconds = max(self.video_worker_pool.loads.values(), default=0.0)
+
 
 
     def _da3_with_trajectory(self, image_dir: Path, colmap: Path, gs_video: Path):
@@ -312,6 +330,12 @@ class MultiImagePipeline:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
+    def close(self):
+        """Release persistent Wan workers at application shutdown."""
+        if self.video_worker_pool is not None:
+            self.video_worker_pool.close()
+            self.video_worker_pool = None
+
     def stage_video(self, case_dir: Path) -> list[dict[str, Any]]:
         """Dispatch based on configured GPU count; both paths return same records."""
         try:
@@ -342,7 +366,8 @@ class MultiImagePipeline:
             summary_path = case_dir / "reconstruction" / "generated_trajectories" / "summary.json"
             summary = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.exists() else {}
             loads = summary.get("model_load_by_gpu", {})
-            # Critical-path model load (the workers load concurrently).
+            # In preloaded mode this time is accounted for at startup,
+            # not part of trajectory_video wall time.
             self.video_model_load_seconds = max(loads.values(), default=0.0)
             return results
 
@@ -563,6 +588,7 @@ class MultiImagePipeline:
             timings["stages_total"] = round(time.perf_counter() - start, 3)
             timings["total"] = round(time.perf_counter() - case_started, 3)
             timings["model_preload_once"] = self.load_seconds
+            timings["video_worker_preload_once"] = self.video_worker_preload_seconds
             (reconstruction / "timings.json").write_text(json.dumps(timings, indent=2), encoding="utf-8")
             print(f"[MULTI TIMING] {case.name}: "
                   + " ".join(f"{key}={value:.3f}s" for key, value in timings.items()),
