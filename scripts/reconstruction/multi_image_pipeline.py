@@ -263,8 +263,7 @@ class MultiImagePipeline:
                                 mode=self.mode, circle=self.circle, max_frames=self.max_frames)
             if result is False:
                 raise RuntimeError("Dense reconstruction returned False")
-            (dense_export / ".dense_complete").write_text("ok
-", encoding="utf-8")
+            (dense_export / ".dense_complete").write_text("ok\n", encoding="utf-8")
             return result
 
         operations = [("da3", da3_stage)]
