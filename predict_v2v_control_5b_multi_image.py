@@ -318,7 +318,8 @@ class WanControl5B:
     @torch.inference_mode()
     def __call__(self, *, control_video, start_image, end_image, output_video,
                  prompt, num_frames, fps=30, sampled_frame_indices=None,
-                 sampled_frames_dir=None, save_mp4=True):
+                 sampled_frames_dir=None, save_mp4=True,
+                 reference_image=None):
         if self.pipeline is None:
             self.load()
         num_frames = int(num_frames)
@@ -342,8 +343,14 @@ class WanControl5B:
         # Constrain BOTH actual DA3 input endpoint images, not GS-rendered endpoints.
         inpaint_video, inpaint_mask, _ = get_image_to_video_latent(
             [first], [last], video_length=num_frames, sample_size=[height, width])
-        # Use the end reference image as requested, independently from end constraint.
-        ref_image = get_image_latent(last, sample_size=[height, width])
+        # Optional independent reference for random-reference-frame experiments.
+        # Only affects add_ref_conv; does NOT create an inpaint keyframe.
+        if reference_image is not None:
+            with Image.open(reference_image) as image:
+                ref_pil = image.convert("RGB").resize((width, height))
+        else:
+            ref_pil = last
+        ref_image = get_image_latent(ref_pil, sample_size=[height, width])
         random_gen = torch.Generator(device=self.device).manual_seed(self.seed)
         torch.cuda.synchronize(self.device)
         preprocess_seconds = time.perf_counter() - segment_started
@@ -351,7 +358,8 @@ class WanControl5B:
 
         print(f"[MULTI CONTROL] {Path(control_video).name} {num_frames} frames "
               f"{width}x{height} steps={self.steps} cfg={self.cfg}, "
-              f"start={Path(start_image).name}, end/ref={Path(end_image).name}",
+              f"start={Path(start_image).name}, end={Path(end_image).name}, "
+              f"ref={Path(reference_image).name if reference_image else Path(end_image).name}",
               flush=True)
         video = self.pipeline(
             str(prompt), num_frames=num_frames, negative_prompt=NEGATIVE_PROMPT,
