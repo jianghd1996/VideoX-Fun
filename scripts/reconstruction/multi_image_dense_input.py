@@ -223,8 +223,8 @@ def _colmap_points_to_ply(points_bin, ply_path):
             ).replace("\\n", "\n").encode("ascii"))
             vertex = struct.Struct("<ffffffBBB")
             for _ in range(count):
-                fixed = source.read(43)
-                if len(fixed) != 43:
+                fixed = source.read(struct.calcsize("<QdddBBBdQ"))
+                if len(fixed) != struct.calcsize("<QdddBBBdQ"):
                     raise EOFError(f"Truncated COLMAP point: {points_bin}")
                 pid, x, y, z, red, green, blue, error, track_length = struct.unpack(
                     "<QdddBBBdQ", fixed)
