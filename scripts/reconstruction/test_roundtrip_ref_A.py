@@ -126,6 +126,7 @@ def render(args, output):
         extrinsics=torch.from_numpy(poses).to(prediction.gaussians.means).unsqueeze(0),
         intrinsics=torch.from_numpy(Ks).to(prediction.gaussians.means).unsqueeze(0),
         trj_mode="original", vis_depth=None, output_name="ablation_A_BAB",
+        crop_ratio=1.0, view_num=args.frames, extra_view=[False, False],
         chunk_size=4)
     src = render_dir / "gs_video" / "ablation_A_BAB.mp4"
     if not src.is_file():
