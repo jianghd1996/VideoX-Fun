@@ -7,8 +7,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import numpy as np
-from scipy.interpolate import CubicSpline
-from scipy.spatial.transform import Rotation, RotationSpline
+from scipy.spatial.transform import Rotation, Slerp
 
 
 def _unit(x, eps=1e-9):
@@ -78,33 +77,23 @@ def _estimate_scene_up(poses):
 
 
 def _interp_poses(controls, count):
-    """Smooth position and rotation with continuous tangents at control points.
+    """Piecewise linear centers + SLERP rotations (no spline smoothing).
 
-    Arc-length-like resampling stabilizes speed. Endpoints remain exact DA3 poses.
+    Retains exact DA3 input poses at the beginning and end.
+    Intermediate frames interpolate control poses; only the spherical control
+    poses are guaranteed to be exact look-at orientations.
     """
-    if count < 2:
-        raise ValueError("count must be >= 2")
     positions = _centers(controls)
     rotations = Rotation.from_matrix(controls[:, :3, :3])
     steps = np.linalg.norm(np.diff(positions, axis=0), axis=1)
     angles = (rotations[:-1].inv() * rotations[1:]).magnitude()
-    radius = max(float(np.linalg.norm(positions, axis=1).mean()), 1e-6)
-    lengths = np.maximum(steps + 0.25 * radius * angles, 1e-5)
+    lengths = np.maximum(steps + 0.25 * angles *
+                         max(np.linalg.norm(positions, axis=1).mean(), 1e-6), 1e-5)
     knots = np.concatenate(([0.0], np.cumsum(lengths)))
-
-    position_curve = CubicSpline(knots, positions, axis=0, bc_type="natural")
-    rotation_curve = RotationSpline(knots, rotations)
-    dense_time = np.linspace(knots[0], knots[-1], max(400, 10 * count))
-    dense_pos = position_curve(dense_time)
-    dense_rot = rotation_curve(dense_time)
-    motion = np.linalg.norm(np.diff(dense_pos, axis=0), axis=1)
-    motion += 0.25 * radius * (dense_rot[:-1].inv() * dense_rot[1:]).magnitude()
-    cumulative = np.concatenate(([0.0], np.cumsum(motion)))
-    # Strictly increasing interpolation coordinate even for overlapping controls.
-    cumulative = np.maximum.accumulate(cumulative + np.arange(len(cumulative)) * 1e-12)
-    times = np.interp(np.linspace(0, cumulative[-1], count), cumulative, dense_time)
-    cam_centers = position_curve(times)
-    rot = rotation_curve(times).as_matrix()
+    times = np.linspace(0, knots[-1], count)
+    cam_centers = np.column_stack([
+        np.interp(times, knots, positions[:, j]) for j in range(3)])
+    rot = Slerp(knots, rotations)(times).as_matrix()
     result = np.broadcast_to(np.eye(4), (count, 4, 4)).copy()
     result[:, :3, :3] = rot
     result[:, :3, 3] = -np.einsum("nij,nj->ni", rot, cam_centers)
@@ -180,7 +169,7 @@ def plan_trajectories(extrinsics, *, extra=False, extra_pitch_deg=5.0,
                                  "start_yaw": a_yaw, "end_yaw": b_yaw,
                                  "extrinsics": segment})
             current = target
-    info = {"center": origin.tolist(), "estimated_scene_up": up.tolist(), "rotation_normalized_to_world": Q.tolist(),
+    info = {"interpolation": "piecewise_linear_slerp", "center": origin.tolist(), "estimated_scene_up": up.tolist(), "rotation_normalized_to_world": Q.tolist(),
             "radius": radius, "yaws": yaw_unwrapped.tolist(), "pitches": pitches.tolist(),
             "yaw_min": float(min(yaw_unwrapped)), "yaw_max": float(max(yaw_unwrapped)),
             "pitch_min": lo, "pitch_max": hi, "extra": bool(extra), "circle": bool(circle),
