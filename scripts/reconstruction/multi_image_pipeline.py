@@ -188,8 +188,7 @@ class MultiImagePipeline:
                 adapter_spec=self.video_adapter,
                 video_code_root=self.video_code_root,
                 gpu_ids=self.video_gpu_ids,
-                env_overrides=self.video_environment,
-                worker_pool=self.video_worker_pool)
+                env_overrides=self.video_environment)
             self.video_worker_preload_seconds = self.video_worker_pool.preload_wall_seconds
             self.video_model_load_seconds = max(self.video_worker_pool.loads.values(), default=0.0)
 
