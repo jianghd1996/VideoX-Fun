@@ -14,6 +14,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import signal
 
 # ===================== EDIT THESE SETTINGS =====================
 GPU_IDS = "4,5"                 # "4" for the single-GPU baseline
@@ -103,7 +104,29 @@ def main():
                    '--cpu-threads', str(CPU_THREADS)]
         print('[COMMAND] ' + shlex.join(command), flush=True)
         if not DRY_RUN:
-            subprocess.run(command, env=env, check=True)
+            # Run torchrun in its own process group so Ctrl+C reaches the
+            # launcher and all ranks, rather than orphaning NCCL workers.
+            process = subprocess.Popen(command, env=env, start_new_session=True)
+            try:
+                returncode = process.wait()
+            except KeyboardInterrupt:
+                print('[INTERRUPT] Stopping torchrun process group...', flush=True)
+                try:
+                    os.killpg(process.pid, signal.SIGINT)
+                except ProcessLookupError:
+                    pass
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    print('[INTERRUPT] Forcing remaining ranks to stop', flush=True)
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait()
+                raise SystemExit(130)
+            if returncode:
+                raise subprocess.CalledProcessError(returncode, command)
 
 
 if __name__ == '__main__':
