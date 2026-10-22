@@ -131,8 +131,15 @@ def run_trajectory_videos_multi_gpu(*, reconstruction_dir, source_images,
 
     persist()
     if not pending:
+        reused_output = [completed[Path(p["file"]).stem] for p in paths]
+        (generated_root / "summary.json").write_text(json.dumps({
+            "mode": "multi_gpu", "gpu_ids": [], "model_load_by_gpu": {},
+            "wall_seconds": 0.0, "sum_segment_seconds": 0.0,
+            "trajectories": len(reused_output), "videos_generated": 0,
+            "videos_reused": len(reused_output),
+        }, indent=2, ensure_ascii=False), encoding="utf-8")
         print("[MULTI GPU] All videos reused; no workers launched", flush=True)
-        return [completed[Path(p["file"]).stem] for p in paths]
+        return reused_output
 
     # Never import the adapter in the parent process: it initializes CUDA.
     ctx = mp.get_context("spawn")
