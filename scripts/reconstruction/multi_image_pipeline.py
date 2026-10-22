@@ -98,10 +98,9 @@ class MultiImagePipeline:
                 os.environ["SINGLERECON_CONTROL_LORA_PATH"] = str(Path(video_lora_path).expanduser().resolve())
             os.environ["SINGLERECON_CONTROL_LORA_WEIGHT"] = str(float(video_lora_weight))
             factory = load_callable(video_adapter)
-            self.video_generator = factory() if isinstance(factory, type) else factory
-            preload = getattr(self.video_generator, "load", None)
-            if callable(preload):
-                preload()
+            # Delay heavyweight Wan loading until after DA3 returns to CPU.
+            # Loading both models on GPU during DA3 would otherwise risk OOM.
+            self.video_generator_factory = factory
         self.resume_stages = bool(resume_stages)
         self.crop_ratio = float(crop_ratio)
         self.mode = mode
@@ -213,6 +212,12 @@ class MultiImagePipeline:
             from .multi_image_video import run_trajectory_videos
         except ImportError:
             from multi_image_video import run_trajectory_videos
+        if self.video_generator is None:
+            factory = self.video_generator_factory
+            self.video_generator = factory() if isinstance(factory, type) else factory
+            preload = getattr(self.video_generator, "load", None)
+            if callable(preload):
+                preload()
         prompt_file = case_dir / "prompt.txt"
         prompt = prompt_file.read_text(encoding="utf-8").strip() if prompt_file.is_file() else ""
         return run_trajectory_videos(
