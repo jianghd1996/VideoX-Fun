@@ -7,7 +7,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import numpy as np
-from scipy.spatial.transform import Rotation, Slerp
+from scipy.interpolate import CubicSpline
+from scipy.spatial.transform import Rotation, RotationSpline
 
 
 def _unit(x, eps=1e-9):
@@ -53,18 +54,57 @@ def _estimate_center(centers, directions):
     return np.linalg.solve(A, b)
 
 
+def _estimate_scene_up(poses):
+    """Fit common gravity-up from camera right axes, oriented by camera ups.
+
+    Camera right should be perpendicular to the world-up axis. This suppresses
+    inconsistent camera roll better than averaging the camera up vectors alone.
+    Near-degenerate (nearly identical right axes) configurations use the prior.
+    Absolute gravity remains unobservable if all input cameras share a roll.
+    """
+    R = poses[:, :3, :3]
+    prior = _unit(-R[:, 1, :].mean(axis=0))  # OpenCV camera Y points down
+    rights = R[:, 0, :]
+    gram = rights.T @ rights
+    eigenvalues, vectors = np.linalg.eigh(gram)
+    if eigenvalues[1] - eigenvalues[0] < 1e-5 * max(float(eigenvalues[-1]), 1.0):
+        # Nearly parallel horizontal axes cannot determine unique world-up.
+        up = prior
+    else:
+        up = vectors[:, 0]
+        if np.dot(up, prior) < 0:
+            up = -up
+    return _unit(up)
+
+
 def _interp_poses(controls, count):
-    """Segment-length-weighted interpolation, exact endpoint camera poses."""
+    """Smooth position and rotation with continuous tangents at control points.
+
+    Arc-length-like resampling stabilizes speed. Endpoints remain exact DA3 poses.
+    """
+    if count < 2:
+        raise ValueError("count must be >= 2")
     positions = _centers(controls)
     rotations = Rotation.from_matrix(controls[:, :3, :3])
     steps = np.linalg.norm(np.diff(positions, axis=0), axis=1)
-    # Include angular travel to avoid zero-length segments with differing rotations.
     angles = (rotations[:-1].inv() * rotations[1:]).magnitude()
-    lengths = np.maximum(steps + 0.25 * angles * max(np.linalg.norm(positions, axis=1).mean(), 1e-6), 1e-5)
+    radius = max(float(np.linalg.norm(positions, axis=1).mean()), 1e-6)
+    lengths = np.maximum(steps + 0.25 * radius * angles, 1e-5)
     knots = np.concatenate(([0.0], np.cumsum(lengths)))
-    times = np.linspace(0, knots[-1], count)
-    cam_centers = np.column_stack([np.interp(times, knots, positions[:, j]) for j in range(3)])
-    rot = Slerp(knots, rotations)(times).as_matrix()
+
+    position_curve = CubicSpline(knots, positions, axis=0, bc_type="natural")
+    rotation_curve = RotationSpline(knots, rotations)
+    dense_time = np.linspace(knots[0], knots[-1], max(400, 10 * count))
+    dense_pos = position_curve(dense_time)
+    dense_rot = rotation_curve(dense_time)
+    motion = np.linalg.norm(np.diff(dense_pos, axis=0), axis=1)
+    motion += 0.25 * radius * (dense_rot[:-1].inv() * dense_rot[1:]).magnitude()
+    cumulative = np.concatenate(([0.0], np.cumsum(motion)))
+    # Strictly increasing interpolation coordinate even for overlapping controls.
+    cumulative = np.maximum.accumulate(cumulative + np.arange(len(cumulative)) * 1e-12)
+    times = np.interp(np.linspace(0, cumulative[-1], count), cumulative, dense_time)
+    cam_centers = position_curve(times)
+    rot = rotation_curve(times).as_matrix()
     result = np.broadcast_to(np.eye(4), (count, 4, 4)).copy()
     result[:, :3, :3] = rot
     result[:, :3, 3] = -np.einsum("nij,nj->ni", rot, cam_centers)
@@ -85,7 +125,7 @@ def plan_trajectories(extrinsics, *, extra=False, extra_pitch_deg=5.0,
     forward = np.array([_unit(d) for d in forward])
     origin = _estimate_center(centers, forward)
     # Camera down is +Y in OpenCV. Recover scene up from all camera orientations.
-    up = _unit(-np.mean(poses[:, :3, :3][:, 1, :], axis=0))
+    up = _estimate_scene_up(poses)
     z = centers[0] - origin
     z = _unit(z - np.dot(z, up) * up)
     if np.linalg.norm(z) < 1e-6:
@@ -140,7 +180,7 @@ def plan_trajectories(extrinsics, *, extra=False, extra_pitch_deg=5.0,
                                  "start_yaw": a_yaw, "end_yaw": b_yaw,
                                  "extrinsics": segment})
             current = target
-    info = {"center": origin.tolist(), "rotation_normalized_to_world": Q.tolist(),
+    info = {"center": origin.tolist(), "estimated_scene_up": up.tolist(), "rotation_normalized_to_world": Q.tolist(),
             "radius": radius, "yaws": yaw_unwrapped.tolist(), "pitches": pitches.tolist(),
             "yaw_min": float(min(yaw_unwrapped)), "yaw_max": float(max(yaw_unwrapped)),
             "pitch_min": lo, "pitch_max": hi, "extra": bool(extra), "circle": bool(circle),
