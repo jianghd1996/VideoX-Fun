@@ -22,6 +22,7 @@ CONFIG = {
     "run_3dgs_iter": True,  # full pipeline: generated videos -> COLMAP -> Reconstruction_full
     "dense_generated_frames": 80,  # globally sample 80 novel camera poses across all trajectories
     "resume_stages": False,
+    "force_rerun_dense": False,  # --rerun-dense backs up old output and retrains with PLY
     "crop_ratio": 1.0,
     "mode": "scene",
     "circle": False,
@@ -62,6 +63,8 @@ def main() -> None:
     parser.add_argument("--config", type=Path)
     parser.add_argument("--da3-only", action="store_true")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--rerun-dense", action="store_true",
+                        help="Reuse DA3/videos but back up and redo dense reconstruction")
     args = parser.parse_args()
     opts = dict(CONFIG)
     if args.config:
@@ -70,6 +73,10 @@ def main() -> None:
         opts["run_3dgs_iter"] = False
     if args.resume:
         opts["resume_stages"] = True
+    if args.rerun_dense:
+        opts["resume_stages"] = True
+        opts["video_resume"] = True
+        opts["force_rerun_dense"] = True
     root = args.work_dir.expanduser().resolve()
     if not root.is_dir():
         raise FileNotFoundError(root)
