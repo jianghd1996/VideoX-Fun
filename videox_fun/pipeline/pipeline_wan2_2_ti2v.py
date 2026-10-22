@@ -180,10 +180,10 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
             tokenizer=tokenizer, text_encoder=text_encoder, vae=vae, transformer=transformer, 
             transformer_2=transformer_2, scheduler=scheduler
         )
-        self.video_processor = VideoProcessor(vae_scale_factor=self.vae.spatial_compression_ratio)
-        self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae.spatial_compression_ratio)
+        self.video_processor = VideoProcessor(vae_scale_factor=self.vae.config.spatial_compression_ratio)
+        self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae.config.spatial_compression_ratio)
         self.mask_processor = VaeImageProcessor(
-            vae_scale_factor=self.vae.spatial_compression_ratio, do_normalize=False, do_binarize=True, do_convert_grayscale=True
+            vae_scale_factor=self.vae.config.spatial_compression_ratio, do_normalize=False, do_binarize=True, do_convert_grayscale=True
         )
 
     def _get_t5_prompt_embeds(
@@ -274,7 +274,7 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
         if prompt is not None:
             batch_size = len(prompt)
         else:
-            batch_size = prompt_embeds.shape[0]
+            batch_size = len(prompt_embeds) if isinstance(prompt_embeds, (list, tuple)) else prompt_embeds.shape[0]
 
         if prompt_embeds is None:
             prompt_embeds = self._get_t5_prompt_embeds(
@@ -323,9 +323,9 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
         shape = (
             batch_size,
             num_channels_latents,
-            (num_frames - 1) // self.vae.temporal_compression_ratio + 1,
-            height // self.vae.spatial_compression_ratio,
-            width // self.vae.spatial_compression_ratio,
+            (num_frames - 1) // self.vae.config.temporal_compression_ratio + 1,
+            height // self.vae.config.spatial_compression_ratio,
+            width // self.vae.config.spatial_compression_ratio,
         )
 
         if latents is None:
@@ -531,16 +531,22 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
         elif prompt is not None and isinstance(prompt, list):
             batch_size = len(prompt)
         else:
-            batch_size = prompt_embeds.shape[0]
+            batch_size = len(prompt_embeds) if isinstance(prompt_embeds, (list, tuple)) else prompt_embeds.shape[0]
 
         device = self._execution_device
-        weight_dtype = self.text_encoder.dtype
+        weight_dtype = self.text_encoder.dtype if self.text_encoder is not None else self.transformer.dtype
 
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance = guidance_scale > 1.0
 
+        import time
+        def _sync_clock():
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(device)
+            return time.perf_counter()
+        _t_text_start = _sync_clock()
         # 3. Encode input prompt
         prompt_embeds, negative_prompt_embeds = self.encode_prompt(
             prompt,
@@ -557,6 +563,10 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
         else:
             in_prompt_embeds = prompt_embeds
 
+        _t_text_end = _sync_clock()
+        print(f"[VIDEO TIMING][rank={int(__import__('os').environ.get('RANK', '0'))}] text_encode={_t_text_end - _t_text_start:.3f}s", flush=True)
+
+        _t_scheduler_start = _sync_clock()
         # 4. Prepare timesteps
         if isinstance(self.scheduler, FlowMatchEulerDiscreteScheduler):
             timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps, mu=1)
@@ -576,6 +586,9 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
             from comfy.utils import ProgressBar
             pbar = ProgressBar(num_inference_steps + 2)
 
+        _t_scheduler_end = _sync_clock()
+        print(f"[VIDEO TIMING][rank={int(__import__('os').environ.get('RANK','0'))}] scheduler_setup={_t_scheduler_end - _t_scheduler_start:.3f}s", flush=True)
+        _t_condition_start = _sync_clock()
         # 5. Prepare latents.
         if video is not None:
             video_length = video.shape[2]
@@ -585,6 +598,9 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
         else:
             init_video = None
 
+        _t_video_condition_end = _sync_clock()
+        print(f"[VIDEO TIMING][rank={int(__import__('os').environ.get('RANK','0'))}] video_condition_preprocess={_t_video_condition_end - _t_condition_start:.3f}s", flush=True)
+        _t_latents_start = _sync_clock()
         latent_channels = self.vae.config.latent_channels
         latents = self.prepare_latents(
             batch_size * num_videos_per_prompt,
@@ -600,6 +616,9 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
         if comfyui_progressbar:
             pbar.update(1)
 
+        _t_latents_end = _sync_clock()
+        print(f"[VIDEO TIMING][rank={int(__import__('os').environ.get('RANK','0'))}] prepare_latents={_t_latents_end - _t_latents_start:.3f}s", flush=True)
+        _t_mask_start = _sync_clock()
         # Prepare mask latent variables
         if init_video is not None and not (mask_video == 255).all():
             bs, _, video_length, height, width = video.size()
@@ -608,9 +627,26 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
             mask_condition = rearrange(mask_condition, "(b f) c h w -> b c f h w", f=video_length)
 
             masked_video = init_video * (torch.tile(mask_condition, [1, 3, 1, 1, 1]) < 0.5)
+            # Optional accelerated condition encoding for first-frame-only I2V.
+            # Off by default; compare 33/49/65 against the full 121-frame baseline.
+            import os as _condition_os
+            _condition_prefix_frames = int(_condition_os.environ.get("SINGLERECON_CONDITION_PREFIX_FRAMES", "0"))
+            _condition_use_prefix = (
+                _condition_prefix_frames > 0
+                and _condition_prefix_frames < masked_video.shape[2]
+                and (_condition_prefix_frames - 1) % 4 == 0
+            )
+            if _condition_use_prefix:
+                # Only valid for the single-known-first-frame mask pattern.
+                _known_first = bool((mask_condition[:, :, :1] < 0.5).all().item())
+                _unknown_rest = bool((mask_condition[:, :, 1:] >= 0.5).all().item())
+                if not (_known_first and _unknown_rest):
+                    print("[CONDITION PREFIX] unsupported mask; using full encode", flush=True)
+                    _condition_use_prefix = False
+            _t_vae_encode_start = _sync_clock()
             _, masked_video_latents = self.prepare_mask_latents(
                 None,
-                masked_video,
+                masked_video[:, :, :_condition_prefix_frames] if _condition_use_prefix else masked_video,
                 batch_size,
                 height,
                 width,
@@ -620,7 +656,110 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
                 do_classifier_free_guidance,
                 noise_aug_strength=None,
             )
+            if _condition_use_prefix:
+                _full_latent_frames = (masked_video.shape[2] - 1) // self.vae.config.temporal_compression_ratio + 1
+                _encoded_frames = masked_video_latents.shape[2]
+                if _encoded_frames > _full_latent_frames:
+                    raise ValueError("Condition prefix produced more latent frames than target")
+                masked_video_latents = torch.cat([
+                    masked_video_latents,
+                    masked_video_latents[:, :, -1:].expand(
+                        -1, -1, _full_latent_frames - _encoded_frames, -1, -1
+                    ),
+                ], dim=2)
+                print(f"[CONDITION PREFIX] input_frames={_condition_prefix_frames} "
+                      f"latent_frames={_encoded_frames}->{_full_latent_frames}", flush=True)
             
+            # Optional diagnostic: analyze temporal redundancy of the actual VAE
+            # condition latents. This never changes the latents used for generation.
+            # Enable with SINGLERECON_ANALYZE_CONDITION_Z=1 (rank 0 only).
+            import os as _os
+            if (_os.environ.get("SINGLERECON_ANALYZE_CONDITION_Z") == "1"
+                    and int(_os.environ.get("RANK", "0")) == 0):
+                import json as _json
+                import time as _time
+                _analysis_start = _time.perf_counter()
+                _z = masked_video_latents.detach().float()
+                _zt = _z.shape[2]
+                _ref = _z[:, :, -1:]
+                _scale = _z.abs().mean().item() + 1e-8
+                _stats = {
+                    "input_frames": int(masked_video.shape[2]),
+                    "latent_shape": list(_z.shape),
+                    "latent_abs_mean": float(_scale),
+                    "frames": [],
+                    "prefix_tests": [],
+                }
+                for _i in range(_zt):
+                    _frame = _z[:, :, _i:_i+1]
+                    _stats["frames"].append({
+                        "t": _i,
+                        "mean": float(_frame.mean().item()),
+                        "std": float(_frame.std().item()),
+                        "abs_mean": float(_frame.abs().mean().item()),
+                        "mae_to_last": float((_frame - _ref).abs().mean().item()),
+                        "relative_mae_to_last": float((_frame - _ref).abs().mean().item() / _scale),
+                        "mae_to_prev": (float((_frame - _z[:, :, _i-1:_i]).abs().mean().item())
+                                        if _i else None),
+                    })
+                # Shorter input sequences must respect temporal compression alignment.
+                # Compare their produced prefix to the corresponding full-encode prefix.
+                for _n in (5, 9, 17, 33, 49, 65, 81, 97):
+                    if _n >= masked_video.shape[2]:
+                        continue
+                    try:
+                        with torch.no_grad():
+                            _short = self.vae.encode(
+                                masked_video[:, :, :_n].to(device=device, dtype=self.vae.dtype)
+                            )[0].mode().detach().float()
+                        _k = min(_short.shape[2], _zt)
+                        _delta = (_short[:, :, :_k] - _z[:, :, :_k]).abs()
+                        # Candidate: preserve exact prefix, repeat its final latent.
+                        _candidate = torch.cat(
+                            [_short[:, :, :_k],
+                             _short[:, :, _k-1:_k].expand(-1, -1, _zt-_k, -1, -1)],
+                            dim=2
+                        )
+                        _full_delta = (_candidate - _z).abs()
+                        _tail_delta = _full_delta[:, :, _k:]
+                        _stats["prefix_tests"].append({
+                            "input_frames": _n,
+                            "latent_frames": int(_short.shape[2]),
+                            "prefix_mae": float(_delta.mean().item()),
+                            "prefix_max_abs": float(_delta.max().item()),
+                            "prefix_relative_mae": float(_delta.mean().item() / _scale),
+                            "repeat_tail_full_mae": float(_full_delta.mean().item()),
+                            "repeat_tail_full_relative_mae": float(_full_delta.mean().item() / _scale),
+                            "repeat_tail_max_abs": float(_full_delta.max().item()),
+                            "repeat_tail_mae": float(_tail_delta.mean().item()),
+                            "repeat_tail_relative_mae": float(_tail_delta.mean().item() / _scale),
+                        })
+                        del _short, _delta, _candidate, _full_delta, _tail_delta
+                    except Exception as _exc:
+                        _stats["prefix_tests"].append({
+                            "input_frames": _n, "error": str(_exc)
+                        })
+                _out_dir = _os.environ.get("SINGLERECON_Z_ANALYSIS_DIR", "condition_z_analysis")
+                _os.makedirs(_out_dir, exist_ok=True)
+                # Unique per-case filename based on the input's first-frame pixels.
+                import hashlib as _hashlib
+                _fingerprint = _hashlib.sha1(
+                    masked_video[0, :, 0, ::32, ::32].detach().cpu().numpy().tobytes()
+                ).hexdigest()[:12]
+                _out_file = _os.path.join(_out_dir, f"condition_z_{_fingerprint}.json")
+                with open(_out_file, "w", encoding="utf-8") as _f:
+                    _json.dump(_stats, _f, indent=2)
+                print(f"[CONDITION Z] shape={tuple(_z.shape)} "
+                      f"last_vs_first_mae={_stats['frames'][0]['mae_to_last']:.6f} "
+                      f"last_vs_prev_mae={_stats['frames'][-1]['mae_to_prev']:.6f} "
+                      f"analysis_time={_time.perf_counter()-_analysis_start:.3f}s "
+                      f"saved={_out_file}", flush=True)
+                for _test in _stats["prefix_tests"]:
+                    print(f"[CONDITION Z] prefix_test={_test}", flush=True)
+                del _z, _ref
+
+            _t_vae_encode_end = _sync_clock()
+            print(f"[VIDEO TIMING][rank={int(__import__('os').environ.get('RANK','0'))}] condition_vae_encode={_t_vae_encode_end - _t_vae_encode_start:.3f}s", flush=True)
             mask_condition = torch.concat(
                 [
                     torch.repeat_interleave(mask_condition[:, :, 0:1], repeats=4, dim=2), 
@@ -638,14 +777,19 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
         if comfyui_progressbar:
             pbar.update(1)
 
+        _t_mask_end = _sync_clock()
+        print(f"[VIDEO TIMING][rank={int(__import__('os').environ.get('RANK','0'))}] mask_and_condition_total={_t_mask_end - _t_mask_start:.3f}s", flush=True)
         # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
 
-        target_shape = (self.vae.latent_channels, (num_frames - 1) // self.vae.temporal_compression_ratio + 1, width // self.vae.spatial_compression_ratio, height // self.vae.spatial_compression_ratio)
+        target_shape = (self.vae.config.latent_channels, (num_frames - 1) // self.vae.config.temporal_compression_ratio + 1, width // self.vae.config.spatial_compression_ratio, height // self.vae.config.spatial_compression_ratio)
         seq_len = math.ceil((target_shape[2] * target_shape[3]) / (self.transformer.config.patch_size[1] * self.transformer.config.patch_size[2]) * target_shape[1]) 
         # 7. Denoising loop
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
         self.transformer.num_inference_steps = num_inference_steps
+        _t_pre_denoise_end = _sync_clock()
+        print(f"[VIDEO TIMING][rank={int(__import__('os').environ.get('RANK','0'))}] denoise_setup={_t_pre_denoise_end - _t_mask_end:.3f}s", flush=True)
+        _t_diffusion_start = _sync_clock()
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 self.transformer.current_steps = i
@@ -715,11 +859,26 @@ class Wan2_2TI2VPipeline(DiffusionPipeline):
                 if comfyui_progressbar:
                     pbar.update(1)
 
+        _t_diffusion_end = _sync_clock()
+        print(f"[VIDEO TIMING][rank={int(__import__('os').environ.get('RANK', '0'))}] diffusion={_t_diffusion_end - _t_diffusion_start:.3f}s", flush=True)
+        _t_decode_start = _sync_clock()
         if output_type == "pil":
-            video = self.decode_latents(latents)
-            video = torch.from_numpy(video)
+            # Ulysses produces replicated final latents. Decode only on rank 0:
+            # decoding and GPU-to-CPU transfer on worker ranks are wasted.
+            import torch.distributed as dist
+            is_worker = (
+                dist.is_available() and dist.is_initialized()
+                and dist.get_world_size() > 1 and dist.get_rank() != 0
+            )
+            if is_worker:
+                video = None
+            else:
+                video = torch.from_numpy(self.decode_latents(latents))
         else:
             video = latents
+
+        _t_decode_end = _sync_clock()
+        print(f"[VIDEO TIMING][rank={int(__import__('os').environ.get('RANK', '0'))}] vae_decode_and_cpu_copy={_t_decode_end - _t_decode_start:.3f}s", flush=True)
 
         # Offload all models
         self.maybe_free_model_hooks()
