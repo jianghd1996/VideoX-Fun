@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import sys
 import time
+import signal
 
 
 def bind_da3_package(root):
@@ -32,6 +33,13 @@ def bind_da3_package(root):
     if spec.loader is not None:
         spec.loader.exec_module(package)
     return package
+
+
+def _interrupt_handler(signum, frame):
+    # Never enter a collective or NCCL teardown from a signal handler.
+    # torchrun may interrupt only one rank while another is blocked in CUDA.
+    print(f'[INTERRUPT pid={os.getpid()}] signal={signum}; exiting rank', flush=True)
+    os._exit(128 + signum)
 
 
 def main():
@@ -55,6 +63,8 @@ def main():
     import cv2
     cv2.setNumThreads(args.cpu_threads)
     import torch.distributed as dist
+    signal.signal(signal.SIGINT, _interrupt_handler)
+    signal.signal(signal.SIGTERM, _interrupt_handler)
     rank = int(os.environ.get('RANK', '0'))
     local_rank = int(os.environ.get('LOCAL_RANK', '0'))
     size = int(os.environ.get('WORLD_SIZE', '1'))
@@ -144,6 +154,8 @@ def main():
                 report.write_text(json.dumps(summary, indent=2))
                 print('[E2E] ' + json.dumps(summary[case.name]), flush=True)
     finally:
+        # Normal completion only. Signals use immediate rank exit to avoid
+        # NCCL heartbeat threads polling an already-dead TCPStore.
         if dist.is_initialized():
             dist.destroy_process_group()
 
