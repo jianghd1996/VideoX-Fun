@@ -361,7 +361,8 @@ class MultiImagePipeline:
                 adapter_spec=self.video_adapter,
                 video_code_root=self.video_code_root,
                 gpu_ids=self.video_gpu_ids,
-                env_overrides=self.video_environment)
+                env_overrides=self.video_environment,
+                worker_pool=self.video_worker_pool)
             summary_path = case_dir / "reconstruction" / "generated_trajectories" / "summary.json"
             summary = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.exists() else {}
             loads = summary.get("model_load_by_gpu", {})
