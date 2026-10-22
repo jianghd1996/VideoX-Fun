@@ -49,12 +49,12 @@ CONFIG = {
     "video_teacher_vae_path": "/home/z00566689/dev/mnt/jiang_dev/CodexRecon/Cloud_Models/Wan2.2-TI2V-5B/Wan2.2_VAE.pth",
     "video_fps": 30,
     # Automatically dispatch: one ID -> sequential, multiple -> parallel workers.
-    # GPU IDs are PHYSICAL CUDA device IDs; 4 trajectories + 4 GPUs => one each.
+    # GPU IDs are PHYSICAL CUDA device IDs; 4 trajectories on GPUs 6 and 7.
     # With one GPU, use [0] and select physical GPU via CUDA_VISIBLE_DEVICES=4.
-    "video_gpu_ids": [4, 5, 6, 7],
-    "video_resume": True,  # reuse previously generated MP4s when testing dense stage
+    "video_gpu_ids": [6, 7],
+    "video_resume": False,  # full E2E benchmark: regenerate all videos
 }
-WORK_DIR = "/home/z00566689/dev/mnt/jiang_test/00_1022_test"
+WORK_DIR = "/home/z00566689/dev/mnt/jiang_test/00_1022_test/cover2_e2e"
 
 
 def main() -> None:
