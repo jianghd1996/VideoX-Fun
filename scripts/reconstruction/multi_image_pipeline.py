@@ -83,6 +83,7 @@ class MultiImagePipeline:
                  video_preload_workers: bool = True,
                  video_cpu_threads: int = 16,
                  video_positive_prompt: str = "",
+                 video_save_mp4: bool = True,
                  run_captioner: bool = True,
                  captioner_code_root: str | Path | None = None,
                  captioner_model_path: str | Path | None = None,
@@ -102,6 +103,7 @@ class MultiImagePipeline:
         self.run_gen_video = bool(run_gen_video)
         self.video_fps = int(video_fps)
         self.video_positive_prompt = str(video_positive_prompt)
+        self.video_save_mp4 = bool(video_save_mp4)
         self.video_cpu_threads = int(video_cpu_threads)
         if self.video_cpu_threads < 1:
             raise ValueError("video_cpu_threads must be positive")
@@ -352,10 +354,20 @@ class MultiImagePipeline:
         # Text-free default: never implicitly reuse a stale prompt.txt.
         # Caller can explicitly set video_positive_prompt for future runs.
         prompt = self.video_positive_prompt
+        reconstruction_dir = case_dir / "reconstruction"
+        try:
+            from .multi_image_dense_input import plan_dense_frame_samples
+        except ImportError:
+            from multi_image_dense_input import plan_dense_frame_samples
+        # Sample positions are determined by geometry only, before any Wan call.
+        sample_plan = plan_dense_frame_samples(
+            reconstruction_dir=reconstruction_dir,
+            sample_count=self.dense_generated_frames)
         arguments = dict(
-            reconstruction_dir=case_dir / "reconstruction",
+            reconstruction_dir=reconstruction_dir,
             source_images=input_images(case_dir / "image"),
-            fps=self.video_fps, prompt=prompt, resume=self.video_resume)
+            fps=self.video_fps, prompt=prompt, resume=self.video_resume,
+            sample_plan=sample_plan, save_mp4=self.video_save_mp4)
 
         if len(self.video_gpu_ids) > 1:
             try:
@@ -576,6 +588,27 @@ class MultiImagePipeline:
                         timings["video_inference"] = round(sum(
                             float(item.get("inference_timing", {}).get("inference", 0))
                             for item in value), 3)
+                        timings["video_save_jpg_sum"] = round(sum(
+                            float(item.get("inference_timing", {}).get("save_jpg", 0))
+                            for item in value), 3)
+                        timings["video_save_mp4_sum"] = round(sum(
+                            float(item.get("inference_timing", {}).get("save_mp4", 0))
+                            for item in value), 3)
+                        per_gpu = {}
+                        for item in value:
+                            if item.get("gpu_id") is None:
+                                continue
+                            gpu = str(item["gpu_id"])
+                            per_gpu[gpu] = per_gpu.get(gpu, 0.0) + max(
+                                0., float(item["seconds"]) -
+                                float(item.get("inference_timing", {}).get("save_mp4", 0)))
+                        if per_gpu:
+                            timings["video_wall_no_mp4_estimate"] = round(
+                                max(per_gpu.values()), 3)
+                        else:
+                            timings["video_wall_no_mp4_estimate"] = round(
+                                max(0., sum(float(item["seconds"]) for item in value) -
+                                    timings["video_save_mp4_sum"]), 3)
                     else:
                         results["dense_result"] = value
                     stages[label] = {"status": "ok", "finished_at": datetime.now(timezone.utc).isoformat()}
@@ -595,6 +628,13 @@ class MultiImagePipeline:
             timings["total"] = round(time.perf_counter() - case_started, 3)
             timings["model_preload_once"] = self.load_seconds
             timings["video_worker_preload_once"] = self.video_worker_preload_seconds
+            if "video_wall_no_mp4_estimate" in timings and "trajectory_video" in timings:
+                # MP4 exports happen concurrently across two workers; subtracting
+                # their SUM from the wall clock would be mathematically wrong.
+                # Critical-path per-GPU estimate is reported separately from actual wall.
+                timings["total_no_mp4_estimate"] = round(
+                    timings["total"] - max(0., timings["trajectory_video"] -
+                                          timings["video_wall_no_mp4_estimate"]), 3)
             (reconstruction / "timings.json").write_text(json.dumps(timings, indent=2), encoding="utf-8")
             print(f"[MULTI TIMING] {case.name}: "
                   + " ".join(f"{key}={value:.3f}s" for key, value in timings.items()),
