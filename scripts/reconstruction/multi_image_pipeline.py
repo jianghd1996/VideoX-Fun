@@ -103,8 +103,11 @@ class MultiImagePipeline:
             # COLMAP exporter applies the same metric scale conversion as the
             # original DA3 runner. Do not modify prediction or Gaussian positions.
             recon = save_sparserecon(prediction, images, colmap)
+            poses_for_colmap = np.asarray(prediction.extrinsics).copy()
+            if prediction.is_metric and prediction.scale_factor is not None:
+                poses_for_colmap[:, :3, 3] /= float(prediction.scale_factor)
             paths, info = plan_trajectories(
-                prediction.extrinsics, extra=self.trajectory_extra,
+                poses_for_colmap, extra=self.trajectory_extra,
                 view_num=self.trajectory_view_num, circle=self.circle)
             if not paths:
                 raise RuntimeError("No up/down trajectories generated")
@@ -114,10 +117,7 @@ class MultiImagePipeline:
             for i, path in enumerate(paths):
                 name = manifest["trajectories"][i]["file"].removesuffix(".npy")
                 poses = path["extrinsics"].copy()
-                # GS renderer uses prediction scale, consistent with original
-                # DA3 export_to_gs_video's implicit prediction-extrinsics path.
-                if prediction.is_metric and prediction.scale_factor is not None:
-                    poses[:, :3, 3] /= float(prediction.scale_factor)
+                # Poses already match the COLMAP and DA3 GS-renderer scale.
                 a, b = path["start_index"], path["end_index"]
                 Ka = np.asarray(prediction.intrinsics[a], dtype=np.float32)
                 Kb = np.asarray(prediction.intrinsics[b], dtype=np.float32)
