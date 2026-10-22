@@ -162,10 +162,13 @@ def run_trajectory_videos_multi_gpu(*, reconstruction_dir, source_images,
             try:
                 event = events.get(timeout=3)
             except queue.Empty:
-                dead = [(active_ids[i], p.exitcode) for i, p in enumerate(workers)
-                        if not p.is_alive()]
-                if dead:
-                    raise RuntimeError(f"GPU worker(s) exited before all results: {dead}")
+                failed = [(active_ids[i], p.exitcode) for i, p in enumerate(workers)
+                          if p.exitcode not in (None, 0)]
+                if failed:
+                    raise RuntimeError(f"GPU worker(s) crashed before completion: {failed}")
+                if all(not p.is_alive() for p in workers):
+                    raise RuntimeError(
+                        f"All workers exited but {remaining} video results are missing")
                 continue
             kind = event["kind"]
             if kind == "error":
