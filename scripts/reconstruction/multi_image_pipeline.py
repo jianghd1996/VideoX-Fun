@@ -246,9 +246,12 @@ class MultiImagePipeline:
         if self.captioner_cpu_swap:
             model.to("cuda")
         try:
-            # The captioner expects an image DIRECTORY, not a single image.
-            # Source images are original; DA3-generated frames are excluded.
-            prompt = self.img_captioner.read_image_caption(str(case_dir / "image"))
+            # Legacy captioner globs JPG only. This folder contains normalized
+            # copies of all original PNG/JPG/etc inputs (no generated frames).
+            caption_dir = case_dir / "reconstruction" / "da3_input"
+            if not caption_dir.is_dir():
+                raise FileNotFoundError(f"Missing normalized input images: {caption_dir}")
+            prompt = self.img_captioner.read_image_caption(str(caption_dir))
             if not isinstance(prompt, str) or not prompt.strip():
                 raise ValueError(f"Empty image caption for {case_dir}")
             prompt = prompt.strip()
