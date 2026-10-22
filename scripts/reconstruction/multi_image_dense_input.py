@@ -167,6 +167,89 @@ def _write_binary_model(base, cameras, images, source_sparse):
                     file.write(struct.pack("<ii", track[j], track[j+1]))
 
 
+
+def _validate_ply(path):
+    """Require a nonempty PLY with xyz properties; fail before expensive 3DGS."""
+    with Path(path).open("rb") as fp:
+        if fp.readline().strip() != b"ply":
+            raise ValueError(f"Invalid PLY header: {path}")
+        count = None
+        properties = []
+        in_vertex = False
+        for _ in range(256):
+            line = fp.readline()
+            if not line:
+                break
+            row = line.decode("ascii", errors="replace").strip()
+            if row.startswith("element "):
+                words = row.split()
+                in_vertex = words[1] == "vertex"
+                if in_vertex:
+                    count = int(words[2])
+            elif row.startswith("property ") and in_vertex:
+                properties.append(row.split()[-1])
+            elif row == "end_header":
+                break
+        else:
+            raise ValueError(f"PLY header too long: {path}")
+    if count is None or count <= 0:
+        raise ValueError(f"PLY initialization has no points: {path}")
+    if not {"x", "y", "z"}.issubset(properties):
+        raise ValueError(f"PLY is missing xyz properties: {path}")
+    if Path(path).stat().st_size < 256:
+        raise ValueError(f"PLY is suspiciously small: {path}")
+    return count
+
+
+def _colmap_points_to_ply(points_bin, ply_path):
+    """Convert COLMAP points3D.bin to conventional binary PLY xyz/normals/RGB.
+
+    Matches common 3DGS fetchPly requirements: x,y,z,nx,ny,nz,red,green,blue.
+    The COLMAP point coordinates are already in the same world frame as the
+    original three camera poses, so there is no additional scale transform.
+    """
+    with Path(points_bin).open("rb") as source:
+        (count,) = struct.unpack("<Q", source.read(8))
+        if count == 0:
+            raise ValueError(f"Cannot initialize 3DGS from empty COLMAP points: {points_bin}")
+        with Path(ply_path).open("wb") as target:
+            target.write((
+                "ply\\nformat binary_little_endian 1.0\\n"
+                f"element vertex {count}\\n"
+                "property float x\\nproperty float y\\nproperty float z\\n"
+                "property float nx\\nproperty float ny\\nproperty float nz\\n"
+                "property uchar red\\nproperty uchar green\\nproperty uchar blue\\n"
+                "end_header\\n"
+            ).replace("\\n", "\n").encode("ascii"))
+            vertex = struct.Struct("<ffffffBBB")
+            for _ in range(count):
+                fixed = source.read(43)
+                if len(fixed) != 43:
+                    raise EOFError(f"Truncated COLMAP point: {points_bin}")
+                pid, x, y, z, red, green, blue, error, track_length = struct.unpack(
+                    "<QdddBBBdQ", fixed)
+                target.write(vertex.pack(float(x), float(y), float(z),
+                                         0., 0., 0., red, green, blue))
+                source.seek(int(track_length) * 8, 1)
+    return count
+
+
+def _prepare_initialization_cloud(source_sparse, sparse_dir):
+    """Always provide a valid points3D.ply for Reconstruction_full."""
+    source_ply = source_sparse / "points3D.ply"
+    output_ply = sparse_dir / "points3D.ply"
+    if source_ply.is_file():
+        # Prefer DA3's own exported cloud; retain its geometry and colors.
+        shutil.copy2(source_ply, output_ply)
+        origin = "DA3 points3D.ply"
+    else:
+        _colmap_points_to_ply(sparse_dir / "points3D.bin", output_ply)
+        origin = "converted COLMAP points3D.bin"
+    count = _validate_ply(output_ply)
+    print(f"[DENSE INIT] {origin}: {count} points -> {output_ply}", flush=True)
+    return {"path": str(output_ply), "points": count, "source": origin}
+
+
 def _camera_fx_fy_cx_cy(camera):
     mid, width, height, params = camera
     model = MODELS[mid][0]
@@ -368,11 +451,13 @@ def prepare_dense_input(*, reconstruction_dir, sample_count=80, source_images=No
         print(f"[DENSE INPUT] {item['name']}: sampled {len(written)} from {frame_index}", flush=True)
 
     _write_binary_model(sparse_dir, cameras, images, source_sparse)
+    initialization = _prepare_initialization_cloud(source_sparse, sparse_dir)
     summary = {"input_views": len(normalized), "sampled_generated_views": len(generated),
                "total_views": len(images), "sample_budget": int(sample_count),
                "sampling_strategy": "global_pose_fps_v1",
                "selected_indices": {item["name"]: ids for item, ids in zip(items, frame_choices)},
                "generated": generated, "work_dir": str(output),
+               "initialization_cloud": initialization,
                "seconds": round(time.perf_counter() - started, 3)}
     (output / "input_manifest.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
