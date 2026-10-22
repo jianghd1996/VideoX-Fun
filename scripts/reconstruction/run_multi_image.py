@@ -28,7 +28,12 @@ CONFIG = {
     "trajectory_extra": False,
     "trajectory_view_num": 81,
     "trajectory_interpolation": "bezier",  # Keep fixed until E2E pipeline works
-    "run_gen_video": True,  # enable after connecting a control-video Wan adapter
+    "run_gen_video": True,
+    "run_captioner": True,
+    "captioner_code_root": "/home/z00566689/dev/mnt/jiang_dev/SingleRecon",
+    "captioner_model_path": "/home/z00566689/dev/mnt/jiang_dev/SingleRecon/Cloud_Models/Qwen3-VL-8B-Instruct",
+    "captioner_cpu_swap": True,
+    "captioner_num_gpus": 1,
     "video_adapter": "predict_v2v_control_5b_multi_image:WanControl5B",
     "video_code_root": "/home/z00566689/dev/mnt/jiang_dev/SingleRecon/VideoX-Fun",
     "video_lora_path": "/home/z00566689/dev/mnt/jiang_dev/SingleRecon/Cloud_Models/Wan2.2-Fun-5B-Control/12000_lora.safetensors",
