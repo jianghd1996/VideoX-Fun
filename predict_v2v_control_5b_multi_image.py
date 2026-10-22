@@ -11,6 +11,7 @@ All model weights are loaded only once per adapter instance.
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 import cv2
@@ -76,19 +77,22 @@ class WanControl5B:
         # configuring it avoids silently choosing the wrong training iteration.
         self.lora_path = os.environ.get("SINGLERECON_CONTROL_LORA_PATH") or None
         self.lora_weight = float(os.environ.get("SINGLERECON_CONTROL_LORA_WEIGHT", "0.55"))
-        self.short_edge = int(os.environ.get("SINGLERECON_CONTROL_SHORT_EDGE", "704"))
+        self.short_edge = int(os.environ.get("SINGLERECON_CONTROL_SHORT_EDGE", "1088"))
         self.steps = int(os.environ.get("SINGLERECON_CONTROL_STEPS", "8"))
-        self.cfg = float(os.environ.get("SINGLERECON_CONTROL_CFG", "6.0"))
+        self.cfg = float(os.environ.get("SINGLERECON_CONTROL_CFG", "0.0"))
         self.seed = int(os.environ.get("SINGLERECON_CONTROL_SEED", "42"))
         self.device = torch.device("cuda:0")
         self.dtype = torch.bfloat16
         self.pipeline = None
         self.boundary = None
+        self.last_timing = {}
+        self.load_seconds = 0.0
         self.load()
 
     def load(self):
         if self.pipeline is not None:
             return
+        load_started = time.perf_counter()
         if not torch.cuda.is_available():
             raise RuntimeError("Wan2.2-Fun-5B-Control requires a CUDA GPU")
         if not self.model_name.is_dir():
@@ -148,7 +152,9 @@ class WanControl5B:
         else:
             print("[MULTI CONTROL] LoRA disabled (set SINGLERECON_CONTROL_LORA_PATH to enable)", flush=True)
         self.pipeline = pipeline
-        print(f"[MULTI CONTROL] loaded {self.model_name} on {self.device}", flush=True)
+        torch.cuda.synchronize(self.device)
+        self.load_seconds = round(time.perf_counter() - load_started, 3)
+        print(f"[MULTI CONTROL] loaded {self.model_name} on {self.device}; model_load={self.load_seconds:.3f}s", flush=True)
 
     @torch.inference_mode()
     def __call__(self, *, control_video, start_image, end_image, output_video,
@@ -160,6 +166,8 @@ class WanControl5B:
             raise ValueError(f"Wan 5B requires 4n+1 frames, received {num_frames}")
         if not prompt or not str(prompt).strip():
             raise ValueError("Missing nonempty prompt.txt for multi-image video generation")
+        torch.cuda.synchronize(self.device)
+        segment_started = time.perf_counter()
         frames = _video_rgb(control_video, num_frames)
         height, width = _target_resolution(frames[0].shape[1], frames[0].shape[0], self.short_edge)
         resized = np.stack([
@@ -177,6 +185,9 @@ class WanControl5B:
         # Use the end reference image as requested, independently from end constraint.
         ref_image = get_image_latent(last, sample_size=[height, width])
         random_gen = torch.Generator(device=self.device).manual_seed(self.seed)
+        torch.cuda.synchronize(self.device)
+        preprocess_seconds = time.perf_counter() - segment_started
+        inference_started = time.perf_counter()
 
         print(f"[MULTI CONTROL] {Path(control_video).name} {num_frames} frames "
               f"{width}x{height} steps={self.steps} cfg={self.cfg}, "
@@ -191,10 +202,24 @@ class WanControl5B:
             control_video=input_video, ref_image=ref_image,
             boundary=self.boundary,
         ).videos
+        torch.cuda.synchronize(self.device)
+        inference_seconds = time.perf_counter() - inference_started
+        save_started = time.perf_counter()
         destination = Path(output_video)
         destination.parent.mkdir(parents=True, exist_ok=True)
         save_videos_grid(video, str(destination), fps=int(fps))
         del video
+        torch.cuda.synchronize(self.device)
+        save_seconds = time.perf_counter() - save_started
+        self.last_timing = {
+            "preprocess": round(preprocess_seconds, 3),
+            "inference": round(inference_seconds, 3),
+            "save": round(save_seconds, 3),
+            "total": round(time.perf_counter() - segment_started, 3),
+        }
+        print(f"[MULTI VIDEO TIMING] {destination.parent.name}: "
+              + " ".join(f"{key}={value:.3f}s" for key, value in self.last_timing.items()),
+              flush=True)
         if not destination.is_file() or destination.stat().st_size == 0:
             raise RuntimeError(f"Video was not written: {destination}")
         return str(destination)
