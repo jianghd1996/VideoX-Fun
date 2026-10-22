@@ -51,7 +51,7 @@ class MultiImagePipeline:
                  dense_code_root: str | Path | None = None,
                  da3_model_path: str | Path | None = None,
                  run_3dgs_iter: bool = True,
-                 dense_generated_frames: int = 40,
+                 dense_generated_frames: int = 80,
                  resume_stages: bool = False,
                  crop_ratio: float = 1.0,
                  mode: str = "scene",
