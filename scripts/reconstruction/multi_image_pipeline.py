@@ -263,7 +263,8 @@ class MultiImagePipeline:
                                 mode=self.mode, circle=self.circle, max_frames=self.max_frames)
             if result is False:
                 raise RuntimeError("Dense reconstruction returned False")
-            (dense_export / ".dense_complete").write_text("ok\n", encoding="utf-8")
+            (dense_export / ".dense_complete").write_text("ok
+", encoding="utf-8")
             return result
 
         operations = [("da3", da3_stage)]
@@ -275,7 +276,9 @@ class MultiImagePipeline:
             for label, operation in operations:
                 valid = (_colmap_valid(colmap) and gs_video.is_file() and gs_video.stat().st_size > 0
                          if label == "da3" else (dense_export / ".dense_complete").is_file())
-                if self.resume_stages and label == "da3" and self.render_trajectories:\n                    valid = valid and (reconstruction / "trajectories" / "manifest.json").is_file()\n                if self.resume_stages and valid and (
+                if self.resume_stages and label == "da3" and self.render_trajectories:
+                    valid = valid and (reconstruction / "trajectories" / "manifest.json").is_file()
+                if self.resume_stages and valid and (
                     label != "dense" or stages.get(label, {}).get("status") == "ok"
                 ):
                     print(f"[MULTI RESUME] {case.name}: skip {label}", flush=True)
