@@ -407,7 +407,9 @@ class MultiImagePipeline:
                 elif label == "da3":
                     valid = (_colmap_valid(colmap) and gs_video.is_file() and gs_video.stat().st_size > 0)
                 elif label == "trajectory_video":
-                    valid = (reconstruction / "generated_trajectories" / "manifest.json").is_file()
+                    # Do not skip this stage just because an old manifest exists:
+                    # generation config (CFG/resolution/LoRA) may have changed.
+                    valid = False
                 else:
                     valid = (dense_export / ".dense_complete").is_file()
                 if self.resume_stages and label == "da3" and self.render_trajectories:
@@ -454,7 +456,6 @@ class MultiImagePipeline:
                     persist()
                     print(f"[MULTI {case.name}] {label}: {timings[label]:.3f}s", flush=True)
         finally:
-            _synchronize_cuda()
             _synchronize_cuda()
             timings["stages_total"] = round(time.perf_counter() - start, 3)
             timings["total"] = round(time.perf_counter() - case_started, 3)
