@@ -25,6 +25,20 @@ def _worker(gpu_id, video_code_root, adapter_spec, environment, tasks, events):
         os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
         for key, value in environment.items():
             os.environ[key] = str(value)
+        # Limit every spawned worker BEFORE importing PyTorch, numpy/OpenCV,
+        # tokenizer or SLA modules. Parent DA3/3DGS threading is unchanged.
+        cpu_threads = int(environment.get("SINGLERECON_CONTROL_CPU_THREADS", "16"))
+        for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+                     "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+            os.environ[name] = str(cpu_threads)
+        import torch
+        import cv2
+        torch.set_num_threads(cpu_threads)
+        torch.set_num_interop_threads(1)
+        cv2.setNumThreads(1)
+        print(f"[VIDEO GPU {gpu_id}] cpu_threads={torch.get_num_threads()} "
+              f"interop={torch.get_num_interop_threads()} "
+              f"opencv={cv2.getNumThreads()}", flush=True)
         if video_code_root not in sys.path:
             sys.path.insert(0, video_code_root)
         module, symbol = adapter_spec.split(":", 1)
@@ -181,8 +195,6 @@ def run_trajectory_videos_multi_gpu(*, reconstruction_dir, source_images,
     ids = [int(i) for i in gpu_ids]
     if len(ids) < 2 or len(set(ids)) != len(ids) or min(ids) < 0:
         raise ValueError(f"Expected >=2 distinct physical GPU IDs: {gpu_ids}")
-    if not prompt.strip():
-        raise ValueError("Missing nonempty prompt.txt")
     paths = manifest["trajectories"]
     if not paths:
         raise ValueError(f"No trajectories in {manifest_file}")
