@@ -61,14 +61,14 @@ class MultiImagePipeline:
                  render_trajectories: bool = True,
                  trajectory_extra: bool = False,
                  trajectory_view_num: int = 81,
-                 trajectory_corner_smoothing: float = 0.15):
+                 trajectory_interpolation: str = "bezier"):
         root = Path(external_code_root).expanduser().resolve()
         dense_root = Path(dense_code_root or root).expanduser().resolve()
         self.run_3dgs_iter = bool(run_3dgs_iter)
         self.render_trajectories = bool(render_trajectories)
         self.trajectory_extra = bool(trajectory_extra)
         self.trajectory_view_num = int(trajectory_view_num)
-        self.trajectory_corner_smoothing = float(trajectory_corner_smoothing)
+        self.trajectory_interpolation = trajectory_interpolation
         self.resume_stages = bool(resume_stages)
         self.crop_ratio = float(crop_ratio)
         self.mode = mode
@@ -111,7 +111,7 @@ class MultiImagePipeline:
             paths, info = plan_trajectories(
                 poses_for_colmap, extra=self.trajectory_extra,
                 view_num=self.trajectory_view_num, circle=self.circle,
-                corner_smoothing=self.trajectory_corner_smoothing)
+                interpolation=self.trajectory_interpolation)
             if not paths:
                 raise RuntimeError("No up/down trajectories generated")
             out = gs_video.parent / "trajectories"
