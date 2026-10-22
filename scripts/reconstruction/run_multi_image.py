@@ -27,7 +27,11 @@ CONFIG = {
     "render_trajectories": True,
     "trajectory_extra": False,
     "trajectory_view_num": 81,
-    "trajectory_interpolation": "bezier",  # "linear" restores previous confirmed baseline
+    "trajectory_interpolation": "bezier",  # Keep fixed until E2E pipeline works
+    "run_gen_video": False,  # enable after connecting a control-video Wan adapter
+    "video_adapter": None,   # module:callable accepting GS control + start/end images
+    "video_fps": 30,
+    "video_resume": True,
 }
 WORK_DIR = "/home/z00566689/dev/mnt/jiang_test/00_1022_test"
 
