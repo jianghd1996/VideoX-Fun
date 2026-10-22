@@ -15,9 +15,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from multi_image_pipeline import MultiImagePipeline
 
 CONFIG = {
-    "external_code_root": "/PATH/TO/Depth-Anything-3",
-    "dense_code_root": "/PATH/TO/SingleRecon",
-    "da3_model_path": "/PATH/TO/besthumanmodel_lr1e_6_ckpt2.pt",
+    "external_code_root": "/home/z00566689/dev/mnt/jiang_dev/SingleRecon/DA3_custom",
+    "dense_code_root": "/home/z00566689/dev/mnt/jiang_dev/SingleRecon",
+    "da3_model_path": "/home/z00566689/dev/mnt/jiang_dev/SingleRecon/Cloud_Models/Saliency-Face-DA3/besthumanmodel_lr1e_6_ckpt2.pt",
     "run_3dgs_iter": True,
     "resume_stages": False,
     "crop_ratio": 1.0,
@@ -25,7 +25,7 @@ CONFIG = {
     "circle": False,
     "max_frames": 121,
 }
-WORK_DIR = "/PATH/TO/multi_image_cases"
+WORK_DIR = "/home/z00566689/dev/mnt/jiang_test/00_1022_test"
 
 
 def main() -> None:
