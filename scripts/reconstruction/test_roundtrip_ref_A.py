@@ -87,7 +87,7 @@ def plan_roundtrip(extrinsics, a_index, b_index, pitch_deg, frame_count=81):
 
 
 @contextmanager
-def _gs_writer_mode(mode):
+def _gs_writer_mode(mode, output_path):
     """Use OpenCV to write the DA3 GS clip without a MoviePy ffmpeg subprocess.
 
     Only patches the active render subprocess; production DA3 remains unchanged.
@@ -109,8 +109,14 @@ def _gs_writer_mode(mode):
         fps = float(fps)
         if fps <= 0:
             raise ValueError(f"Invalid GS FPS: {fps}")
-        destination = Path(filename)
+        # DA3 may pass export_dir (a directory) as MoviePy's filename.  In the
+        # experimental OpenCV mode always use our explicit MP4 file path.
+        destination = Path(output_path)
+        if destination.suffix.lower() != ".mp4":
+            raise ValueError(f"Expected an explicit .mp4 path: {destination}")
         destination.parent.mkdir(parents=True, exist_ok=True)
+        print(f"[ABLATION A] GS writer destination={destination} "
+              f"(DA3 requested {filename!s})", flush=True)
         writer = None
         frame_count = 0
         dimensions = None
@@ -211,7 +217,10 @@ def render(args, output):
     Ks = np.stack(Ks)
     render_dir = output / "gs_render"
     render_dir.mkdir(parents=True, exist_ok=True)
-    with _gs_writer_mode(args.gs_writer):
+    control_mp4 = output / "control.mp4"
+    if args.gs_writer == "opencv" and control_mp4.exists():
+        control_mp4.unlink()  # never reuse an incomplete file from an earlier run
+    with _gs_writer_mode(args.gs_writer, control_mp4):
         export_to_gs_video(
             prediction=prediction, export_dir=str(render_dir),
             extrinsics=torch.from_numpy(poses).to(prediction.gaussians.means).unsqueeze(0),
@@ -219,10 +228,13 @@ def render(args, output):
             trj_mode="original", vis_depth=None, output_name="ablation_A_BAB",
             crop_ratio=1.0, view_num=args.frames, extra_view=[False, False],
             chunk_size=4)
-    src = render_dir / "gs_video" / "ablation_A_BAB.mp4"
-    if not src.is_file():
-        raise FileNotFoundError(src)
-    shutil.copy2(src, output / "control.mp4")
+    if args.gs_writer == "moviepy":
+        src = render_dir / "gs_video" / "ablation_A_BAB.mp4"
+        if not src.is_file():
+            raise FileNotFoundError(src)
+        shutil.copy2(src, control_mp4)
+    if not control_mp4.is_file() or control_mp4.stat().st_size == 0:
+        raise RuntimeError(f"Control video was not created: {control_mp4}")
     (output / "experiment.json").write_text(json.dumps({
         "experiment": "A", "trajectory": "B->A->B",
         "input_images": [str(x) for x in images],
