@@ -28,7 +28,7 @@ CONFIG = {
     "trajectory_extra": False,
     "trajectory_view_num": 81,
     "trajectory_interpolation": "bezier",  # Keep fixed until E2E pipeline works
-    "run_gen_video": False,  # enable after connecting a control-video Wan adapter
+    "run_gen_video": True,  # enable after connecting a control-video Wan adapter
     "video_adapter": "predict_v2v_control_5b_multi_image:WanControl5B",
     "video_code_root": "/home/z00566689/dev/mnt/jiang_dev/SingleRecon/VideoX-Fun",
     "video_lora_path": None,  # full path to Control LoRA .safetensors (not directory)
