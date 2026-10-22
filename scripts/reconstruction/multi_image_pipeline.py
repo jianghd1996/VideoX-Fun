@@ -70,6 +70,7 @@ class MultiImagePipeline:
                  video_cfg: float = 0.0,
                  video_short_edge: int = 1088,
                  video_fps: int = 30,
+                 video_gpu_ids: list[int] | None = None,
                  video_resume: bool = False,
                  run_captioner: bool = True,
                  captioner_code_root: str | Path | None = None,
@@ -85,6 +86,18 @@ class MultiImagePipeline:
         self.trajectory_interpolation = trajectory_interpolation
         self.run_gen_video = bool(run_gen_video)
         self.video_fps = int(video_fps)
+        # One GPU: existing sequential adapter; multiple: one process per GPU.
+        self.video_gpu_ids = list(video_gpu_ids if video_gpu_ids is not None else [0])
+        if not self.video_gpu_ids or len(set(self.video_gpu_ids)) != len(self.video_gpu_ids):
+            raise ValueError(f"video_gpu_ids must contain distinct GPU IDs: {self.video_gpu_ids}")
+        self.video_code_root = Path(video_code_root or Path(__file__).resolve().parents[2]).expanduser().resolve()
+        self.video_adapter = video_adapter
+        self.video_environment = {
+            "SINGLERECON_CONTROL_LORA_PATH": str(Path(video_lora_path).expanduser().resolve()) if video_lora_path else "",
+            "SINGLERECON_CONTROL_LORA_WEIGHT": str(float(video_lora_weight)),
+            "SINGLERECON_CONTROL_CFG": str(float(video_cfg)),
+            "SINGLERECON_CONTROL_SHORT_EDGE": str(int(video_short_edge)),
+        }
         self.video_model_load_seconds = 0.0
         self.video_resume = bool(video_resume)
         self.run_captioner = bool(run_captioner)
@@ -103,20 +116,17 @@ class MultiImagePipeline:
                 from .multistage_pipeline import load_callable
             except ImportError:
                 from multistage_pipeline import load_callable
-            video_root = Path(video_code_root or Path(__file__).resolve().parents[2]).expanduser().resolve()
-            if not video_root.is_dir():
-                raise FileNotFoundError(f"Missing Wan video code root: {video_root}")
-            if str(video_root) not in sys.path:
-                sys.path.insert(0, str(video_root))
-            if video_lora_path is not None:
-                os.environ["SINGLERECON_CONTROL_LORA_PATH"] = str(Path(video_lora_path).expanduser().resolve())
-            os.environ["SINGLERECON_CONTROL_LORA_WEIGHT"] = str(float(video_lora_weight))
-            os.environ["SINGLERECON_CONTROL_CFG"] = str(float(video_cfg))
-            os.environ["SINGLERECON_CONTROL_SHORT_EDGE"] = str(int(video_short_edge))
-            factory = load_callable(video_adapter)
-            # Delay heavyweight Wan loading until after DA3 returns to CPU.
-            # Loading both models on GPU during DA3 would otherwise risk OOM.
-            self.video_generator_factory = factory
+            if not self.video_code_root.is_dir():
+                raise FileNotFoundError(f"Missing Wan video code root: {self.video_code_root}")
+            # Multi-GPU workers import Wan only after setting CUDA_VISIBLE_DEVICES.
+            if len(self.video_gpu_ids) == 1:
+                if str(self.video_code_root) not in sys.path:
+                    sys.path.insert(0, str(self.video_code_root))
+                for key, value in self.video_environment.items():
+                    os.environ[key] = value
+                self.video_generator_factory = load_callable(video_adapter)
+            print(f"[MULTI VIDEO MODE] {('multi_gpu' if len(self.video_gpu_ids) > 1 else 'single_gpu')} "
+                  f"GPU IDs={self.video_gpu_ids}", flush=True)
         self.resume_stages = bool(resume_stages)
         self.crop_ratio = float(crop_ratio)
         self.mode = mode
@@ -270,11 +280,39 @@ class MultiImagePipeline:
                     torch.cuda.empty_cache()
 
     def stage_video(self, case_dir: Path) -> list[dict[str, Any]]:
-        """Use each GS trajectory as video control, then export frame/pose mappings."""
+        """Dispatch based on configured GPU count; both paths return same records."""
         try:
             from .multi_image_video import run_trajectory_videos
         except ImportError:
             from multi_image_video import run_trajectory_videos
+
+        prompt_file = case_dir / "prompt.txt"
+        prompt = prompt_file.read_text(encoding="utf-8").strip() if prompt_file.is_file() else ""
+        if not prompt:
+            raise FileNotFoundError(f"Missing nonempty {prompt_file}")
+        arguments = dict(
+            reconstruction_dir=case_dir / "reconstruction",
+            source_images=input_images(case_dir / "image"),
+            fps=self.video_fps, prompt=prompt, resume=self.video_resume)
+
+        if len(self.video_gpu_ids) > 1:
+            try:
+                from .multi_image_video_multi_gpu import run_trajectory_videos_multi_gpu
+            except ImportError:
+                from multi_image_video_multi_gpu import run_trajectory_videos_multi_gpu
+            results = run_trajectory_videos_multi_gpu(
+                **arguments,
+                adapter_spec=self.video_adapter,
+                video_code_root=self.video_code_root,
+                gpu_ids=self.video_gpu_ids,
+                env_overrides=self.video_environment)
+            summary_path = case_dir / "reconstruction" / "generated_trajectories" / "summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.exists() else {}
+            loads = summary.get("model_load_by_gpu", {})
+            # Critical-path model load (the workers load concurrently).
+            self.video_model_load_seconds = max(loads.values(), default=0.0)
+            return results
+
         if self.video_generator is None:
             factory = self.video_generator_factory
             load_started = time.perf_counter()
@@ -285,13 +323,7 @@ class MultiImagePipeline:
             _synchronize_cuda()
             self.video_model_load_seconds = round(time.perf_counter() - load_started, 3)
             print(f"[MULTI VIDEO MODEL LOAD] {self.video_model_load_seconds:.3f}s", flush=True)
-        prompt_file = case_dir / "prompt.txt"
-        prompt = prompt_file.read_text(encoding="utf-8").strip() if prompt_file.is_file() else ""
-        return run_trajectory_videos(
-            reconstruction_dir=case_dir / "reconstruction",
-            source_images=input_images(case_dir / "image"),
-            generator=self.video_generator, fps=self.video_fps,
-            prompt=prompt, resume=self.video_resume)
+        return run_trajectory_videos(**arguments, generator=self.video_generator)
 
     def __call__(self, work_dir: str | Path, export_dir: str | Path | None = None) -> dict[str, Any]:
         case_started = time.perf_counter()
@@ -439,6 +471,7 @@ class MultiImagePipeline:
                         timings["video_model_load"] = self.video_model_load_seconds
                         timings["video_generation"] = round(sum(
                             float(item["seconds"]) for item in value), 3)
+                        timings["video_gpu_count"] = len(self.video_gpu_ids)
                         timings["video_inference"] = round(sum(
                             float(item.get("inference_timing", {}).get("inference", 0))
                             for item in value), 3)
