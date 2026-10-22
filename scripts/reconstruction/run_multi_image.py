@@ -41,6 +41,10 @@ CONFIG = {
     "video_lora_weight": 0.55,
     "video_cfg": 0.0,
     "video_short_edge": 1088,
+    # Fast LightVAE decode, same encoder+decoder combination as single-image TI2V.
+    "video_use_lightvae": True,  # False restores original full VAE
+    "video_lightvae_path": "/home/z00566689/dev/mnt/jiang_dev/SingleRecon/Cloud_Models/transformer_w_skybox_sla/MG-LightVAE.pth",
+    "video_teacher_vae_path": "/home/z00566689/dev/mnt/jiang_dev/SingleRecon/Cloud_Models/Wan2.2-TI2V-5B/Wan2.2_VAE.pth",
     "video_fps": 30,
     # Automatically dispatch: one ID -> sequential, multiple -> parallel workers.
     # GPU IDs are PHYSICAL CUDA device IDs; 4 trajectories + 4 GPUs => one each.
