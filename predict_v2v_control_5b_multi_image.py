@@ -77,8 +77,8 @@ def _load_merged_transformer_weights(transformer, path):
     if checkpoint and all(k.startswith("transformer.") for k in checkpoint):
         checkpoint = {k[len("transformer."):]: v for k, v in checkpoint.items()}
     missing, unexpected = transformer.load_state_dict(checkpoint, strict=False)
-    # Some accelerated checkpoints exclude nonpersistent buffers, but model
-    # parameters must match or the performance/quality comparison is invalid.
+    # Verify the actual quantized module parameters were loaded; missing
+    # parameters would make the performance/quality comparison invalid.
     param_keys = set(dict(transformer.named_parameters()))
     serious_missing = sorted(set(missing) & param_keys)
     if serious_missing or unexpected:
@@ -189,11 +189,6 @@ class WanControl5B:
         if model_kwargs.get("transformer_combination_type", "single") == "moe":
             raise RuntimeError("Expected single-transformer Wan2.2-Fun-5B-Control model")
 
-        if self.transformer_path:
-            merged = Path(self.transformer_path).expanduser().resolve()
-            if not merged.is_file():
-                raise FileNotFoundError(f"Merged SLA transformer not found: {merged}")
-            _load_merged_transformer_weights(transformer, merged)
         if self.sla_topk <= 0.9:
             # Substitute attention and accelerated quantized linear/norm
             # modules only after the merged tensor state has been loaded.
@@ -229,6 +224,16 @@ class WanControl5B:
                 raise RuntimeError("SLA quantization replaced no modules")
             print(f"[MULTI SLA] topk={self.sla_topk} attention={changed_attention} "
                   f"linear/norm={len(replacements)}", flush=True)
+
+        # The merged SLA checkpoint contains int8_weight/scale tensors and
+        # attention local_attn.proj_l. These keys exist only AFTER replacing
+        # attention and Linear/Norm modules. Loading beforehand silently
+        # mismatches ~300 fp weight keys and ~660 quantized keys.
+        if self.transformer_path:
+            merged = Path(self.transformer_path).expanduser().resolve()
+            if not merged.is_file():
+                raise FileNotFoundError(f"Merged SLA transformer not found: {merged}")
+            _load_merged_transformer_weights(transformer, merged)
 
         if self.use_lightvae:
             if not self.lightvae_path.is_file():
