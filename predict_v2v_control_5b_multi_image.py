@@ -31,6 +31,11 @@ from videox_fun.utils.utils import (
 cur_py_path = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(os.path.dirname(cur_py_path), "Cloud_Models/Wan2.2-Fun-5B-Control/")
 CONFIG_PATH = os.path.join(cur_py_path, "config/wan2.2/wan_civitai_5b.yaml")
+LIGHTVAE_PATH = os.path.join(
+    os.path.dirname(cur_py_path), "Cloud_Models/transformer_w_skybox_sla/MG-LightVAE.pth")
+# Wan2.2 VAE teacher uses the same pretrained weights as the single-image TI2V pipeline.
+DEFAULT_TEACHER_VAE_PATH = os.path.join(
+    os.path.dirname(cur_py_path), "Cloud_Models/Wan2.2-TI2V-5B/Wan2.2_VAE.pth")
 NEGATIVE_PROMPT = (
     "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，"
     "最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，畸形的，毁容的，静止不动的画面"
@@ -81,6 +86,11 @@ class WanControl5B:
         self.steps = int(os.environ.get("SINGLERECON_CONTROL_STEPS", "8"))
         self.cfg = float(os.environ.get("SINGLERECON_CONTROL_CFG", "0.0"))
         self.seed = int(os.environ.get("SINGLERECON_CONTROL_SEED", "42"))
+        self.use_lightvae = os.environ.get("SINGLERECON_CONTROL_USE_LIGHTVAE", "1") == "1"
+        self.lightvae_path = Path(os.environ.get(
+            "SINGLERECON_CONTROL_LIGHTVAE_PATH", LIGHTVAE_PATH)).expanduser().resolve()
+        self.teacher_vae_path = Path(os.environ.get(
+            "SINGLERECON_CONTROL_TEACHER_VAE_PATH", DEFAULT_TEACHER_VAE_PATH)).expanduser().resolve()
         self.device = torch.device("cuda:0")
         self.dtype = torch.bfloat16
         self.pipeline = None
@@ -116,10 +126,47 @@ class WanControl5B:
         if model_kwargs.get("transformer_combination_type", "single") == "moe":
             raise RuntimeError("Expected single-transformer Wan2.2-Fun-5B-Control model")
 
-        vae = AutoencoderKLWan3_8.from_pretrained(
-            str(self.model_name / config["vae_kwargs"].get("vae_subpath", "vae")),
-            additional_kwargs=OmegaConf.to_container(config["vae_kwargs"]),
-        ).to(self.dtype)
+        if self.use_lightvae:
+            if not self.lightvae_path.is_file():
+                raise FileNotFoundError(f"LightVAE decoder checkpoint missing: {self.lightvae_path}")
+            if not self.teacher_vae_path.is_file():
+                # Some Control model layouts place the teacher checkpoint in their own directory.
+                candidate = self.model_name / "Wan2.2_VAE.pth"
+                if candidate.is_file():
+                    self.teacher_vae_path = candidate
+                else:
+                    raise FileNotFoundError(
+                        f"Teacher VAE checkpoint missing: {self.teacher_vae_path}; "
+                        "set SINGLERECON_CONTROL_TEACHER_VAE_PATH to an existing Wan2.2_VAE.pth")
+            try:
+                from videox_fun.models.wan_vae_first_encoder_lightvae_decoder import AutoencoderKLWan3_8Stream
+            except ImportError as exc:
+                raise ImportError(
+                    "LightVAE implementation missing: "
+                    "SingleRecon/VideoX-Fun/videox_fun/models/"
+                    "wan_vae_first_encoder_lightvae_decoder.py. "
+                    "Copy the exact implementation used by the working single-image pipeline, "
+                    "or set video_use_lightvae=False."
+                ) from exc
+            print(f"[MULTI CONTROL] LightVAE decoder={self.lightvae_path} "
+                  f"teacher={self.teacher_vae_path}", flush=True)
+            vae = AutoencoderKLWan3_8Stream.from_teacher_and_lightvae(
+                teacher_vae_path=str(self.teacher_vae_path),
+                lightvae_decoder_path=str(self.lightvae_path),
+                additional_kwargs={
+                    "latent_channels": 48,
+                    "c_dim": 160,
+                    "dim_mult": [1, 2, 4, 4],
+                    "temperal_downsample": [False, True, True],
+                },
+                decoder_pruning_rate=None,
+            ).eval().requires_grad_(False).to(dtype=self.dtype)
+        else:
+            vae = AutoencoderKLWan3_8.from_pretrained(
+                str(self.model_name / config["vae_kwargs"].get("vae_subpath", "vae")),
+                additional_kwargs=OmegaConf.to_container(config["vae_kwargs"]),
+            ).to(self.dtype)
+        print(f"[MULTI CONTROL] VAE={'LightVAE' if self.use_lightvae else 'teacher'}", flush=True)
         tokenizer = AutoTokenizer.from_pretrained(
             str(self.model_name / config["text_encoder_kwargs"].get("tokenizer_subpath", "tokenizer")))
         text_encoder = WanT5EncoderModel.from_pretrained(
