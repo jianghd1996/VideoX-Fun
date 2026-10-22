@@ -63,12 +63,26 @@ def main() -> None:
     parser.add_argument("--config", type=Path)
     parser.add_argument("--da3-only", action="store_true")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--video-gpus", type=str,
+                        help="Physical GPUs for Wan workers, e.g. 6,7 (does not change DA3/dense GPU)")
+    parser.add_argument("--benchmark-fresh", action="store_true",
+                        help="Force complete fresh stages; refuses existing reconstruction outputs")
     parser.add_argument("--rerun-dense", action="store_true",
                         help="Reuse DA3/videos but back up and redo dense reconstruction")
     args = parser.parse_args()
     opts = dict(CONFIG)
     if args.config:
         opts.update(json.loads(args.config.read_text(encoding="utf-8")))
+    if args.video_gpus:
+        opts["video_gpu_ids"] = [int(x.strip()) for x in args.video_gpus.split(",") if x.strip()]
+        if len(opts["video_gpu_ids"]) != len(set(opts["video_gpu_ids"])) or not opts["video_gpu_ids"]:
+            parser.error("--video-gpus must contain distinct nonempty GPU IDs")
+    if args.benchmark_fresh:
+        if args.resume or args.rerun_dense:
+            parser.error("--benchmark-fresh cannot be used with --resume or --rerun-dense")
+        opts["resume_stages"] = False
+        opts["video_resume"] = False
+        opts["force_rerun_dense"] = False
     if args.da3_only:
         opts["run_3dgs_iter"] = False
     if args.resume:
@@ -84,6 +98,15 @@ def main() -> None:
              sorted(p for p in root.iterdir() if p.is_dir() and (p / "image").is_dir()))
     if not cases:
         raise ValueError(f"No case/image folders found in {root}")
+    if args.benchmark_fresh:
+        collisions = [str(case / "reconstruction") for case in cases
+                      if (case / "reconstruction").exists()]
+        if collisions:
+            raise FileExistsError(
+                "Fresh benchmark would reuse/overwrite existing reconstruction. "
+                "Create a separate test case containing only image/: " + ", ".join(collisions))
+    print(f"[BENCHMARK] gpus={opts['video_gpu_ids']} fresh={args.benchmark_fresh} "
+          f"video_resume={opts['video_resume']} resume_stages={opts['resume_stages']}", flush=True)
     wall_started = time.perf_counter()
     pipeline = MultiImagePipeline(**opts)
     print(f"[MULTI PRELOAD] initial={pipeline.load_seconds:.3f}s", flush=True)
@@ -107,8 +130,18 @@ def main() -> None:
         print(f"{name[:35]:<35} {record['status']:<8} "
               + " ".join(f"{record[key]:>18.3f}s" if key in record else f"{'-':>19}"
                          for key in keys), flush=True)
-    print(f"[MULTI ALL CASES] wall={time.perf_counter() - wall_started:.3f}s "
+    wall = time.perf_counter() - wall_started
+    print(f"[MULTI ALL CASES] wall={wall:.3f}s "
           f"initial_model_preload={pipeline.load_seconds:.3f}s", flush=True)
+    for name, record in summary.items():
+        if record.get("status") != "ok":
+            continue
+        print(f"[BENCHMARK {name}] stage_total={record.get('stages_total', float('nan')):.3f}s "
+              f"case_total={record.get('total', float('nan')):.3f}s "
+              f"initial_preload_once={pipeline.load_seconds:.3f}s "
+              f"video_wall={record.get('trajectory_video', float('nan')):.3f}s "
+              f"video_sum_segments={record.get('video_generation', float('nan')):.3f}s "
+              f"dense={record.get('dense', float('nan')):.3f}s", flush=True)
     if any(row["status"] == "failed" for row in summary.values()):
         raise SystemExit(1)
 
