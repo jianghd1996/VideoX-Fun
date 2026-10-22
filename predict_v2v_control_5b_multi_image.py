@@ -136,7 +136,10 @@ class WanControl5B:
             lora = Path(self.lora_path).expanduser().resolve()
             if not lora.is_file():
                 raise FileNotFoundError(f"LoRA must be a .safetensors file: {lora}")
-            from videox_fun.utils.lora_utils_new import merge_lora
+            try:
+                from videox_fun.utils.lora_utils_new import merge_lora
+            except ImportError:
+                from videox_fun.utils.lora_utils import merge_lora
             pipeline = merge_lora(
                 pipeline, str(lora), self.lora_weight,
                 device=self.device, dtype=self.dtype,
