@@ -53,6 +53,7 @@ class MultiImagePipeline:
                  run_3dgs_iter: bool = True,
                  dense_generated_frames: int = 80,
                  resume_stages: bool = False,
+                 force_rerun_dense: bool = False,
                  crop_ratio: float = 1.0,
                  mode: str = "scene",
                  circle: bool = False,
@@ -85,6 +86,7 @@ class MultiImagePipeline:
         dense_root = Path(dense_code_root or root).expanduser().resolve()
         self.run_3dgs_iter = bool(run_3dgs_iter)
         self.dense_generated_frames = int(dense_generated_frames)
+        self.force_rerun_dense = bool(force_rerun_dense)
         if self.dense_generated_frames < 1:
             raise ValueError("dense_generated_frames must be positive")
         self.render_trajectories = bool(render_trajectories)
@@ -442,8 +444,23 @@ class MultiImagePipeline:
             dense_colmap = dense_input / "sparse" / "0"
             if not _colmap_valid(dense_colmap):
                 raise RuntimeError(f"Missing merged generated-video COLMAP: {dense_colmap}")
+            # Reconstruction_full may initialize from sparse/0/points3D.ply
+            # instead of COLMAP points3D.bin. Never run with missing/empty PLY.
+            from pathlib import Path as _Path
+            cloud = dense_colmap / "points3D.ply"
+            if not cloud.is_file() or cloud.stat().st_size < 256:
+                raise RuntimeError(f"Missing or invalid 3DGS initialization PLY: {cloud}")
             if not any((dense_input / "image").glob("*.jpg")):
                 raise RuntimeError(f"No sampled generated frames in {dense_input / 'image'}")
+            if self.force_rerun_dense and dense_export.exists() and any(dense_export.iterdir()):
+                # Keep the previous reconstruction as a backup while forcing a
+                # clean run; rename is cheap on the same filesystem.
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                backup = dense_export.with_name(dense_export.name + "_before_ply_fix_" + stamp)
+                if backup.exists():
+                    raise FileExistsError(f"Dense backup already exists: {backup}")
+                dense_export.rename(backup)
+                print(f"[DENSE RERUN] preserved previous results at {backup}", flush=True)
             dense_export.mkdir(parents=True, exist_ok=True)
             result = self.dense(work_dir=dense_input, export_dir=dense_export,
                                 mode=self.mode, circle=self.circle, max_frames=self.max_frames)
@@ -477,7 +494,8 @@ class MultiImagePipeline:
                     # Regenerate the input mapping to avoid stale frame selections.
                     valid = False
                 else:
-                    valid = (dense_export / ".dense_complete").is_file()
+                    valid = ((dense_export / ".dense_complete").is_file()
+                             and not self.force_rerun_dense)
                 if self.resume_stages and label == "da3" and self.render_trajectories:
                     valid = valid and (reconstruction / "trajectories" / "manifest.json").is_file()
                 if self.resume_stages and valid and (
