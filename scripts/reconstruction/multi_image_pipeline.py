@@ -64,6 +64,9 @@ class MultiImagePipeline:
                  trajectory_interpolation: str = "bezier",
                  run_gen_video: bool = False,
                  video_adapter: str | None = None,
+                 video_code_root: str | Path | None = None,
+                 video_lora_path: str | Path | None = None,
+                 video_lora_weight: float = 0.55,
                  video_fps: int = 30,
                  video_resume: bool = False):
         root = Path(external_code_root).expanduser().resolve()
@@ -86,6 +89,14 @@ class MultiImagePipeline:
                 from .multistage_pipeline import load_callable
             except ImportError:
                 from multistage_pipeline import load_callable
+            video_root = Path(video_code_root or Path(__file__).resolve().parents[2]).expanduser().resolve()
+            if not video_root.is_dir():
+                raise FileNotFoundError(f"Missing Wan video code root: {video_root}")
+            if str(video_root) not in sys.path:
+                sys.path.insert(0, str(video_root))
+            if video_lora_path is not None:
+                os.environ["SINGLERECON_CONTROL_LORA_PATH"] = str(Path(video_lora_path).expanduser().resolve())
+            os.environ["SINGLERECON_CONTROL_LORA_WEIGHT"] = str(float(video_lora_weight))
             factory = load_callable(video_adapter)
             self.video_generator = factory() if isinstance(factory, type) else factory
             preload = getattr(self.video_generator, "load", None)
