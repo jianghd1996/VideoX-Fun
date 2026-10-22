@@ -57,6 +57,7 @@ CONFIG = {
     "video_gpu_ids": [6, 7],
     "video_cpu_threads": 16,  # per Wan worker; compare with 32
     "video_positive_prompt": "",  # do not load prompt.txt
+    "video_save_mp4": True,  # also archive complete MP4; selected JPGs always saved from tensor
     "video_resume": False,  # full E2E benchmark: regenerate all videos
     "video_preload_workers": True,  # preload Wan on GPU 6,7 at pipeline startup
 }
@@ -69,6 +70,8 @@ def main() -> None:
     parser.add_argument("--config", type=Path)
     parser.add_argument("--da3-only", action="store_true")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--no-save-mp4", action="store_true",
+                        help="Skip full generated MP4; still save pose-selected JPGs from Wan tensor")
     parser.add_argument("--video-cpu-threads", type=int, choices=(8, 16, 32),
                         help="CPU threads per Wan worker; default 16, try 32 as A/B")
     parser.add_argument("--video-gpus", type=str,
@@ -81,6 +84,8 @@ def main() -> None:
     opts = dict(CONFIG)
     if args.config:
         opts.update(json.loads(args.config.read_text(encoding="utf-8")))
+    if args.no_save_mp4:
+        opts["video_save_mp4"] = False
     if args.video_cpu_threads is not None:
         opts["video_cpu_threads"] = args.video_cpu_threads
     if args.video_gpus:
@@ -118,6 +123,7 @@ def main() -> None:
     print(f"[BENCHMARK] gpus={opts['video_gpu_ids']} "
           f"worker_cpu_threads={opts['video_cpu_threads']} "
           f"captioner={opts['run_captioner']} positive_prompt={opts['video_positive_prompt']!r} "
+          f"save_mp4={opts['video_save_mp4']} "
           f"fresh={args.benchmark_fresh} "
           f"video_resume={opts['video_resume']} resume_stages={opts['resume_stages']}", flush=True)
     wall_started = time.perf_counter()
@@ -141,7 +147,9 @@ def main() -> None:
     print("\n[MULTI END-TO-END TIMING SUMMARY] (seconds)", flush=True)
     keys = ("image_preprocess", "caption", "da3", "video_model_load",
             "video_generation", "video_inference", "trajectory_video",
-            "dense_prepare", "dense", "total")
+            "dense_prepare", "dense", "video_save_jpg_sum",
+            "video_save_mp4_sum", "video_wall_no_mp4_estimate",
+            "total_no_mp4_estimate", "total")
     print(f"{'Case':<35} {'Status':<8} " + " ".join(f"{key:>19}" for key in keys), flush=True)
     for name, record in summary.items():
         print(f"{name[:35]:<35} {record['status']:<8} "
@@ -160,6 +168,8 @@ def main() -> None:
               f"wan_preload_once={pipeline.video_worker_preload_seconds:.3f}s "
               f"video_wall={record.get('trajectory_video', float('nan')):.3f}s "
               f"video_sum_segments={record.get('video_generation', float('nan')):.3f}s "
+              f"video_no_mp4_est={record.get('video_wall_no_mp4_estimate', float('nan')):.3f}s "
+              f"total_no_mp4_est={record.get('total_no_mp4_estimate', float('nan')):.3f}s "
               f"dense={record.get('dense', float('nan')):.3f}s", flush=True)
     if any(row["status"] == "failed" for row in summary.values()):
         raise SystemExit(1)
