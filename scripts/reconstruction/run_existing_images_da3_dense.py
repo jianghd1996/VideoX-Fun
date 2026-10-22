@@ -112,8 +112,29 @@ def main():
             raise FileNotFoundError(f"--skip-da3 needs preexisting COLMAP under {sparse}")
         print(f"[COMPARE] Skip DA3, use {sparse}", flush=True)
     else:
+        # Match MultiImagePipeline: the DA3 package lives at <DA3_ROOT>/DA3,
+        # while depth_anything_3 is provided under <DA3_ROOT>/src.
+        # create_da3() only adds DA3_ROOT, so install BOTH import roots first.
+        da3_root = args.da3_root.expanduser().resolve()
+        if not (da3_root / "src" / "depth_anything_3").is_dir():
+            raise FileNotFoundError(
+                f"Missing depth_anything_3 source at {da3_root / 'src' / 'depth_anything_3'}; "
+                "check --da3-root points to the same DA3_custom checkout as the working multi-image pipeline")
+        for import_root in (da3_root, da3_root / "src"):
+            root_str = str(import_root)
+            if root_str in sys.path:
+                sys.path.remove(root_str)
+            sys.path.insert(0, root_str)
+        import importlib.util
+        spec = importlib.util.find_spec("depth_anything_3.run_da3_full_crop_dev")
+        if spec is None:
+            raise ImportError(
+                "DA3 wrapper expects depth_anything_3.run_da3_full_crop_dev, "
+                f"but this module is missing from {da3_root / 'src'}. "
+                "Check the installed DA3_custom version against the working checkout.")
+        print(f"[COMPARE] DA3 module={spec.origin}", flush=True)
         load_started = time.perf_counter()
-        da3 = create_da3(args.da3_root, args.da3_model)
+        da3 = create_da3(da3_root, args.da3_model)
         times["da3_model_load"] = round(time.perf_counter() - load_started, 3)
         sparse.mkdir(parents=True, exist_ok=True)
         started = time.perf_counter()
