@@ -61,7 +61,11 @@ class MultiImagePipeline:
                  render_trajectories: bool = True,
                  trajectory_extra: bool = False,
                  trajectory_view_num: int = 81,
-                 trajectory_interpolation: str = "bezier"):
+                 trajectory_interpolation: str = "bezier",
+                 run_gen_video: bool = False,
+                 video_adapter: str | None = None,
+                 video_fps: int = 30,
+                 video_resume: bool = False):
         root = Path(external_code_root).expanduser().resolve()
         dense_root = Path(dense_code_root or root).expanduser().resolve()
         self.run_3dgs_iter = bool(run_3dgs_iter)
@@ -69,6 +73,24 @@ class MultiImagePipeline:
         self.trajectory_extra = bool(trajectory_extra)
         self.trajectory_view_num = int(trajectory_view_num)
         self.trajectory_interpolation = trajectory_interpolation
+        self.run_gen_video = bool(run_gen_video)
+        self.video_fps = int(video_fps)
+        self.video_resume = bool(video_resume)
+        self.video_generator = None
+        if self.run_gen_video:
+            if not self.render_trajectories:
+                raise ValueError("run_gen_video requires render_trajectories=True")
+            if not video_adapter:
+                raise ValueError("run_gen_video requires a control-video-capable video_adapter")
+            try:
+                from .multistage_pipeline import load_callable
+            except ImportError:
+                from multistage_pipeline import load_callable
+            factory = load_callable(video_adapter)
+            self.video_generator = factory() if isinstance(factory, type) else factory
+            preload = getattr(self.video_generator, "load", None)
+            if callable(preload):
+                preload()
         self.resume_stages = bool(resume_stages)
         self.crop_ratio = float(crop_ratio)
         self.mode = mode
@@ -174,9 +196,19 @@ class MultiImagePipeline:
             if device.type == "cuda":
                 torch.cuda.empty_cache()
 
-    def stage_video(self, case_dir: Path) -> None:
-        """Reserved for trajectory-conditioned generation; intentionally disabled."""
-        raise NotImplementedError("Multi-image video generation is not implemented yet")
+    def stage_video(self, case_dir: Path) -> list[dict[str, Any]]:
+        """Use each GS trajectory as video control, then export frame/pose mappings."""
+        try:
+            from .multi_image_video import run_trajectory_videos
+        except ImportError:
+            from multi_image_video import run_trajectory_videos
+        prompt_file = case_dir / "prompt.txt"
+        prompt = prompt_file.read_text(encoding="utf-8").strip() if prompt_file.is_file() else ""
+        return run_trajectory_videos(
+            reconstruction_dir=case_dir / "reconstruction",
+            source_images=input_images(case_dir / "image"),
+            generator=self.video_generator, fps=self.video_fps,
+            prompt=prompt, resume=self.video_resume)
 
     def __call__(self, work_dir: str | Path, export_dir: str | Path | None = None) -> dict[str, Any]:
         case = Path(work_dir).expanduser().resolve()
@@ -270,14 +302,20 @@ class MultiImagePipeline:
             return result
 
         operations = [("da3", da3_stage)]
+        if self.run_gen_video:
+            operations.append(("trajectory_video", lambda: self.stage_video(case)))
         if self.run_3dgs_iter:
             operations.append(("dense", dense_stage))
         _synchronize_cuda()
         start = time.perf_counter()
         try:
             for label, operation in operations:
-                valid = (_colmap_valid(colmap) and gs_video.is_file() and gs_video.stat().st_size > 0
-                         if label == "da3" else (dense_export / ".dense_complete").is_file())
+                if label == "da3":
+                    valid = (_colmap_valid(colmap) and gs_video.is_file() and gs_video.stat().st_size > 0)
+                elif label == "trajectory_video":
+                    valid = (reconstruction / "generated_trajectories" / "manifest.json").is_file()
+                else:
+                    valid = (dense_export / ".dense_complete").is_file()
                 if self.resume_stages and label == "da3" and self.render_trajectories:
                     valid = valid and (reconstruction / "trajectories" / "manifest.json").is_file()
                 if self.resume_stages and valid and (
@@ -298,6 +336,8 @@ class MultiImagePipeline:
                             raise RuntimeError(f"DA3 did not write COLMAP poses: {colmap}")
                         if not gs_video.is_file() or gs_video.stat().st_size == 0:
                             raise RuntimeError(f"DA3 did not write GS video: {gs_video}")
+                    elif label == "trajectory_video":
+                        results["trajectory_videos"] = value
                     else:
                         results["dense_result"] = value
                     stages[label] = {"status": "ok", "finished_at": datetime.now(timezone.utc).isoformat()}
