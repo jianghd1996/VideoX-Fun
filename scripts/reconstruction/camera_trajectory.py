@@ -76,64 +76,67 @@ def _estimate_scene_up(poses):
     return _unit(up)
 
 
-def _corner_round_positions(positions, knots, times, fraction):
-    """Localized C1 corner rounding without global spline overshoot.
+def get_cubic_bezier_trajectory(control_points, m):
+    """Bezier camera-center trajectory for 2-5 control points (degree 1-4).
 
-    Only a small window adjacent to each interior control pose is modified.
-    All control positions stay fixed; the path outside the windows is linear.
+    Interior control points shape the curve but generally are not traversed.
     """
-    base = np.column_stack([np.interp(times, knots, positions[:, j])
-                            for j in range(3)])
-    if fraction <= 0 or len(positions) < 3:
-        return base
-    fraction = min(float(fraction), 0.24)
-
-    def hermite(p0, p1, v0, v1, t0, t1, ts):
-        dt = t1 - t0
-        u = ((ts - t0) / dt)[:, None]
-        return ((2*u**3 - 3*u**2 + 1)*p0
-                + (u**3 - 2*u**2 + u)*dt*v0
-                + (-2*u**3 + 3*u**2)*p1
-                + (u**3 - u**2)*dt*v1)
-
-    for j in range(1, len(positions)-1):
-        prev_dt = knots[j] - knots[j-1]
-        next_dt = knots[j+1] - knots[j]
-        left = knots[j] - fraction * prev_dt
-        right = knots[j] + fraction * next_dt
-        v_before = (positions[j] - positions[j-1]) / prev_dt
-        v_after = (positions[j+1] - positions[j]) / next_dt
-        # Time-weighted common tangent; avoids speed jumps at the corner.
-        tangent = (v_before * next_dt + v_after * prev_dt) / (prev_dt + next_dt)
-        p_left = positions[j] - (knots[j]-left)*v_before
-        p_right = positions[j] + (right-knots[j])*v_after
-        first = (times >= left) & (times <= knots[j])
-        second = (times > knots[j]) & (times <= right)
-        if np.any(first):
-            base[first] = hermite(p_left, positions[j], v_before, tangent,
-                                  left, knots[j], times[first])
-        if np.any(second):
-            base[second] = hermite(positions[j], p_right, tangent, v_after,
-                                   knots[j], right, times[second])
-    return base
+    points = np.asarray(control_points, dtype=np.float64)
+    n = len(points)
+    if n < 2 or n > 5 or points.shape != (n, 3):
+        raise ValueError("Bezier requires 2-5 camera-center control points of shape (3,)")
+    t = np.linspace(0.0, 1.0, m)[:, None, None]
+    work = np.broadcast_to(points[None], (m, n, 3)).copy()
+    for level in range(1, n):
+        work[:, :n-level] = (1-t)*work[:, :n-level] + t*work[:, 1:n-level+1]
+    return work[:, 0]
 
 
-def _interp_poses(controls, count, *, corner_smoothing=0.15):
-    """Linear/SLERP baseline with optional gentle local position corner rounding.
+def get_bezier_rotation_trajectory(rot_matrices, m):
+    """Geodesic de Casteljau interpolation (recursive SLERP) in SO(3).
 
-    No global spline and no rotation-spline smoothing. Exact end input poses.
-    corner_smoothing=0 reproduces the previous trajectory exactly.
+    Relative rotation exponential performs shortest-path SLERP without needing
+    explicit quaternion sign handling. Supports 2-5 control orientations.
     """
+    rotations = Rotation.from_matrix(np.asarray(rot_matrices, dtype=np.float64))
+    n = len(rotations)
+    if not 2 <= n <= 5:
+        raise ValueError("Bezier rotation requires 2-5 control rotations")
+    result = []
+    for t in np.linspace(0.0, 1.0, m):
+        stage = [rotations[i] for i in range(n)]
+        for _ in range(n - 1):
+            stage = [left * Rotation.from_rotvec((left.inv() * right).as_rotvec() * t)
+                     for left, right in zip(stage[:-1], stage[1:])]
+        result.append(stage[0].as_matrix())
+    return np.asarray(result)
+
+
+def _interp_poses(controls, count, *, interpolation="bezier"):
+    """Bezier camera centers + recursive rotation SLERP, or exact old baseline.
+
+    All interpolations occur directly in DA3 world coordinates. W2C translation
+    is recomputed from the resulting camera center and rotation.
+    """
+    if interpolation not in ("bezier", "linear"):
+        raise ValueError(f"Unknown trajectory interpolation mode: {interpolation}")
+    if count < 2:
+        raise ValueError("count must be >= 2")
     positions = _centers(controls)
     rotations = Rotation.from_matrix(controls[:, :3, :3])
-    steps = np.linalg.norm(np.diff(positions, axis=0), axis=1)
-    angles = (rotations[:-1].inv() * rotations[1:]).magnitude()
-    lengths = np.maximum(steps + 0.25 * angles *
-                         max(np.linalg.norm(positions, axis=1).mean(), 1e-6), 1e-5)
-    knots = np.concatenate(([0.0], np.cumsum(lengths)))
-    times = np.linspace(0, knots[-1], count)
-    cam_centers = _corner_round_positions(positions, knots, times, corner_smoothing)
-    rot = Slerp(knots, rotations)(times).as_matrix()
+    if interpolation == "bezier":
+        cam_centers = get_cubic_bezier_trajectory(positions, count)
+        rot = get_bezier_rotation_trajectory(controls[:, :3, :3], count)
+    else:
+        steps = np.linalg.norm(np.diff(positions, axis=0), axis=1)
+        angles = (rotations[:-1].inv() * rotations[1:]).magnitude()
+        lengths = np.maximum(steps + 0.25 * angles *
+                             max(np.linalg.norm(positions, axis=1).mean(), 1e-6), 1e-5)
+        knots = np.concatenate(([0.0], np.cumsum(lengths)))
+        times = np.linspace(0, knots[-1], count)
+        cam_centers = np.column_stack([
+            np.interp(times, knots, positions[:, j]) for j in range(3)])
+        rot = Slerp(knots, rotations)(times).as_matrix()
     result = np.broadcast_to(np.eye(4), (count, 4, 4)).copy()
     result[:, :3, :3] = rot
     result[:, :3, 3] = -np.einsum("nij,nj->ni", rot, cam_centers)
@@ -143,7 +146,7 @@ def _interp_poses(controls, count, *, corner_smoothing=0.15):
 
 def plan_trajectories(extrinsics, *, extra=False, extra_pitch_deg=5.0,
                       view_num=81, yaw_threshold=45.0, pitch_threshold=10.0,
-                      circle=False, corner_smoothing=0.15):
+                      circle=False, interpolation="bezier"):
     if view_num < 2:
         raise ValueError("view_num must be >= 2")
     poses = _w2c44(extrinsics)
@@ -203,15 +206,13 @@ def plan_trajectories(extrinsics, *, extra=False, extra_pitch_deg=5.0,
             if b_yaw - a_yaw > 180:
                 controls.append(sphere_pose(limit, (a_yaw+b_yaw)/2))
             controls.extend([sphere_pose(limit, b_yaw), poses[b]])
-            # Collapse duplicate control points; Slerp requires strictly ascending knots.
             segment = _interp_poses(np.stack(controls), view_num,
-                                    corner_smoothing=corner_smoothing)
+                                    interpolation=interpolation)
             trajectories.append({"mode": mode, "start_index": a, "end_index": b,
                                  "start_yaw": a_yaw, "end_yaw": b_yaw,
                                  "extrinsics": segment})
             current = target
-    info = {"interpolation": "local_corner_rounding_slerp" if corner_smoothing > 0 else "piecewise_linear_slerp",
-            "corner_smoothing": float(corner_smoothing), "center": origin.tolist(), "estimated_scene_up": up.tolist(), "rotation_normalized_to_world": Q.tolist(),
+    info = {"interpolation": interpolation, "center": origin.tolist(), "estimated_scene_up": up.tolist(), "rotation_normalized_to_world": Q.tolist(),
             "radius": radius, "yaws": yaw_unwrapped.tolist(), "pitches": pitches.tolist(),
             "yaw_min": float(min(yaw_unwrapped)), "yaw_max": float(max(yaw_unwrapped)),
             "pitch_min": lo, "pitch_max": hi, "extra": bool(extra), "circle": bool(circle),
