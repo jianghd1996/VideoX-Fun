@@ -27,6 +27,7 @@ CONFIG = {
     "render_trajectories": True,
     "trajectory_extra": False,
     "trajectory_view_num": 81,
+    "trajectory_corner_smoothing": 0.15,  # 0.0=previous linear baseline; up to 0.24
 }
 WORK_DIR = "/home/z00566689/dev/mnt/jiang_test/00_1022_test"
 
