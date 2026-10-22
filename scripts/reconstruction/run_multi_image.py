@@ -16,9 +16,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from multi_image_pipeline import MultiImagePipeline
 
 CONFIG = {
-    "external_code_root": "/home/z00566689/dev/mnt/jiang_dev/SingleRecon/DA3_custom",
-    "dense_code_root": "/home/z00566689/dev/mnt/jiang_dev/SingleRecon",
-    "da3_model_path": "/home/z00566689/dev/mnt/jiang_dev/SingleRecon/Cloud_Models/Saliency-Face-DA3/besthumanmodel_lr1e_6_ckpt2.pt",
+    "external_code_root": "/home/z00566689/dev/mnt/jiang_dev/CodexRecon/DA3_custom",
+    "dense_code_root": "/home/z00566689/dev/mnt/jiang_dev/CodexRecon",
+    "da3_model_path": "/home/z00566689/dev/mnt/jiang_dev/CodexRecon/Cloud_Models/Saliency-Face-DA3/besthumanmodel_lr1e_6_ckpt2.pt",
     "run_3dgs_iter": True,  # full pipeline: generated videos -> COLMAP -> Reconstruction_full
     "dense_generated_frames": 80,  # globally sample 80 novel camera poses across all trajectories
     "resume_stages": False,
@@ -32,20 +32,20 @@ CONFIG = {
     "trajectory_interpolation": "bezier",  # Keep fixed until E2E pipeline works
     "run_gen_video": True,
     "run_captioner": True,
-    "captioner_code_root": "/home/z00566689/dev/mnt/jiang_dev/SingleRecon",
-    "captioner_model_path": "/home/z00566689/dev/mnt/jiang_dev/SingleRecon/Cloud_Models/Qwen3-VL-8B-Instruct",
+    "captioner_code_root": "/home/z00566689/dev/mnt/jiang_dev/CodexRecon",
+    "captioner_model_path": "/home/z00566689/dev/mnt/jiang_dev/CodexRecon/Cloud_Models/Qwen3-VL-8B-Instruct",
     "captioner_cpu_swap": True,
     "captioner_num_gpus": 1,
     "video_adapter": "predict_v2v_control_5b_multi_image:WanControl5B",
-    "video_code_root": "/home/z00566689/dev/mnt/jiang_dev/SingleRecon/VideoX-Fun",
-    "video_lora_path": "/home/z00566689/dev/mnt/jiang_dev/SingleRecon/Cloud_Models/Wan2.2-Fun-5B-Control/12000_lora.safetensors",
+    "video_code_root": "/home/z00566689/dev/mnt/jiang_dev/CodexRecon/VideoX-Fun",
+    "video_lora_path": "/home/z00566689/dev/mnt/jiang_dev/CodexRecon/Cloud_Models/Wan2.2-Fun-5B-Control/12000_lora.safetensors",
     "video_lora_weight": 0.55,
     "video_cfg": 0.0,
     "video_short_edge": 1088,
     # Fast LightVAE decode, same encoder+decoder combination as single-image TI2V.
     "video_use_lightvae": True,  # False restores original full VAE
-    "video_lightvae_path": "/home/z00566689/dev/mnt/jiang_dev/SingleRecon/Cloud_Models/transformer_w_skybox_sla/MG-LightVAE.pth",
-    "video_teacher_vae_path": "/home/z00566689/dev/mnt/jiang_dev/SingleRecon/Cloud_Models/Wan2.2-TI2V-5B/Wan2.2_VAE.pth",
+    "video_lightvae_path": "/home/z00566689/dev/mnt/jiang_dev/CodexRecon/Cloud_Models/transformer_w_skybox_sla/MG-LightVAE.pth",
+    "video_teacher_vae_path": "/home/z00566689/dev/mnt/jiang_dev/CodexRecon/Cloud_Models/Wan2.2-TI2V-5B/Wan2.2_VAE.pth",
     "video_fps": 30,
     # Automatically dispatch: one ID -> sequential, multiple -> parallel workers.
     # GPU IDs are PHYSICAL CUDA device IDs; 4 trajectories + 4 GPUs => one each.
