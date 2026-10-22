@@ -39,8 +39,11 @@ CONFIG = {
     "captioner_num_gpus": 1,
     "video_adapter": "predict_v2v_control_5b_multi_image:WanControl5B",
     "video_code_root": "/home/z00566689/dev/mnt/jiang_dev/CodexRecon/VideoX-Fun",
-    "video_lora_path": "/home/z00566689/dev/mnt/jiang_dev/CodexRecon/Cloud_Models/Wan2.2-Fun-5B-Control/12000_lora.safetensors",
-    "video_lora_weight": 0.55,
+    "video_lora_path": None,
+    "video_transformer_path": "/home/z00566689/dev/mnt/jiang_dev/CodexRecon/Cloud_Models/transformer_w_skybox_sla/transformer_lora_merge_weight_sla_quant.pt",
+    "video_sla_topk": 0.5,
+    "video_infer_steps": 6,
+    "video_lora_weight": 0.0,
     "video_cfg": 0.0,
     "video_short_edge": 1088,
     # Fast LightVAE decode, same encoder+decoder combination as single-image TI2V.
