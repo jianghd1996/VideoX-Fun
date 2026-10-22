@@ -545,6 +545,21 @@ class MultiImagePipeline:
                     valid = p.is_file() and bool(p.read_text(encoding="utf-8").strip())
                 elif label == "da3":
                     valid = (_colmap_valid(colmap) and gs_video.is_file() and gs_video.stat().st_size > 0)
+                    # A resumed 81-frame DA3 render is not valid for a 49-frame
+                    # Wan ablation. Force trajectory regeneration on frame changes.
+                    if valid and self.render_trajectories:
+                        trajectory_manifest = reconstruction / "trajectories" / "manifest.json"
+                        try:
+                            old_trajectory = json.loads(trajectory_manifest.read_text(encoding="utf-8"))
+                            old_counts = [int(item["frames"]) for item in old_trajectory["trajectories"]]
+                            valid = bool(old_counts) and all(
+                                count == self.trajectory_view_num for count in old_counts)
+                        except (OSError, ValueError, KeyError, TypeError):
+                            valid = False
+                        if not valid:
+                            print(f"[MULTI RESUME] {case.name}: trajectory frame count changed "
+                                  f"or manifest missing; rerender DA3/GS for "
+                                  f"{self.trajectory_view_num} frames", flush=True)
                 elif label == "trajectory_video":
                     # Video resume is enforced inside the video stage, per MP4.
                     valid = False
