@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -84,6 +85,95 @@ def plan_roundtrip(extrinsics, a_index, b_index, pitch_deg, frame_count=81):
     return out
 
 
+
+@contextmanager
+def _gs_writer_mode(mode):
+    """Use OpenCV to write the DA3 GS clip without a MoviePy ffmpeg subprocess.
+
+    Only patches the active render subprocess; production DA3 remains unchanged.
+    """
+    if mode == "moviepy":
+        yield
+        return
+    if mode != "opencv":
+        raise ValueError(f"Unknown writer mode: {mode}")
+    import cv2
+    from moviepy.video.VideoClip import VideoClip
+
+    original = VideoClip.write_videofile
+
+    def write_opencv(clip, filename, *args, **kwargs):
+        fps = kwargs.get("fps") or getattr(clip, "fps", None)
+        if fps is None:
+            raise ValueError("DA3 moviepy clip has no fps; cannot write GS control")
+        fps = float(fps)
+        if fps <= 0:
+            raise ValueError(f"Invalid GS FPS: {fps}")
+        destination = Path(filename)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        writer = None
+        frame_count = 0
+        dimensions = None
+        try:
+            for rgb in clip.iter_frames(fps=fps, dtype="uint8"):
+                rgb = np.asarray(rgb)
+                if rgb.ndim != 3 or rgb.shape[2] not in (3, 4):
+                    raise ValueError(f"Expected RGB or RGBA video frame, got {rgb.shape}")
+                if writer is None:
+                    h, w = rgb.shape[:2]
+                    # Most MP4 encoders require even dimensions. Pad at most 1px
+                    # and keep intrinsics aligned with the original top-left origin.
+                    out_w, out_h = w + (w % 2), h + (h % 2)
+                    writer = cv2.VideoWriter(
+                        str(destination), cv2.VideoWriter_fourcc(*"mp4v"),
+                        fps, (out_w, out_h))
+                    if not writer.isOpened():
+                        raise RuntimeError(
+                            f"OpenCV cannot open MP4 writer for {destination}; "
+                            "check codec support and free disk space")
+                    dimensions = (out_w, out_h)
+                    print(f"[ABLATION A] GS OpenCV writer: fps={fps}, "
+                          f"input={w}x{h}, output={out_w}x{out_h}", flush=True)
+                if rgb.shape[:2] != (h, w):
+                    raise ValueError(f"GS frame dimensions changed: {rgb.shape[:2]}")
+                bgr = cv2.cvtColor(rgb, cv2.COLOR_RGBA2BGR if rgb.shape[2] == 4
+                                   else cv2.COLOR_RGB2BGR)
+                if dimensions != (w, h):
+                    bgr = cv2.copyMakeBorder(bgr, 0, dimensions[1]-h,
+                                              0, dimensions[0]-w,
+                                              cv2.BORDER_REPLICATE)
+                writer.write(bgr)
+                frame_count += 1
+        finally:
+            if writer is not None:
+                writer.release()
+        if frame_count == 0 or not destination.is_file() or destination.stat().st_size == 0:
+            raise RuntimeError(f"OpenCV GS encoding produced empty video: {destination}")
+        reader = cv2.VideoCapture(str(destination))
+        if not reader.isOpened():
+            raise RuntimeError(f"Encoded GS video cannot be decoded: {destination}")
+        actual = 0
+        try:
+            while True:
+                ok, _ = reader.read()
+                if not ok:
+                    break
+                actual += 1
+        finally:
+            reader.release()
+        if actual != frame_count:
+            raise RuntimeError(
+                f"GS video written={frame_count} but decoded={actual}, {destination}")
+        print(f"[ABLATION A] GS encoded {actual} frames successfully: {destination}",
+              flush=True)
+
+    VideoClip.write_videofile = write_opencv
+    try:
+        yield
+    finally:
+        VideoClip.write_videofile = original
+
+
 def render(args, output):
     import torch
     from multistage_pipeline import create_da3
@@ -121,13 +211,14 @@ def render(args, output):
     Ks = np.stack(Ks)
     render_dir = output / "gs_render"
     render_dir.mkdir(parents=True, exist_ok=True)
-    export_to_gs_video(
-        prediction=prediction, export_dir=str(render_dir),
-        extrinsics=torch.from_numpy(poses).to(prediction.gaussians.means).unsqueeze(0),
-        intrinsics=torch.from_numpy(Ks).to(prediction.gaussians.means).unsqueeze(0),
-        trj_mode="original", vis_depth=None, output_name="ablation_A_BAB",
-        crop_ratio=1.0, view_num=args.frames, extra_view=[False, False],
-        chunk_size=4)
+    with _gs_writer_mode(args.gs_writer):
+        export_to_gs_video(
+            prediction=prediction, export_dir=str(render_dir),
+            extrinsics=torch.from_numpy(poses).to(prediction.gaussians.means).unsqueeze(0),
+            intrinsics=torch.from_numpy(Ks).to(prediction.gaussians.means).unsqueeze(0),
+            trj_mode="original", vis_depth=None, output_name="ablation_A_BAB",
+            crop_ratio=1.0, view_num=args.frames, extra_view=[False, False],
+            chunk_size=4)
     src = render_dir / "gs_video" / "ablation_A_BAB.mp4"
     if not src.is_file():
         raise FileNotFoundError(src)
@@ -138,7 +229,8 @@ def render(args, output):
         "a_index": args.a_index, "b_index": args.b_index,
         "fixed_frames": {"0": "B", str(mid): "NOT_FIXED", str(args.frames-1): "B"},
         "reference_image": "A", "pitch_deg": args.pitch_deg,
-        "frames": args.frames, "render_seconds": round(time.perf_counter()-started, 3),
+        "frames": args.frames, "gs_writer": args.gs_writer,
+        "render_seconds": round(time.perf_counter()-started, 3),
         "note": "Frame mid pose is precisely A but its pixels are NOT in the condition.",
     }, ensure_ascii=False, indent=2))
     print(f"[ABLATION A] GS rendered to {output / 'control.mp4'}", flush=True)
@@ -197,6 +289,8 @@ def main():
     p.add_argument("--lightvae", default=str(HERE / "Cloud_Models/transformer_w_skybox_sla/MG-LightVAE.pth"))
     p.add_argument("--teacher-vae", default=str(HERE / "Cloud_Models/Wan2.2-TI2V-5B/Wan2.2_VAE.pth"))
     p.add_argument("--rerender", action="store_true")
+    p.add_argument("--gs-writer", choices=("opencv", "moviepy"), default="opencv",
+                   help="Writer for DA3 GS control; OpenCV avoids ffmpeg subprocess BrokenPipe")
     p.add_argument("--phase", choices=("all","render","wan"), default="all", help=argparse.SUPPRESS)
     args = p.parse_args()
     args.case = args.case.expanduser().resolve()
