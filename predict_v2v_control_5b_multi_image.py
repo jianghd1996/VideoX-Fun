@@ -22,7 +22,7 @@ from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
 from videox_fun.models import AutoencoderKLWan3_8, Wan2_2Transformer3DModel, WanT5EncoderModel
-from videox_fun.pipeline import Wan2_2FunControlPipeline
+from videox_fun.pipeline.pipeline_wan2_2_fun_control import Wan2_2FunControlPipeline
 from videox_fun.utils.utils import (
     filter_kwargs, get_image_latent, get_image_to_video_latent, save_videos_grid,
 )
