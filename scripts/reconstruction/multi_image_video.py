@@ -56,7 +56,8 @@ def extract_generated_frames(video_path, poses_path, dest, *, indices=None):
 
 
 def run_trajectory_videos(*, reconstruction_dir, source_images, generator,
-                          fps=30, prompt="", resume=False):
+                          fps=30, prompt="", resume=False,
+                          sample_plan=None, save_mp4=True):
     """Generate MP4s and preserve references to already planned per-frame poses.
 
     No image extraction in this stage; retain the original NPY to align frames
@@ -73,6 +74,9 @@ def run_trajectory_videos(*, reconstruction_dir, source_images, generator,
     sources = list(source_images)
     generated_root = root / "generated_trajectories"
     generated_root.mkdir(parents=True, exist_ok=True)
+    indices = (sample_plan or {}).get("selected_indices")
+    if indices is None:
+        raise ValueError("Wan generation requires pose-based FPS sample plan")
     summary = []
     phase_started = time.perf_counter()
     for item in paths:
@@ -90,11 +94,20 @@ def run_trajectory_videos(*, reconstruction_dir, source_images, generator,
         target = generated_root / stem
         target.mkdir(parents=True, exist_ok=True)
         output_video = target / "generated.mp4"
+        selected = list(map(int, indices[stem]))
+        sample_dir = target / "sampled_frames"
         segment_started = time.perf_counter()
-        reused = bool(resume and output_video.is_file() and output_video.stat().st_size)
+        frames_ready = all((sample_dir / f"f{i:04d}.jpg").is_file() for i in selected)
+        reused = bool(resume and frames_ready and
+                      (not save_mp4 or (output_video.is_file() and output_video.stat().st_size)))
         if not reused:
             if generator is None:
                 raise RuntimeError("Missing a control-video-capable Wan generator adapter")
+            sample_dir.mkdir(parents=True, exist_ok=True)
+            for old in sample_dir.glob("f*.jpg"):
+                old.unlink()
+            if not save_mp4 and output_video.is_file():
+                output_video.unlink()
             produced = generator(
                 control_video=str(control_video),
                 start_image=str(sources[start_index]),
@@ -102,17 +115,22 @@ def run_trajectory_videos(*, reconstruction_dir, source_images, generator,
                 output_video=str(output_video),
                 prompt=str(prompt),
                 num_frames=int(len(poses)),
-                fps=int(fps),
+                fps=int(fps), sampled_frame_indices=selected,
+                sampled_frames_dir=str(sample_dir), save_mp4=save_mp4,
             )
-            if produced is not None and Path(produced).resolve() != output_video.resolve():
+            if save_mp4 and produced is not None and Path(produced).resolve() != output_video.resolve():
                 raise RuntimeError(f"Adapter returned {produced}; expected {output_video}")
-        if not output_video.is_file() or not output_video.stat().st_size:
-            raise RuntimeError(f"No generated video from adapter: {output_video}")
+        if save_mp4 and (not output_video.is_file() or not output_video.stat().st_size):
+            raise RuntimeError(f"No generated MP4 from adapter: {output_video}")
+        if not all((sample_dir / f"f{i:04d}.jpg").is_file() for i in selected):
+            raise RuntimeError(f"Direct JPG output incomplete: {sample_dir}")
         segment_seconds = round(time.perf_counter() - segment_started, 3)
         infer_timing = {} if reused else dict(getattr(generator, "last_timing", {}))
         summary.append({
             "name": stem, "video": str(output_video), "frames": len(poses),
             "reused": reused, "seconds": segment_seconds, "inference_timing": infer_timing,
+            "sampled_frame_indices": selected, "sampled_frames_dir": str(sample_dir),
+            "save_mp4": bool(save_mp4),
             "pose_file": str(poses_path),
             "start_image": str(sources[start_index]), "end_image": str(sources[end_index]),
             "control_video": str(control_video),
