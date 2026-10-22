@@ -21,13 +21,13 @@ OUTPUT_ROOT = CACHE_ROOT / "output"
 
 REPO_DIR = CODE_ROOT / "VideoX-Fun-Single8"
 TOOLS_DIR = CODE_ROOT / "tools"
-DATASET_DIR = DATA_ROOT / "theta30_phi5_self_render_1019"
+DATASET_DIR = DATA_ROOT / os.getenv("DATASET_ID", "theta30_phi5_UE_render")
 VALIDATION_DATA_DIR = TEST_DATA_ROOT / "livephoto_test"
 MODEL_DIR = MODEL_ROOT / "Wan2.2-TI2V-5B"
 OUTPUT_DIR = Path(
     os.getenv(
         "OUTPUT_DIR",
-        str(OUTPUT_ROOT / "trajectory_lora_theta30_phi5_self_render_1019"),
+        str(OUTPUT_ROOT / f"trajectory_lora_{DATASET_DIR.name}"),
     )
 )
 
@@ -41,7 +41,7 @@ TOOLS_OBS_URI = os.getenv(
 )
 DATA_OBS_URI = os.getenv(
     "DATA_OBS_URI",
-    "s3://bucket-si-wulan/jianghognda/00_data/theta30_phi5_self_render_1019/",
+    f"s3://bucket-si-wulan/jianghognda/00_data/{DATASET_DIR.name}/",
 )
 TEST_DATA_OBS_URI = os.getenv(
     "TEST_DATA_OBS_URI",
@@ -53,8 +53,7 @@ MODEL_OBS_URI = os.getenv(
 )
 OUTPUT_OBS_URI = os.getenv(
     "OUTPUT_OBS_URI",
-    "s3://bucket-si-wulan/jianghognda/03_output/"
-    "trajectory_lora_theta30_phi5_self_render_1019/",
+    f"s3://bucket-si-wulan/jianghognda/03_output/trajectory_lora_{DATASET_DIR.name}/",
 )
 
 FORCE_COPY = os.getenv("FORCE_COPY", "0").lower() in {"1", "true", "yes"}
@@ -101,8 +100,8 @@ def resolve_video(item: Dict[str, Any]) -> Path:
 
 def build_training_metadata() -> Path:
     """Convert video_path/caption records to VideoX-Fun file_path/text records."""
-    source_json = DATASET_DIR / "theta30_phi5_self_render_1019.json"
-    target_json = DATA_ROOT / "theta30_phi5_self_render_1019_cloud.json"
+    source_json = DATASET_DIR / f"{DATASET_DIR.name}.json"
+    target_json = DATA_ROOT / f"{DATASET_DIR.name}_cloud.json"
 
     if not source_json.is_file():
         raise FileNotFoundError(f"Dataset metadata does not exist: {source_json}")
