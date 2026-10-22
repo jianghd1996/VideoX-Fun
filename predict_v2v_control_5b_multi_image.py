@@ -28,7 +28,7 @@ from videox_fun.utils.utils import (
 )
 
 cur_py_path = os.path.dirname(os.path.abspath(__file__))
-MODEL_DIR = os.path.join(cur_py_path, "Cloud_Models/Wan2.2-Fun-5B-Control/")
+MODEL_DIR = os.path.join(os.path.dirname(cur_py_path), "Cloud_Models/Wan2.2-Fun-5B-Control/")
 CONFIG_PATH = os.path.join(cur_py_path, "config/wan2.2/wan_civitai_5b.yaml")
 NEGATIVE_PROMPT = (
     "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，"
