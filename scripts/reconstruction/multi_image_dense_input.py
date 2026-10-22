@@ -360,6 +360,42 @@ def _global_pose_samples(items, source_images, total, min_per_trajectory=4):
 
 
 
+def plan_dense_frame_samples(*, reconstruction_dir, sample_count=80):
+    """Plan selected frame indices from existing camera poses, before video inference.
+
+    Saved plan is consumed by Wan workers and again by dense_prepare, so the
+    JPG frame identities match the final COLMAP poses exactly.
+    """
+    root = Path(reconstruction_dir)
+    sparse = root / "sparse" / "0"
+    trajectories = root / "trajectories" / "manifest.json"
+    manifest = json.loads(trajectories.read_text(encoding="utf-8"))
+    items = []
+    for entry in manifest["trajectories"]:
+        name = Path(entry["file"]).stem
+        items.append({
+            "name": name,
+            "pose_file": str(root / "trajectories" / entry["file"]),
+            "frames": int(entry["frames"]),
+        })
+    images = _read_images(sparse)
+    indices = _global_pose_samples(items, images, sample_count)
+    plan = {
+        "sampling_strategy": "global_pose_fps_v1",
+        "sample_budget": int(sample_count),
+        "selected_indices": {entry["name"]: frames for entry, frames in zip(items, indices)},
+    }
+    target = root / "generated_trajectories" / "frame_sampling_plan.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(plan, indent=2), encoding="utf-8")
+    print("[DENSE POSE PLAN] " + ", ".join(
+        f"{name}={len(frames)}" for name, frames in plan["selected_indices"].items()),
+        flush=True)
+    return plan
+
+
+
+
 def prepare_dense_input(*, reconstruction_dir, sample_count=80, source_images=None):
     """Create dense_input/image and dense_input/sparse/0 without modifying DA3 outputs."""
     started = time.perf_counter()
@@ -387,7 +423,20 @@ def prepare_dense_input(*, reconstruction_dir, sample_count=80, source_images=No
             raise ValueError(f"DA3 COLMAP image {p.name} not found among original image records")
         shutil.copy2(p, image_dir / p.name)
     name_to_camera = {record[3]: record[2] for record in images.values()}
-    frame_choices = _global_pose_samples(items, images, sample_count)
+    plan_file = root / "generated_trajectories" / "frame_sampling_plan.json"
+    if plan_file.is_file():
+        plan = json.loads(plan_file.read_text(encoding="utf-8"))
+        if int(plan["sample_budget"]) != int(sample_count):
+            raise ValueError("Preplanned FPS sample count differs from dense_generated_frames")
+        expected_names = [item["name"] for item in items]
+        if set(plan["selected_indices"]) != set(expected_names):
+            raise ValueError("Preplanned FPS trajectory names do not match generated manifest")
+        frame_choices = [plan["selected_indices"][name] for name in expected_names]
+        # Recompute from poses to reject stale plans after DA3/trajectory changes.
+        if frame_choices != _global_pose_samples(items, images, sample_count):
+            raise ValueError("Preplanned FPS no longer matches trajectory poses")
+    else:
+        frame_choices = _global_pose_samples(items, images, sample_count)
     print("[DENSE POSE FPS] " + ", ".join(
         f"{item['name']}={len(indices)} frames" for item, indices in zip(items, frame_choices)),
         flush=True)
@@ -410,44 +459,70 @@ def prepare_dense_input(*, reconstruction_dir, sample_count=80, source_images=No
         start_index, end_index = int(item["start_index"]), int(item["end_index"])
         a = _camera_fx_fy_cx_cy(cameras[name_to_camera[normalized[start_index].name]])
         b = _camera_fx_fy_cx_cy(cameras[name_to_camera[normalized[end_index].name]])
-        cap = cv2.VideoCapture(str(video))
-        if not cap.isOpened():
-            raise FileNotFoundError(f"Cannot decode generated video: {video}")
-        needed = set(selected)
-        frame_index = 0
-        written = set()
-        try:
-            while True:
-                ok, frame = cap.read()
-                if not ok:
-                    break
-                if frame_index in needed:
-                    h, w = frame.shape[:2]
-                    alpha = frame_index / (len(poses) - 1)
-                    ka = np.array([a[0]*w/a[4], a[1]*h/a[5], a[2]*w/a[4], a[3]*h/a[5]])
-                    kb = np.array([b[0]*w/b[4], b[1]*h/b[5], b[2]*w/b[4], b[3]*h/b[5]])
-                    fx, fy, cx, cy = (1-alpha)*ka + alpha*kb
-                    last_camera_id += 1
-                    cameras[last_camera_id] = (1, w, h, (float(fx), float(fy), float(cx), float(cy)))
-                    pose = poses[frame_index]
-                    q_xyzw = Rotation.from_matrix(pose[:3, :3]).as_quat()
-                    q_wxyz = (q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2])
-                    tvec = tuple(float(v) for v in pose[:3, 3])
-                    name = f"{item['name']}_f{frame_index:04d}.jpg"
-                    if not cv2.imwrite(str(image_dir / name), frame):
-                        raise IOError(f"Failed to save {name}")
-                    last_image_id += 1
-                    images[last_image_id] = (q_wxyz, tvec, last_camera_id, name, b"")
-                    generated.append({"image": name, "trajectory": item["name"],
-                                      "frame": frame_index, "pose_file": str(pose_file)})
-                    written.add(frame_index)
-                frame_index += 1
-        finally:
-            cap.release()
-        if frame_index != len(poses):
-            raise ValueError(f"Video {video} frames {frame_index}, expected {len(poses)}")
-        if written != needed:
-            raise RuntimeError(f"Missing frames {sorted(needed - written)} in {video}")
+        selected_files = [Path(item.get("sampled_frames_dir", video.parent / "sampled_frames")) /
+                          f"f{int(frame):04d}.jpg" for frame in selected]
+        direct_available = all(p.is_file() and p.stat().st_size > 0 for p in selected_files)
+        if direct_available:
+            print(f"[DENSE INPUT] {item['name']}: using {len(selected)} direct Wan JPG frames", flush=True)
+            selected_frames = {}
+            for idx, saved_path in zip(selected, selected_files):
+                bgr = cv2.imread(str(saved_path), cv2.IMREAD_COLOR)
+                if bgr is None:
+                    raise RuntimeError(f"Invalid direct Wan JPG: {saved_path}")
+                selected_frames[int(idx)] = bgr
+        else:
+            if item.get("saved_mp4") is False:
+                raise FileNotFoundError(
+                    f"Missing direct JPG frames for {item['name']} and MP4 saving disabled")
+            if not video.is_file():
+                raise FileNotFoundError(f"Missing direct JPGs and fallback MP4: {video}")
+            print(f"[DENSE INPUT] {item['name']}: fallback to MP4 decoding", flush=True)
+            cap = cv2.VideoCapture(str(video))
+            if not cap.isOpened():
+                raise FileNotFoundError(f"Cannot decode generated video: {video}")
+            selected_frames = {}
+            frame_index = 0
+            needed = set(map(int, selected))
+            try:
+                while True:
+                    ok, frame = cap.read()
+                    if not ok:
+                        break
+                    if frame_index in needed:
+                        selected_frames[frame_index] = frame
+                    frame_index += 1
+            finally:
+                cap.release()
+            if frame_index != len(poses) or set(selected_frames) != needed:
+                raise RuntimeError(
+                    f"MP4 {video} decoded {frame_index} frames, wanted {len(poses)}; "
+                    f"missing {sorted(needed - set(selected_frames))}")
+        for frame_index in selected:
+            frame_index = int(frame_index)
+            frame = selected_frames[frame_index]
+            h, w = frame.shape[:2]
+            alpha = frame_index / (len(poses) - 1)
+            ka = np.array([a[0]*w/a[4], a[1]*h/a[5], a[2]*w/a[4], a[3]*h/a[5]])
+            kb = np.array([b[0]*w/b[4], b[1]*h/b[5], b[2]*w/b[4], b[3]*h/b[5]])
+            fx, fy, cx, cy = (1-alpha)*ka + alpha*kb
+            last_camera_id += 1
+            cameras[last_camera_id] = (1, w, h, (float(fx), float(fy), float(cx), float(cy)))
+            pose = poses[frame_index]
+            q_xyzw = Rotation.from_matrix(pose[:3, :3]).as_quat()
+            q_wxyz = (q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2])
+            tvec = tuple(float(v) for v in pose[:3, 3])
+            name = f"{item['name']}_f{frame_index:04d}.jpg"
+            # No extra JPG recompression: copy the directly saved tensor JPG bytes.
+            direct_file = Path(item.get("sampled_frames_dir", video.parent / "sampled_frames")) / f"f{frame_index:04d}.jpg"
+            if direct_available:
+                shutil.copy2(direct_file, image_dir / name)
+            elif not cv2.imwrite(str(image_dir / name), frame):
+                raise IOError(f"Failed to save {name}")
+            last_image_id += 1
+            images[last_image_id] = (q_wxyz, tvec, last_camera_id, name, b"")
+            generated.append({"image": name, "trajectory": item["name"],
+                              "frame": frame_index, "pose_file": str(pose_file)})
+        written = set(map(int, selected))
         print(f"[DENSE INPUT] {item['name']}: sampled {len(written)} from {frame_index}", flush=True)
 
     _write_binary_model(sparse_dir, cameras, images, source_sparse)
