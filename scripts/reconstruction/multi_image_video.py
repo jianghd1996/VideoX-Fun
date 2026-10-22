@@ -7,6 +7,7 @@ It MUST actually condition on the rendered control video (do not use TI2V).
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import numpy as np
@@ -56,7 +57,11 @@ def extract_generated_frames(video_path, poses_path, dest, *, indices=None):
 
 def run_trajectory_videos(*, reconstruction_dir, source_images, generator,
                           fps=30, prompt="", resume=False):
-    """For each planned path, invoke a control-aware generator and save aligned frames."""
+    """Generate MP4s and preserve references to already planned per-frame poses.
+
+    No image extraction in this stage; retain the original NPY to align frames
+    if/when a later reconstruction stage requests sampling.
+    """
     root = Path(reconstruction_dir)
     manifest_path = root / "trajectories" / "manifest.json"
     if not manifest_path.is_file():
@@ -69,6 +74,7 @@ def run_trajectory_videos(*, reconstruction_dir, source_images, generator,
     generated_root = root / "generated_trajectories"
     generated_root.mkdir(parents=True, exist_ok=True)
     summary = []
+    phase_started = time.perf_counter()
     for item in paths:
         stem = Path(item["file"]).stem
         poses_path = root / "trajectories" / item["file"]
@@ -84,7 +90,9 @@ def run_trajectory_videos(*, reconstruction_dir, source_images, generator,
         target = generated_root / stem
         target.mkdir(parents=True, exist_ok=True)
         output_video = target / "generated.mp4"
-        if not (resume and output_video.is_file() and output_video.stat().st_size):
+        segment_started = time.perf_counter()
+        reused = bool(resume and output_video.is_file() and output_video.stat().st_size)
+        if not reused:
             if generator is None:
                 raise RuntimeError("Missing a control-video-capable Wan generator adapter")
             produced = generator(
@@ -100,14 +108,20 @@ def run_trajectory_videos(*, reconstruction_dir, source_images, generator,
                 raise RuntimeError(f"Adapter returned {produced}; expected {output_video}")
         if not output_video.is_file() or not output_video.stat().st_size:
             raise RuntimeError(f"No generated video from adapter: {output_video}")
-        selected = extract_generated_frames(output_video, poses_path, target / "image")
+        segment_seconds = round(time.perf_counter() - segment_started, 3)
+        infer_timing = {} if reused else dict(getattr(generator, "last_timing", {}))
         summary.append({
-            "name": stem, "video": str(output_video), "frames": len(selected),
+            "name": stem, "video": str(output_video), "frames": len(poses),
+            "reused": reused, "seconds": segment_seconds, "inference_timing": infer_timing,
+            "pose_file": str(poses_path),
             "start_image": str(sources[start_index]), "end_image": str(sources[end_index]),
-            "image_dir": str(target / "image"), "w2c": str(target / "image" / "w2c.npy"),
             "control_video": str(control_video),
         })
         (generated_root / "manifest.json").write_text(
             json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
-        print(f"[MULTI VIDEO] {stem}: {len(selected)} generated frames aligned", flush=True)
+        print(f"[MULTI VIDEO] {stem}: {len(poses)} frames, "
+              f"elapsed={segment_seconds:.3f}s, reused={reused}", flush=True)
+    total = round(time.perf_counter() - phase_started, 3)
+    print(f"[MULTI VIDEO SUMMARY] segments={len(summary)}, total={total:.3f}s, "
+          f"generated={sum(not x['reused'] for x in summary)}", flush=True)
     return summary
