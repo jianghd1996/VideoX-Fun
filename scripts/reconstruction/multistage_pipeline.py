@@ -11,6 +11,9 @@ import importlib
 import json
 import sys
 import time
+import shutil
+import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -20,6 +23,36 @@ FRAME_INDICES = (0, 6, 14, 16, 17, 18, 19, 20, 21, 23, 28, 30, 34, 39,
                  82, 88, 91, 95, 99, 100, 101, 102, 103, 104, 105, 106)
 VIDEO_FRAMES = 121
 RECON_VIEW_NUM = len(FRAME_INDICES)
+IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"})
+
+
+def find_input_image(image_dir: Path) -> Path:
+    """Select the single source image, independently of suffix capitalization."""
+    image_dir = Path(image_dir)
+    images = sorted(p for p in image_dir.iterdir()
+                    if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES)
+    if len(images) != 1:
+        supported = ", ".join(sorted(IMAGE_SUFFIXES))
+        raise ValueError(f"Expected exactly one input image in {image_dir}, got {len(images)} "
+                         f"(supported: {supported})")
+    return images[0]
+
+
+@contextmanager
+def caption_image_directory(image_path: Path):
+    """Adapt legacy captioners that glob only '*.jpg'; keep source files intact."""
+    if image_path.suffix == ".jpg":
+        yield image_path.parent
+        return
+    with tempfile.TemporaryDirectory(prefix="caption_image_") as temporary:
+        target = Path(temporary) / "input.jpg"
+        if image_path.suffix.lower() in {".jpg", ".jpeg"}:
+            shutil.copyfile(image_path, target)
+        else:
+            from PIL import Image
+            with Image.open(image_path) as image:
+                image.convert("RGB").save(target, format="JPEG", quality=95)
+        yield target.parent
 
 
 @dataclass
@@ -157,11 +190,7 @@ class ReconstructionPipeline:
             self.recon_iter_full = create_full_reconstruction(self.args.dense_code_root or self.args.external_code_root)
 
     def input_image(self) -> Path:
-        images = sorted(p for p in self.source_img_path.iterdir()
-                        if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg"})
-        if len(images) != 1:
-            raise ValueError(f"Expected exactly one JPG in {self.source_img_path}, got {len(images)}")
-        return images[0]
+        return find_input_image(self.source_img_path)
 
     def paths(self) -> dict[str, str]:
         return {k: str(v) for k, v in {
@@ -183,7 +212,8 @@ class ReconstructionPipeline:
         if self.captioner_cpu_swap:
             self.img_captioner.model.to("cuda")
         try:
-            prompt = self.img_captioner.read_image_caption(str(self.source_img_path))
+            with caption_image_directory(self.input_image()) as caption_dir:
+                prompt = self.img_captioner.read_image_caption(str(caption_dir))
             if not isinstance(prompt, str) or not prompt.strip():
                 raise ValueError("ImagesCaptioner returned an empty caption")
             prompt = prompt.strip()
