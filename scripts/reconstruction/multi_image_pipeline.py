@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import shutil
 import time
 from datetime import datetime, timezone
@@ -65,6 +66,9 @@ class MultiImagePipeline:
         self.mode = mode
         self.circle = bool(circle)
         self.max_frames = int(max_frames)
+        for import_root in (root / "src", root):
+            if str(import_root) not in sys.path:
+                __import__("sys").path.insert(0, str(import_root))
         start = time.perf_counter()
         self.da3 = da3_instance if da3_instance is not None else create_da3(
             root, Path(da3_model_path) if da3_model_path else None)
@@ -101,7 +105,7 @@ class MultiImagePipeline:
                 pass
         if old_manifest != manifest:
             # Stale DA3 poses must never be reused with a different set of images.
-            if self.resume_stages and old_manifest is not None:
+            if self.resume_stages and (old_manifest is not None or _colmap_valid(colmap)):
                 raise RuntimeError("Input images changed since prior multi-image run; "
                                    "disable resume_stages or use a clean reconstruction directory")
             for p in target_images.iterdir():
