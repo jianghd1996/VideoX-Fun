@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import time
+import importlib
 from pathlib import Path
 
 import cv2
@@ -40,6 +41,68 @@ NEGATIVE_PROMPT = (
     "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，"
     "最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，畸形的，毁容的，静止不动的画面"
 )
+
+
+def _sla_primitives():
+    """Resolve SLA kernel / quantization classes from the locally installed Wan code.
+
+    Keeping discovery here avoids modifying wan_transformer3d_sla.py.  The
+    accelerated primitives vary between VideoX-Fun SLA checkouts; fail
+    explicitly instead of silently falling back to ordinary attention.
+    """
+    names = ("SparseLinearAttention", "Int8Linear", "FastRMSNorm", "FastLayerNorm")
+    candidates = (
+        "videox_fun.models.wan_transformer3d_sla",
+        "videox_fun.models.attention_kernel",
+        "videox_fun.models.attention_utils",
+        "videox_fun.models.sla",
+        "videox_fun.models.sla_utils",
+        "videox_fun.models.sparse_linear_attention",
+        "videox_fun.models.quantization",
+        "videox_fun.utils.sla",
+        "sla",
+    )
+    found = {}
+    for module_name in candidates:
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError:
+            continue
+        for name in names:
+            if name not in found and hasattr(module, name):
+                found[name] = getattr(module, name)
+    missing = set(names) - set(found)
+    if missing:
+        raise ImportError(
+            f"SLA requires {sorted(missing)}. Locate their definitions in the local "
+            "CodexRecon/VideoX-Fun and add those modules to _sla_primitives().")
+    return found
+
+
+def _load_merged_transformer_weights(transformer, path):
+    """Load the actual SLA merged checkpoint, not a LoRA adapter."""
+    checkpoint = torch.load(str(path), map_location="cpu", weights_only=False)
+    if isinstance(checkpoint, dict):
+        for key in ("state_dict", "model", "transformer"):
+            if key in checkpoint and isinstance(checkpoint[key], dict):
+                checkpoint = checkpoint[key]
+                break
+    if not isinstance(checkpoint, dict):
+        raise TypeError(f"Expected state_dict-like transformer checkpoint, got {type(checkpoint)}")
+    if checkpoint and all(k.startswith("transformer.") for k in checkpoint):
+        checkpoint = {k[len("transformer."):]: v for k, v in checkpoint.items()}
+    missing, unexpected = transformer.load_state_dict(checkpoint, strict=False)
+    # Some accelerated checkpoints exclude nonpersistent buffers, but model
+    # parameters must match or the performance/quality comparison is invalid.
+    param_keys = set(dict(transformer.named_parameters()))
+    serious_missing = sorted(set(missing) & param_keys)
+    if serious_missing or unexpected:
+        raise RuntimeError(
+            f"Unexpected merged SLA checkpoint structure: "
+            f"missing_parameters={serious_missing[:12]} ({len(serious_missing)}), "
+            f"unexpected_keys={unexpected[:12]} ({len(unexpected)})")
+    print(f"[MULTI SLA] merged transformer loaded: {path} "
+          f"(tensors={len(checkpoint)}, missing_buffers={len(missing)})", flush=True)
 
 
 def _video_rgb(path, expected_frames: int):
@@ -83,7 +146,14 @@ class WanControl5B:
         self.lora_path = os.environ.get("SINGLERECON_CONTROL_LORA_PATH") or None
         self.lora_weight = float(os.environ.get("SINGLERECON_CONTROL_LORA_WEIGHT", "0.55"))
         self.short_edge = int(os.environ.get("SINGLERECON_CONTROL_SHORT_EDGE", "1088"))
-        self.steps = int(os.environ.get("SINGLERECON_CONTROL_STEPS", "8"))
+        self.steps = int(os.environ.get("SINGLERECON_CONTROL_INFER_STEPS",
+                                        os.environ.get("SINGLERECON_CONTROL_STEPS", "8")))
+        self.sla_topk = float(os.environ.get("SINGLERECON_CONTROL_SLA_TOPK", "1.0"))
+        self.transformer_path = os.environ.get("SINGLERECON_CONTROL_TRANSFORMER_PATH") or None
+        if not 0.0 < self.sla_topk <= 1.0:
+            raise ValueError(f"Invalid SLA topk={self.sla_topk}")
+        if self.transformer_path and self.lora_path:
+            raise ValueError("Merged Transformer checkpoint must not be mixed with LoRA")
         self.cfg = float(os.environ.get("SINGLERECON_CONTROL_CFG", "0.0"))
         self.seed = int(os.environ.get("SINGLERECON_CONTROL_SEED", "42"))
         self.use_lightvae = os.environ.get("SINGLERECON_CONTROL_USE_LIGHTVAE", "1") == "1"
@@ -112,7 +182,12 @@ class WanControl5B:
         config = OmegaConf.load(str(self.config_path))
         self.boundary = float(config["transformer_additional_kwargs"].get("boundary", 0.875))
         model_kwargs = OmegaConf.to_container(config["transformer_additional_kwargs"])
-        transformer = Wan2_2Transformer3DModel.from_pretrained(
+        if self.sla_topk <= 0.9:
+            from videox_fun.models.wan_transformer3d_sla import Wan2_2Transformer3DModel_SLA
+            transformer_class = Wan2_2Transformer3DModel_SLA
+        else:
+            transformer_class = Wan2_2Transformer3DModel
+        transformer = transformer_class.from_pretrained(
             str(self.model_name / model_kwargs.get("transformer_low_noise_model_subpath", "transformer")),
             transformer_additional_kwargs=model_kwargs,
             low_cpu_mem_usage=True,
@@ -125,6 +200,47 @@ class WanControl5B:
             )
         if model_kwargs.get("transformer_combination_type", "single") == "moe":
             raise RuntimeError("Expected single-transformer Wan2.2-Fun-5B-Control model")
+
+        if self.transformer_path:
+            merged = Path(self.transformer_path).expanduser().resolve()
+            if not merged.is_file():
+                raise FileNotFoundError(f"Merged SLA transformer not found: {merged}")
+            _load_merged_transformer_weights(transformer, merged)
+        if self.sla_topk <= 0.9:
+            # Substitute attention and accelerated quantized linear/norm
+            # modules only after the merged tensor state has been loaded.
+            from videox_fun.models.wan_transformer3d_sla import (
+                WanSelfAttention, WanRMSNorm, WanLayerNorm)
+            ops = _sla_primitives()
+            changed_attention = 0
+            for module in transformer.modules():
+                if type(module) is WanSelfAttention:
+                    module.attn_op.local_attn = ops["SparseLinearAttention"](
+                        head_dim=module.dim // module.num_heads,
+                        topk=self.sla_topk, BLKQ=128, BLKK=64)
+                    changed_attention += 1
+            if changed_attention == 0:
+                raise RuntimeError("SLA model had no WanSelfAttention modules")
+            replacements = {}
+            for name, module in transformer.blocks.named_modules():
+                if not name:
+                    continue
+                if isinstance(module, torch.nn.Linear) and "proj_l" not in name:
+                    replacements[name] = ops["Int8Linear"].from_linear(module, True)
+                elif isinstance(module, WanRMSNorm):
+                    replacements[name] = ops["FastRMSNorm"].from_rmsnorm(module)
+                elif isinstance(module, WanLayerNorm):
+                    replacements[name] = ops["FastLayerNorm"].from_layernorm(module)
+            for name, replacement in replacements.items():
+                parent = transformer.blocks
+                parts = name.split(".")
+                for key in parts[:-1]:
+                    parent = parent[int(key)] if key.isdigit() else getattr(parent, key)
+                setattr(parent, parts[-1], replacement)
+            if not replacements:
+                raise RuntimeError("SLA quantization replaced no modules")
+            print(f"[MULTI SLA] topk={self.sla_topk} attention={changed_attention} "
+                  f"linear/norm={len(replacements)}", flush=True)
 
         if self.use_lightvae:
             if not self.lightvae_path.is_file():
@@ -201,7 +317,10 @@ class WanControl5B:
         self.pipeline = pipeline
         torch.cuda.synchronize(self.device)
         self.load_seconds = round(time.perf_counter() - load_started, 3)
-        print(f"[MULTI CONTROL] loaded {self.model_name} on {self.device}; model_load={self.load_seconds:.3f}s", flush=True)
+        print(f"[MULTI CONTROL] loaded {self.model_name} on {self.device}; "
+              f"steps={self.steps} sla_topk={self.sla_topk} "
+              f"merged_transformer={self.transformer_path or 'none'} "
+              f"model_load={self.load_seconds:.3f}s", flush=True)
 
     @torch.inference_mode()
     def __call__(self, *, control_video, start_image, end_image, output_video,
