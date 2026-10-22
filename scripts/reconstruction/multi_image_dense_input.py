@@ -179,29 +179,105 @@ def _camera_fx_fy_cx_cy(camera):
     return fx, fy, cx, cy, width, height
 
 
-def _sample_indices(lengths, total):
-    """Allocate an approximately equal number of interior frames per trajectory."""
-    available = np.array([max(0, n - 2) for n in lengths], dtype=int)
-    total = min(int(total), int(available.sum()))
-    if total <= 0:
-        raise ValueError("No usable intermediate generated frames")
-    allocations = np.zeros(len(lengths), dtype=int)
-    for _ in range(total):
-        ratios = (allocations + 1) / np.maximum(available, 1)
-        ratios[available <= allocations] = float("inf")
-        # Bias towards trajectories with more frames if ratios are tied.
-        choice = int(np.argmin(ratios))
-        allocations[choice] += 1
-    indices = []
-    for n, count in zip(lengths, allocations):
-        if count == 0:
-            indices.append([])
-        else:
-            indices.append(np.linspace(1, n - 2, count).round().astype(int).tolist())
-    return indices
+def _camera_features(w2cs, radius):
+    """Camera centers and forward directions in the common COLMAP world frame.
+
+    The angular term is equivalent to comparing viewing rays on a sphere with
+    radius = 0.5 * scene camera baseline; this avoids collapsing roll/yaw-only
+    changes at approximately the same center.
+    """
+    poses = np.asarray(w2cs, dtype=np.float64)
+    rotations = poses[:, :3, :3]
+    translations = poses[:, :3, 3]
+    centers = -np.einsum("nij,nj->ni", rotations.transpose(0, 2, 1), translations)
+    forward = np.einsum("nij,j->ni", rotations.transpose(0, 2, 1),
+                        np.array([0., 0., 1.]))
+    return np.concatenate([centers, forward * (0.5 * radius)], axis=1)
 
 
-def prepare_dense_input(*, reconstruction_dir, sample_count=40, source_images=None):
+def _global_pose_samples(items, source_images, total, min_per_trajectory=4):
+    """Global FPS of generated poses, seeded by already retained source views.
+
+    Avoid segment endpoints (original images), reserve a small minimum across
+    the trajectories, then greedily maximize nearest-neighbor pose distance
+    across all remaining generated candidates. Deterministic tie-breaking.
+    """
+    original = []
+    for image_id, (q, t, _, name, _) in sorted(source_images.items()):
+        rotation = Rotation.from_quat([q[1], q[2], q[3], q[0]]).as_matrix()
+        pose = np.eye(4)
+        pose[:3, :3] = rotation
+        pose[:3, 3] = t
+        original.append(pose)
+
+    trajectories = []
+    candidates = []
+    affiliations = []
+    for segment, item in enumerate(items):
+        poses = np.asarray(np.load(item["pose_file"]), dtype=np.float64)
+        expected = int(item["frames"])
+        if poses.shape != (expected, 4, 4):
+            raise ValueError(f"Invalid trajectory pose shape {poses.shape} for {item['name']}")
+        trajectories.append(poses)
+        for frame in range(1, expected - 1):
+            candidates.append(poses[frame])
+            affiliations.append((segment, frame))
+    if not candidates:
+        raise ValueError("There are no intermediate generated frames to sample")
+
+    poses = np.concatenate([np.asarray(original), np.asarray(candidates)])
+    all_centers = -np.einsum("nij,nj->ni",
+                             poses[:, :3, :3].transpose(0, 2, 1),
+                             poses[:, :3, 3])
+    extents = np.linalg.norm(all_centers[:, None] - all_centers[None], axis=2) if len(all_centers) <= 500 else None
+    baseline = float(np.max(extents)) if extents is not None else float(np.linalg.norm(np.ptp(all_centers, axis=0)))
+    if baseline < 1e-6:
+        baseline = 1.0
+    features = _camera_features(poses, baseline) / baseline
+    source_count = len(original)
+    available = len(candidates)
+    count = min(int(total), available)
+    if count <= 0:
+        raise ValueError("dense_generated_frames must be >0")
+    candidate_features = features[source_count:]
+    distances = np.full(available, np.inf, dtype=np.float64)
+    for anchor in features[:source_count]:
+        distances = np.minimum(distances, np.sum((candidate_features - anchor) ** 2, axis=1))
+
+    selected = []
+    taken = np.zeros(available, dtype=bool)
+
+    def choose(index):
+        taken[index] = True
+        selected.append(index)
+        new_dist = np.sum((candidate_features - candidate_features[index]) ** 2, axis=1)
+        np.minimum(distances, new_dist, out=distances)
+        distances[taken] = -np.inf
+
+    # Coverage guarantee: up to 4 useful novel views per trajectory; seed using
+    # exactly the same farthest-point score while enforcing segment membership.
+    members = [np.array([i for i, (segment, _) in enumerate(affiliations) if segment == j],
+                        dtype=int) for j in range(len(items))]
+    reserve = min(int(min_per_trajectory), count // max(len(items), 1))
+    for _ in range(reserve):
+        for ids in members:
+            allowed = ids[~taken[ids]]
+            if len(allowed):
+                choose(int(allowed[np.argmax(distances[allowed])]))
+    while len(selected) < count:
+        choose(int(np.argmax(distances)))
+
+    result = [[] for _ in items]
+    for idx in selected:
+        segment, frame = affiliations[idx]
+        result[segment].append(int(frame))
+    for frames in result:
+        frames.sort()
+    return result
+
+
+
+def prepare_dense_input(*, reconstruction_dir, sample_count=80, source_images=None):
     """Create dense_input/image and dense_input/sparse/0 without modifying DA3 outputs."""
     started = time.perf_counter()
     root = Path(reconstruction_dir)
@@ -228,8 +304,15 @@ def prepare_dense_input(*, reconstruction_dir, sample_count=40, source_images=No
             raise ValueError(f"DA3 COLMAP image {p.name} not found among original image records")
         shutil.copy2(p, image_dir / p.name)
     name_to_camera = {record[3]: record[2] for record in images.values()}
-
-    frame_choices = _sample_indices([int(item["frames"]) for item in items], sample_count)
+    frame_choices = _global_pose_samples(items, images, sample_count)
+    print("[DENSE POSE FPS] " + ", ".join(
+        f"{item['name']}={len(indices)} frames" for item, indices in zip(items, frame_choices)),
+        flush=True)
+    # Remove stale JPGs from earlier sampling strategies before rebuilding.
+    retained = {p.name for p in normalized}
+    for old in image_dir.glob("*.jpg"):
+        if old.name not in retained:
+            old.unlink()
     last_camera_id = max(cameras)
     last_image_id = max(images)
     generated = []
@@ -287,6 +370,8 @@ def prepare_dense_input(*, reconstruction_dir, sample_count=40, source_images=No
     _write_binary_model(sparse_dir, cameras, images, source_sparse)
     summary = {"input_views": len(normalized), "sampled_generated_views": len(generated),
                "total_views": len(images), "sample_budget": int(sample_count),
+               "sampling_strategy": "global_pose_fps_v1",
+               "selected_indices": {item["name"]: ids for item, ids in zip(items, frame_choices)},
                "generated": generated, "work_dir": str(output),
                "seconds": round(time.perf_counter() - started, 3)}
     (output / "input_manifest.json").write_text(
