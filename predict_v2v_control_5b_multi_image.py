@@ -148,6 +148,11 @@ class WanControl5B:
         if self.transformer_path and self.lora_path:
             raise ValueError("Merged Transformer checkpoint must not be mixed with LoRA")
         self.cfg = float(os.environ.get("SINGLERECON_CONTROL_CFG", "0.0"))
+        self.prompt_embeds_path = os.environ.get("SINGLERECON_CONTROL_PROMPT_EMBEDS_PATH") or None
+        if self.prompt_embeds_path and self.cfg > 1.0:
+            raise ValueError("Precomputed text embedding ablation requires CFG <= 1 (no negative branch)")
+        self.prompt_embeds = None
+        self.prompt_embed_load_seconds = 0.0
         self.seed = int(os.environ.get("SINGLERECON_CONTROL_SEED", "42"))
         self.use_lightvae = os.environ.get("SINGLERECON_CONTROL_USE_LIGHTVAE", "1") == "1"
         self.lightvae_path = Path(os.environ.get(
@@ -284,13 +289,20 @@ class WanControl5B:
                 additional_kwargs=OmegaConf.to_container(config["vae_kwargs"]),
             ).to(self.dtype)
         print(f"[MULTI CONTROL] VAE={'LightVAE' if self.use_lightvae else 'teacher'}", flush=True)
-        tokenizer = AutoTokenizer.from_pretrained(
-            str(self.model_name / config["text_encoder_kwargs"].get("tokenizer_subpath", "tokenizer")))
-        text_encoder = WanT5EncoderModel.from_pretrained(
-            str(self.model_name / config["text_encoder_kwargs"].get("text_encoder_subpath", "text_encoder")),
-            additional_kwargs=OmegaConf.to_container(config["text_encoder_kwargs"]),
-            low_cpu_mem_usage=True, torch_dtype=self.dtype,
-        ).eval()
+        if self.prompt_embeds_path:
+            # In this mode no tokenizer/T5 is loaded; the Wan pipeline receives
+            # precomputed context. Keep a dtype-only placeholder after .to()
+            # because upstream __call__ unconditionally reads text_encoder.dtype.
+            tokenizer = None
+            text_encoder = None
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(
+                str(self.model_name / config["text_encoder_kwargs"].get("tokenizer_subpath", "tokenizer")))
+            text_encoder = WanT5EncoderModel.from_pretrained(
+                str(self.model_name / config["text_encoder_kwargs"].get("text_encoder_subpath", "text_encoder")),
+                additional_kwargs=OmegaConf.to_container(config["text_encoder_kwargs"]),
+                low_cpu_mem_usage=True, torch_dtype=self.dtype,
+            ).eval()
         scheduler = FlowMatchEulerDiscreteScheduler(**filter_kwargs(
             FlowMatchEulerDiscreteScheduler, OmegaConf.to_container(config["scheduler_kwargs"])))
 
@@ -300,6 +312,40 @@ class WanControl5B:
         )
         # Single GPU. No ControlMaskEncoder, control_mask, FSDP or sequence parallel.
         pipeline.to(self.device)
+        if self.prompt_embeds_path:
+            from types import SimpleNamespace
+            # This placeholder is never used to encode text. It only supplies
+            # dtype for the upstream video pipeline's latent initialization.
+            pipeline.text_encoder = SimpleNamespace(dtype=self.dtype)
+            embedded_started = time.perf_counter()
+            raw = torch.load(self.prompt_embeds_path, map_location="cpu", weights_only=True)
+            if isinstance(raw, dict):
+                if "prompt" in raw:
+                    raw = raw["prompt"]
+                elif "prompt_embeds" in raw:
+                    raw = raw["prompt_embeds"]
+                else:
+                    raise ValueError("prompt.pt dict requires 'prompt' or 'prompt_embeds' key")
+            if isinstance(raw, torch.Tensor):
+                if raw.ndim == 3 and raw.shape[0] == 1:
+                    raw = [raw[0]]
+                elif raw.ndim == 2:
+                    raw = [raw]
+                else:
+                    raise ValueError(f"Expected prompt tensor [1,L,D] or [L,D], got {tuple(raw.shape)}")
+            elif isinstance(raw, (list, tuple)) and len(raw) == 1 and isinstance(raw[0], torch.Tensor):
+                raw = list(raw)
+            else:
+                raise TypeError("Expected tensor or single-element list of tensors for prompt embedding")
+            if raw[0].ndim != 2 or raw[0].shape[1] != 4096 or raw[0].shape[0] < 1:
+                raise ValueError(f"Invalid Wan T5 embedding shape: {tuple(raw[0].shape)}; expected [L,4096]")
+            self.prompt_embeds = [raw[0].to(device=self.device, dtype=self.dtype)]
+            self.prompt_embed_load_seconds = round(time.perf_counter()-embedded_started, 3)
+            print(f"[MULTI TEXT] mode=precomputed file={self.prompt_embeds_path} "
+                  f"shape={tuple(self.prompt_embeds[0].shape)} "
+                  f"load={self.prompt_embed_load_seconds:.3f}s T5=skipped", flush=True)
+        else:
+            print("[MULTI TEXT] mode=t5 prompt encoding per segment", flush=True)
         if self.lora_path:
             lora = Path(self.lora_path).expanduser().resolve()
             if not lora.is_file():
@@ -369,8 +415,16 @@ class WanControl5B:
               f"start={Path(start_image).name}, end={Path(end_image).name}, "
               f"ref={Path(reference_image).name if reference_image else Path(end_image).name}",
               flush=True)
+        # Pass prompt=None when supplying embeddings: upstream check_inputs
+        # rejects using a string prompt together with prompt_embeds.
+        text_started = time.perf_counter()
+        prompt_kwargs = ({"prompt": None, "negative_prompt": None,
+                          "prompt_embeds": self.prompt_embeds}
+                         if self.prompt_embeds_path else
+                         {"prompt": str(prompt), "negative_prompt": NEGATIVE_PROMPT})
+        text_condition_seconds = time.perf_counter() - text_started
         video = self.pipeline(
-            str(prompt), num_frames=num_frames, negative_prompt=NEGATIVE_PROMPT,
+            num_frames=num_frames, **prompt_kwargs,
             height=height, width=width,
             generator=random_gen, guidance_scale=self.cfg,
             num_inference_steps=self.steps,
@@ -413,6 +467,8 @@ class WanControl5B:
         self.last_timing = {
             "preprocess": round(preprocess_seconds, 3),
             "inference": round(inference_seconds, 3),
+            "text_condition_prepare": round(text_condition_seconds, 6),
+            "text_embed_load_once": self.prompt_embed_load_seconds,
             "save": round(save_seconds, 3),
             "save_jpg": round(jpg_seconds, 3),
             "save_mp4": round(mp4_seconds, 3),
