@@ -64,6 +64,10 @@ class MultiImagePipeline:
                  trajectory_extra: bool = False,
                  trajectory_view_num: int = 81,
                  trajectory_interpolation: str = "bezier",
+                 trajectory_mode: str = "four_paths",
+                 roundtrip_center_index: int = 0,
+                 roundtrip_target_indices: tuple[int, int] = (1, 2),
+                 roundtrip_pitch_deg: float = 10.0,
                  run_gen_video: bool = False,
                  video_adapter: str | None = None,
                  video_code_root: str | Path | None = None,
@@ -101,6 +105,12 @@ class MultiImagePipeline:
         self.trajectory_extra = bool(trajectory_extra)
         self.trajectory_view_num = int(trajectory_view_num)
         self.trajectory_interpolation = trajectory_interpolation
+        if trajectory_mode not in ("four_paths", "roundtrip_bab_bcb"):
+            raise ValueError(f"Unsupported trajectory_mode: {trajectory_mode}")
+        self.trajectory_mode = trajectory_mode
+        self.roundtrip_center_index = int(roundtrip_center_index)
+        self.roundtrip_target_indices = tuple(map(int, roundtrip_target_indices))
+        self.roundtrip_pitch_deg = float(roundtrip_pitch_deg)
         self.run_gen_video = bool(run_gen_video)
         self.video_fps = int(video_fps)
         self.video_positive_prompt = str(video_positive_prompt)
@@ -217,7 +227,7 @@ class MultiImagePipeline:
         import numpy as np
         import torch
         import cv2
-        from camera_trajectory import plan_trajectories, save_trajectories
+        from camera_trajectory import plan_trajectories, plan_roundtrip_trajectories, save_trajectories
         from depth_anything_3.utils.export.colmap_init import save_sparserecon
         from depth_anything_3.utils.export.gs import export_to_gs_video
 
@@ -233,10 +243,18 @@ class MultiImagePipeline:
             poses_for_colmap = np.asarray(prediction.extrinsics).copy()
             if prediction.is_metric and prediction.scale_factor is not None:
                 poses_for_colmap[:, :3, 3] /= float(prediction.scale_factor)
-            paths, info = plan_trajectories(
-                poses_for_colmap, extra=self.trajectory_extra,
-                view_num=self.trajectory_view_num, circle=self.circle,
-                interpolation=self.trajectory_interpolation)
+            if self.trajectory_mode == "roundtrip_bab_bcb":
+                paths, info = plan_roundtrip_trajectories(
+                    poses_for_colmap,
+                    center_index=self.roundtrip_center_index,
+                    target_indices=self.roundtrip_target_indices,
+                    pitch_deg=self.roundtrip_pitch_deg,
+                    view_num=self.trajectory_view_num)
+            else:
+                paths, info = plan_trajectories(
+                    poses_for_colmap, extra=self.trajectory_extra,
+                    view_num=self.trajectory_view_num, circle=self.circle,
+                    interpolation=self.trajectory_interpolation)
             if not paths:
                 raise RuntimeError("No up/down trajectories generated")
             out = gs_video.parent / "trajectories"
@@ -249,8 +267,15 @@ class MultiImagePipeline:
                 a, b = path["start_index"], path["end_index"]
                 Ka = np.asarray(prediction.intrinsics[a], dtype=np.float32)
                 Kb = np.asarray(prediction.intrinsics[b], dtype=np.float32)
-                weights = np.linspace(0, 1, len(poses), dtype=np.float32)
-                Ks = np.stack([(1-w)*Ka+w*Kb for w in weights])
+                if "reference_index" in path:
+                    mid = (len(poses)-1)//2
+                    Kr = np.asarray(prediction.intrinsics[path["reference_index"]], dtype=np.float32)
+                    weights = np.array([i/mid if i<=mid else (len(poses)-1-i)/mid
+                                        for i in range(len(poses))], dtype=np.float32)
+                    Ks = np.stack([(1-w)*Ka+w*Kr for w in weights])
+                else:
+                    weights = np.linspace(0, 1, len(poses), dtype=np.float32)
+                    Ks = np.stack([(1-w)*Ka+w*Kb for w in weights])
                 render_kwargs = dict(
                     prediction=prediction, export_dir=str(out),
                     extrinsics=torch.from_numpy(poses).to(prediction.gaussians.means).unsqueeze(0),
@@ -562,6 +587,12 @@ class MultiImagePipeline:
                             old_counts = [int(item["frames"]) for item in old_trajectory["trajectories"]]
                             valid = bool(old_counts) and all(
                                 count == self.trajectory_view_num for count in old_counts)
+                            valid = valid and old_trajectory.get("trajectory_mode", "four_paths") == self.trajectory_mode
+                            if self.trajectory_mode == "roundtrip_bab_bcb":
+                                valid = valid and (
+                                    old_trajectory.get("center_index") == self.roundtrip_center_index
+                                    and old_trajectory.get("target_indices") == list(self.roundtrip_target_indices)
+                                    and old_trajectory.get("pitch_deg") == self.roundtrip_pitch_deg)
                         except (OSError, ValueError, KeyError, TypeError):
                             valid = False
                         if not valid:
