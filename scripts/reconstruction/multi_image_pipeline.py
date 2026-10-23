@@ -68,6 +68,8 @@ class MultiImagePipeline:
                  roundtrip_center_index: int = 0,
                  roundtrip_target_indices: tuple[int, int] = (1, 2),
                  roundtrip_pitch_deg: float = 10.0,
+                 roundtrip_elevation_profile: str = "plateau",
+                 roundtrip_edge_ramp: float = 0.2,
                  run_gen_video: bool = False,
                  video_adapter: str | None = None,
                  video_code_root: str | Path | None = None,
@@ -111,6 +113,8 @@ class MultiImagePipeline:
         self.roundtrip_center_index = int(roundtrip_center_index)
         self.roundtrip_target_indices = tuple(map(int, roundtrip_target_indices))
         self.roundtrip_pitch_deg = float(roundtrip_pitch_deg)
+        self.roundtrip_elevation_profile = str(roundtrip_elevation_profile)
+        self.roundtrip_edge_ramp = float(roundtrip_edge_ramp)
         self.run_gen_video = bool(run_gen_video)
         self.video_fps = int(video_fps)
         self.video_positive_prompt = str(video_positive_prompt)
@@ -276,6 +280,8 @@ class MultiImagePipeline:
                     center_index=self.roundtrip_center_index,
                     target_indices=self.roundtrip_target_indices,
                     pitch_deg=self.roundtrip_pitch_deg,
+                    elevation_profile=self.roundtrip_elevation_profile,
+                    edge_ramp=self.roundtrip_edge_ramp,
                     view_num=self.trajectory_view_num)
             else:
                 paths, info = plan_trajectories(
@@ -619,7 +625,9 @@ class MultiImagePipeline:
                                 valid = valid and (
                                     old_trajectory.get("center_index") == self.roundtrip_center_index
                                     and old_trajectory.get("target_indices") == list(self.roundtrip_target_indices)
-                                    and old_trajectory.get("pitch_deg") == self.roundtrip_pitch_deg)
+                                    and old_trajectory.get("pitch_deg") == self.roundtrip_pitch_deg
+                                    and old_trajectory.get("elevation_profile", "sine") == self.roundtrip_elevation_profile
+                                    and old_trajectory.get("edge_ramp", 0.2) == self.roundtrip_edge_ramp)
                         except (OSError, ValueError, KeyError, TypeError):
                             valid = False
                         if not valid:
