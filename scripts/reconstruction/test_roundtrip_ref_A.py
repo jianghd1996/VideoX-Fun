@@ -389,7 +389,10 @@ def main():
             subprocess.run(base + provided + ["--phase", "render"], env=env, check=True)
         else:
             print("[ABLATION A] reuse existing control.mp4 (use --rerender to regenerate)", flush=True)
-        subprocess.run(base + provided + ["--phase", "wan"], env=env, check=True)
+        # --rerender applies only to the GS render subprocess, never the Wan
+        # subprocess. Passing it through trips the direct-Wan safety check.
+        wan_args = [arg for arg in provided if arg != "--rerender"]
+        subprocess.run(base + wan_args + ["--phase", "wan"], env=env, check=True)
     elif args.phase == "render":
         render(args, output)
     else:
