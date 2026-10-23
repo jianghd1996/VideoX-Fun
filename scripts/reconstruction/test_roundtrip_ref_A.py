@@ -87,7 +87,7 @@ def plan_roundtrip(extrinsics, a_index, b_index, pitch_deg, frame_count=81):
 
 
 @contextmanager
-def _gs_writer_mode(mode, output_path):
+def _gs_writer_mode(mode, output_path, expected_frames):
     """Use OpenCV to write the DA3 GS clip without a MoviePy ffmpeg subprocess.
 
     Only patches the active render subprocess; production DA3 remains unchanged.
@@ -121,8 +121,10 @@ def _gs_writer_mode(mode, output_path):
         frame_count = 0
         dimensions = None
         try:
-            for rgb in clip.iter_frames(fps=fps, dtype="uint8"):
-                rgb = np.asarray(rgb)
+            # Use explicit pose indices, not MoviePy duration iteration:
+            # iter_frames may include an extra terminal frame for N/fps clips.
+            for frame_idx in range(expected_frames):
+                rgb = np.asarray(clip.get_frame(frame_idx / fps)).astype(np.uint8)
                 if rgb.ndim != 3 or rgb.shape[2] not in (3, 4):
                     raise ValueError(f"Expected RGB or RGBA video frame, got {rgb.shape}")
                 if writer is None:
@@ -167,7 +169,7 @@ def _gs_writer_mode(mode, output_path):
                 actual += 1
         finally:
             reader.release()
-        if actual != frame_count:
+        if actual != expected_frames or frame_count != expected_frames:
             raise RuntimeError(
                 f"GS video written={frame_count} but decoded={actual}, {destination}")
         print(f"[ABLATION A] GS encoded {actual} frames successfully: {destination}",
@@ -220,7 +222,7 @@ def render(args, output):
     control_mp4 = output / "control.mp4"
     if args.gs_writer == "opencv" and control_mp4.exists():
         control_mp4.unlink()  # never reuse an incomplete file from an earlier run
-    with _gs_writer_mode(args.gs_writer, control_mp4):
+    with _gs_writer_mode(args.gs_writer, control_mp4, args.frames):
         export_to_gs_video(
             prediction=prediction, export_dir=str(render_dir),
             extrinsics=torch.from_numpy(poses).to(prediction.gaussians.means).unsqueeze(0),
@@ -235,6 +237,20 @@ def render(args, output):
         shutil.copy2(src, control_mp4)
     if not control_mp4.is_file() or control_mp4.stat().st_size == 0:
         raise RuntimeError(f"Control video was not created: {control_mp4}")
+    import cv2
+    reader = cv2.VideoCapture(str(control_mp4))
+    actual = 0
+    try:
+        while True:
+            ok, _ = reader.read()
+            if not ok:
+                break
+            actual += 1
+    finally:
+        reader.release()
+    if actual != args.frames:
+        raise RuntimeError(f"Control must have exactly {args.frames} decoded frames, got {actual}; "
+                           "rerun with --gs-writer opencv --rerender")
     (output / "experiment.json").write_text(json.dumps({
         "experiment": "A", "trajectory": "B->A->B",
         "input_images": [str(x) for x in images],
@@ -278,8 +294,13 @@ def wan(args, output):
     os.environ["SINGLERECON_CONTROL_TEACHER_VAE_PATH"] = str(Path(args.teacher_vae))
     torch.set_num_threads(args.cpu_threads)
     torch.set_num_interop_threads(1)
+    # Reuse the established empty-prompt T5 path for a clean ablation.
+    # Do not silently inherit a prompt.pt experiment from the shell.
     generator = WanControl5B()
     middle = (args.frames - 1)//2
+    samples = sorted(set(np.linspace(0, args.frames - 1, 9).round().astype(int).tolist()
+                         + [middle]))
+    started = time.perf_counter()
     generator(
         control_video=str(output / "control.mp4"),
         start_image=str(b),
@@ -287,8 +308,38 @@ def wan(args, output):
         reference_image=str(a),
         output_video=str(output / "generated.mp4"),
         prompt="", num_frames=args.frames, fps=30,
-        sampled_frame_indices=[0, 10, 20, 30, middle, 50, 60, 70, args.frames-1],
+        sampled_frame_indices=samples,
         sampled_frames_dir=str(output / "sampled_frames"), save_mp4=True)
+    elapsed = time.perf_counter() - started
+    # Evaluate whether reference A is actually reproduced at the unconstrained midpoint.
+    import cv2
+    generated_mid = output / "sampled_frames" / f"f{middle:04d}.jpg"
+    observed = cv2.imread(str(generated_mid))
+    reference = cv2.imread(str(a))
+    if observed is None or reference is None:
+        raise RuntimeError(f"Cannot compare midpoint {generated_mid} with A {a}")
+    reference = cv2.resize(reference, (observed.shape[1], observed.shape[0]),
+                           interpolation=cv2.INTER_LINEAR)
+    diff = (observed.astype(np.float32) - reference.astype(np.float32))
+    mse = float(np.mean(diff ** 2))
+    psnr = float(10 * np.log10(255.0 ** 2 / max(mse, 1e-12)))
+    metrics = {
+        "comparison": "generated midpoint versus actual A (same output resolution)",
+        "midpoint_frame": middle,
+        "midpoint_psnr_db": round(psnr, 4),
+        "midpoint_mse": round(mse, 4),
+        "wan_wall_seconds": round(elapsed, 3),
+        "wan_timing": generator.last_timing,
+        "warning": "This is a diagnostic pixel metric, not a geometry/perceptual quality score.",
+    }
+    (output / "comparison.json").write_text(
+        json.dumps(metrics, indent=2, ensure_ascii=False), encoding="utf-8")
+    cv2.imwrite(str(output / "midpoint_A_reference.jpg"), reference)
+    cv2.imwrite(str(output / "midpoint_generated.jpg"), observed)
+    cv2.imwrite(str(output / "midpoint_difference.jpg"),
+                np.clip(np.abs(diff) * 3, 0, 255).astype(np.uint8))
+    print(f"[ABLATION A] midpoint PSNR to real A={psnr:.3f}dB; "
+          f"generated={generated_mid}", flush=True)
     print(f"[ABLATION A] complete; timing={generator.last_timing}", flush=True)
 
 
@@ -316,6 +367,10 @@ def main():
     p.add_argument("--phase", choices=("all","render","wan"), default="all", help=argparse.SUPPRESS)
     args = p.parse_args()
     args.case = args.case.expanduser().resolve()
+    if args.frames < 5 or (args.frames - 1) % 4:
+        p.error("--frames must be 4n+1, e.g. 49 or 81")
+    if args.phase == "wan" and args.rerender:
+        p.error("--rerender cannot be combined with --phase wan")
     output = args.case / "reconstruction" / "ablation_A_BAB"
     output.mkdir(parents=True, exist_ok=True)
     if args.phase == "all":
