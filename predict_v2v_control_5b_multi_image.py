@@ -327,23 +327,22 @@ class WanControl5B:
                     raw = raw["prompt_embeds"]
                 else:
                     raise ValueError("prompt.pt dict requires 'prompt' or 'prompt_embeds' key")
-            if isinstance(raw, torch.Tensor):
-                if raw.ndim == 3 and raw.shape[0] == 1:
-                    raw = [raw[0]]
-                elif raw.ndim == 2:
-                    raw = [raw]
-                else:
-                    raise ValueError(f"Expected prompt tensor [1,L,D] or [L,D], got {tuple(raw.shape)}")
-            elif isinstance(raw, (list, tuple)) and len(raw) == 1 and isinstance(raw[0], torch.Tensor):
-                raw = list(raw)
-            else:
-                raise TypeError("Expected tensor or single-element list of tensors for prompt embedding")
-            if raw[0].ndim != 2 or raw[0].shape[1] != 4096 or raw[0].shape[0] < 1:
-                raise ValueError(f"Invalid Wan T5 embedding shape: {tuple(raw[0].shape)}; expected [L,4096]")
-            self.prompt_embeds = [raw[0].to(device=self.device, dtype=self.dtype)]
+            # Wan pipeline entry expects a batched Tensor with .shape,
+            # while its Transformer later iterates over batch dimension.
+            # For prompt.pt [1,4096], provide [B=1,L=1,D=4096].
+            if isinstance(raw, (list, tuple)) and len(raw) == 1 and isinstance(raw[0], torch.Tensor):
+                raw = raw[0]
+            if not isinstance(raw, torch.Tensor):
+                raise TypeError("Expected prompt.pt['prompt'] as Tensor")
+            if raw.ndim == 2:
+                raw = raw.unsqueeze(0)
+            if raw.ndim != 3 or raw.shape[0] != 1 or raw.shape[-1] != 4096 or raw.shape[1] < 1:
+                raise ValueError(f"Invalid Wan prompt embedding shape {tuple(raw.shape)}; "
+                                 "expected [1,L,4096]")
+            self.prompt_embeds = raw.to(device=self.device, dtype=self.dtype)
             self.prompt_embed_load_seconds = round(time.perf_counter()-embedded_started, 3)
             print(f"[MULTI TEXT] mode=precomputed file={self.prompt_embeds_path} "
-                  f"shape={tuple(self.prompt_embeds[0].shape)} "
+                  f"shape={tuple(self.prompt_embeds.shape)} "
                   f"load={self.prompt_embed_load_seconds:.3f}s T5=skipped", flush=True)
         else:
             print("[MULTI TEXT] mode=t5 prompt encoding per segment", flush=True)
