@@ -392,43 +392,78 @@ def _encode_vscode_compatible_control(control_mp4, expected_frames, codec="h264"
 
 
 def _activate_local_da3(root):
-    """Require DA3_custom, never silently use pip-installed depth_anything_3."""
+    """Resolve local DA3 source before loading wrappers; fail closed on pip fallback."""
     import importlib
+    import importlib.util
     root = Path(root).expanduser().resolve()
-    src = root / "src"
-    candidates = (src / "depth_anything_3" / "__init__.py",
-                  root / "depth_anything_3" / "__init__.py")
-    if not any(p.is_file() for p in candidates):
-        raise FileNotFoundError(
-            f"DA3_custom package missing under {root}; expected one of "
-            f"{[str(p) for p in candidates]}")
-    for folder in (root, src):
-        if folder.is_dir():
-            if str(folder) in sys.path:
-                sys.path.remove(str(folder))
-            sys.path.insert(0, str(folder))
-    # Never delete an existing pip module from sys.modules: fail instead,
-    # so we do not create a mixed environment with incompatible class objects.
-    cached_modules = [
-        (name, Path(getattr(mod, "__file__", "") or "/").resolve())
-        for name, mod in sys.modules.items()
-        if name == "depth_anything_3" or name.startswith("depth_anything_3.")
-    ]
-    wrong = [(name, str(location)) for name, location in cached_modules
-             if not location.is_relative_to(root)]
-    if wrong:
-        raise RuntimeError(
-            f"DA3 imported before local-path setup: {wrong[:6]}. "
-            "Refusing pip/local DA3 mixing. Launch a fresh Python process.")
-    importlib.invalidate_caches()
-    import depth_anything_3
-    resolved = Path(depth_anything_3.__file__).resolve()
-    if not resolved.is_relative_to(root):
-        raise RuntimeError(f"Refusing pip-installed DA3 at {resolved}; "
-                           f"required local DA3 under {root}")
-    print(f"[BAB DA3 SOURCE] package={resolved}; root={root}", flush=True)
-    return root
+    if not root.is_dir():
+        raise FileNotFoundError(f"DA3_custom root missing: {root}")
+    wrapper = root / "DA3" / "run_da3_full_crop_dev.py"
+    if not wrapper.is_file():
+        raise FileNotFoundError(f"Required DA3_custom wrapper missing: {wrapper}")
 
+    # DA3_custom is an outer project. The upstream depth_anything_3 sources
+    # may reside several directories below it (not necessarily root/src).
+    candidates = sorted({
+        p.parent.parent.resolve()
+        for p in root.rglob("depth_anything_3/__init__.py")
+        if p.is_file()
+        and "site-packages" not in p.parts
+        and ".git" not in p.parts
+    }, key=lambda p: (len(p.parts), str(p)))
+    # Also allow namespace packages without __init__.py, provided their
+    # actual implementation files exist under the local tree.
+    if not candidates:
+        candidates = sorted({
+            p.parent.parent.resolve()
+            for p in root.rglob("depth_anything_3/utils/export/gs.py")
+            if p.is_file() and "site-packages" not in p.parts
+        }, key=lambda p: (len(p.parts), str(p)))
+    if not candidates:
+        raise FileNotFoundError(
+            f"No local depth_anything_3 sources found inside {root}. "
+            "Refusing to fall back to pip-installed depth_anything_3. "
+            "Find the source tree or link/copy it under DA3_custom.")
+
+    # Do not reuse a package already imported from site-packages.
+    cached = []
+    for name, module in tuple(sys.modules.items()):
+        if name == "depth_anything_3" or name.startswith("depth_anything_3."):
+            path = getattr(module, "__file__", None)
+            if path:
+                resolved = Path(path).resolve()
+                if not resolved.is_relative_to(root):
+                    cached.append((name, str(resolved)))
+    if cached:
+        raise RuntimeError(
+            f"Conflicting depth_anything_3 modules already loaded: {cached[:8]}. "
+            "Refusing to mix pip/local implementations.")
+
+    # Ensure both the wrapper and the local implementation can be resolved.
+    paths = [candidates[0], root]
+    for path in reversed(paths):
+        if str(path) in sys.path:
+            sys.path.remove(str(path))
+        sys.path.insert(0, str(path))
+    importlib.invalidate_caches()
+    spec = importlib.util.find_spec("depth_anything_3")
+    origins = []
+    if spec is not None:
+        if spec.origin not in (None, "namespace"):
+            origins.append(Path(spec.origin).resolve())
+        origins.extend(Path(p).resolve() for p in (spec.submodule_search_locations or ()))
+    if not origins or not all(x.is_relative_to(root) for x in origins):
+        raise RuntimeError(
+            f"Local DA3 resolution failed: candidates={candidates}, "
+            f"resolved_origin={spec.origin if spec else None}, locations={origins}. "
+            "Refusing pip fallback.")
+    import depth_anything_3
+    import DA3.run_da3_full_crop_dev as local_wrapper
+    actual_wrapper = Path(local_wrapper.__file__).resolve()
+    if not actual_wrapper.is_relative_to(root):
+        raise RuntimeError(f"DA3 wrapper imported outside local root: {actual_wrapper}")
+    print(f"[BAB DA3 SOURCE] package={origins}, wrapper={actual_wrapper}", flush=True)
+    return root
 
 def render(args, output):
     import torch
