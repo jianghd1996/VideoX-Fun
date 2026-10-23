@@ -220,6 +220,94 @@ def plan_trajectories(extrinsics, *, extra=False, extra_pitch_deg=5.0,
     return trajectories, info
 
 
+
+def plan_roundtrip_trajectories(extrinsics, *, center_index=0,
+                                target_indices=(1, 2), view_num=81,
+                                pitch_deg=10.0):
+    """Two closed 81-frame trajectories B->A->B and B->C->B.
+
+    Exact DA3 input W2C at frames (0, midpoint, end). Use spherical
+    camera-center interpolation with two opposite elevation arcs, and
+    interpolate SO(3) endpoint correction over full segments instead of
+    directly overwriting only rotations at three isolated anchors.
+    """
+    from scipy.spatial.transform import Rotation
+    poses = _w2c44(extrinsics)
+    if len(poses) != 3 or sorted([center_index, *target_indices]) != [0, 1, 2]:
+        raise ValueError("Roundtrip mode requires distinct B/A/C indices spanning exactly 3 input views")
+    if view_num < 5 or (view_num - 1) % 4:
+        raise ValueError("Roundtrip Wan frame count must be 4n+1")
+    origin = _estimate_center(_centers(poses), poses[:, 2, :3])
+    up = _estimate_scene_up(poses)
+    centers = _centers(poses)
+    mid = (view_num - 1) // 2
+
+    def unit(v):
+        return v / np.linalg.norm(v)
+
+    def smooth(t):
+        return t*t*(3-2*t)
+
+    def slerp_unit(x, y, t):
+        dot = float(np.clip(np.dot(x, y), -1, 1))
+        theta = np.arccos(dot)
+        if theta < 1e-5:
+            return unit((1-t)*x + t*y)
+        if np.pi-theta < 1e-5:
+            raise ValueError("Roundtrip opposing camera directions cannot be interpolated")
+        return unit((np.sin((1-t)*theta)*x + np.sin(t*theta)*y)/np.sin(theta))
+
+    paths = []
+    for target, label in zip(target_indices, ("A", "C")):
+        pa, pb = centers[target], centers[center_index]
+        da, db = pa-origin, pb-origin
+        ra, rb = float(np.linalg.norm(da)), float(np.linalg.norm(db))
+        da, db = unit(da), unit(db)
+        out = np.tile(np.eye(4, dtype=np.float64), (view_num, 1, 1))
+        for i in range(view_num):
+            if i <= mid:
+                u = i/mid
+                src, dst, r0, r1, sign = db, da, rb, ra, 1
+            else:
+                u = (i-mid)/mid
+                src, dst, r0, r1, sign = da, db, ra, rb, -1
+            t = smooth(u)
+            d = slerp_unit(src, dst, t)
+            d = unit(d + sign*np.tan(np.deg2rad(pitch_deg)) *
+                     np.sin(np.pi*u)**2 * up)
+            c = origin + ((1-t)*r0 + t*r1)*d
+            out[i] = _look_at(c, origin, up)
+        anchors = (0, mid, view_num-1)
+        exact = (poses[center_index], poses[target], poses[center_index])
+        corrections = [Rotation.from_matrix(p[:3, :3] @ out[i, :3, :3].T)
+                       for i, p in zip(anchors, exact)]
+        for segment in range(2):
+            lo, hi = anchors[segment:segment+2]
+            first, last = corrections[segment:segment+2]
+            rotvec = (first.inv()*last).as_rotvec()
+            for i in range(lo, hi+1):
+                t = smooth((i-lo)/(hi-lo))
+                Rcorr = (first*Rotation.from_rotvec(rotvec*t)).as_matrix()
+                out[i, :3, :3] = Rcorr @ out[i, :3, :3]
+        for i, p in zip(anchors, exact):
+            out[i] = p
+        paths.append({
+            "mode": f"roundtrip_{label}",
+            "start_index": int(center_index),
+            "end_index": int(center_index),
+            "reference_index": int(target),
+            "mid_index": int(mid),
+            "extrinsics": out,
+        })
+    return paths, {
+        "trajectory_mode": "roundtrip_bab_bcb",
+        "center_index": int(center_index),
+        "target_indices": list(map(int, target_indices)),
+        "pitch_deg": float(pitch_deg),
+        "trajectory_count": 2,
+    }
+
+
 def save_trajectories(trajectories, info, output_dir):
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
