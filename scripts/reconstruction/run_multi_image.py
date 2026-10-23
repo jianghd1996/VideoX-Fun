@@ -34,6 +34,8 @@ CONFIG = {
     "roundtrip_center_index": 0,
     "roundtrip_target_indices": [1, 2],
     "roundtrip_pitch_deg": 10.0,
+    "roundtrip_elevation_profile": "plateau",  # corner coverage; use sine for legacy
+    "roundtrip_edge_ramp": 0.2,  # fraction of B->A/B->C travel used for each smooth ramp
     "trajectory_interpolation": "bezier",  # Keep fixed until E2E pipeline works
     "run_gen_video": True,
     "run_captioner": False,  # no caption model; positive prompt defaults to empty
@@ -82,6 +84,10 @@ def main() -> None:
     parser.add_argument("--roundtrip-target-indices", type=str, default="1,2",
                         help="A and C indices in sorted normalized input images")
     parser.add_argument("--roundtrip-pitch-deg", type=float, default=10.0)
+    parser.add_argument("--roundtrip-elevation-profile", choices=("plateau", "sine"),
+                        default="plateau", help="Plateau covers elevated corner views; sine is legacy")
+    parser.add_argument("--roundtrip-edge-ramp", type=float, default=0.2,
+                        help="Fraction of each leg used to ease into/out of elevation [0.05, 0.5]")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--no-save-mp4", action="store_true",
                         help="Skip full generated MP4; still save pose-selected JPGs from Wan tensor")
@@ -111,6 +117,8 @@ def main() -> None:
         except ValueError:
             parser.error("--roundtrip-target-indices must be comma-separated integers")
         opts["roundtrip_pitch_deg"] = args.roundtrip_pitch_deg
+        opts["roundtrip_elevation_profile"] = args.roundtrip_elevation_profile
+        opts["roundtrip_edge_ramp"] = args.roundtrip_edge_ramp
         if sorted([opts["roundtrip_center_index"], *opts["roundtrip_target_indices"]]) != [0,1,2]:
             parser.error("BAB/BCB requires distinct center and A/C indices [0,1,2]")
     if opts["trajectory_view_num"] < 5 or (opts["trajectory_view_num"] - 1) % 4:
