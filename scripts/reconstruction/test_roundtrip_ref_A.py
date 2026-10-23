@@ -597,13 +597,15 @@ def wan(args, output):
     # Fail before the expensive SLA model load if a stale nested adapter is used.
     import inspect
     adapter_path = Path(inspect.getfile(WanControl5B)).resolve()
-    if "reference_image" not in inspect.signature(WanControl5B.__call__).parameters:
+    adapter_params = inspect.signature(WanControl5B.__call__).parameters
+    if "reference_image" not in adapter_params or (args.midpoint_keyframe and "keyframe_images" not in adapter_params):
         raise RuntimeError(
             "Wan adapter is outdated: WanControl5B.__call__ lacks reference_image. "
             f"Loaded from: {adapter_path}. Sync the branch version of "
             "predict_v2v_control_5b_multi_image.py into CodexRecon/VideoX-Fun/ "
             "and rerun with --phase wan (or omit --phase to reuse control.mp4).")
-    print(f"[ABLATION A] verified reference_image adapter: {adapter_path}", flush=True)
+    print(f"[ABLATION {'B' if args.midpoint_keyframe else 'A'}] "
+          f"verified Wan adapter: {adapter_path}", flush=True)
     spec = json.loads((output / "experiment.json").read_text())
     images = list(map(Path, spec["input_images"]))
     a, b = images[args.a_index], images[args.b_index]
@@ -625,20 +627,30 @@ def wan(args, output):
     middle = (args.frames - 1)//2
     samples = sorted(set(np.linspace(0, args.frames - 1, 9).round().astype(int).tolist()
                          + [middle]))
+    # B mode uses the EXACT same control as A mode; only the inpainting
+    # condition differs. Keep independent outputs for fair A/B comparison.
+    is_b = args.midpoint_keyframe
+    generated_name = "generated_midA.mp4" if is_b else "generated.mp4"
+    sampled_name = "sampled_frames_midA" if is_b else "sampled_frames"
+    keyframes = ({0: str(b), middle: str(a), args.frames - 1: str(b)}
+                 if is_b else None)
+    print(f"[ABLATION {'B' if is_b else 'A'}] control={output / 'control.mp4'} "
+          f"keyframes={keyframes}; generated={generated_name}", flush=True)
     started = time.perf_counter()
     generator(
         control_video=str(output / "control.mp4"),
         start_image=str(b),
         end_image=str(b),
         reference_image=str(a),
-        output_video=str(output / "generated.mp4"),
+        keyframe_images=keyframes,
+        output_video=str(output / generated_name),
         prompt="", num_frames=args.frames, fps=30,
         sampled_frame_indices=samples,
-        sampled_frames_dir=str(output / "sampled_frames"), save_mp4=True)
+        sampled_frames_dir=str(output / sampled_name), save_mp4=True)
     elapsed = time.perf_counter() - started
     # Evaluate whether reference A is actually reproduced at the unconstrained midpoint.
     import cv2
-    generated_mid = output / "sampled_frames" / f"f{middle:04d}.jpg"
+    generated_mid = output / sampled_name / f"f{middle:04d}.jpg"
     observed = cv2.imread(str(generated_mid))
     reference = cv2.imread(str(a))
     if observed is None or reference is None:
@@ -657,15 +669,28 @@ def wan(args, output):
         "wan_timing": generator.last_timing,
         "warning": "This is a diagnostic pixel metric, not a geometry/perceptual quality score.",
     }
-    (output / "comparison.json").write_text(
+    (output / ("comparison_midA.json" if is_b else "comparison.json")).write_text(
         json.dumps(metrics, indent=2, ensure_ascii=False), encoding="utf-8")
-    cv2.imwrite(str(output / "midpoint_A_reference.jpg"), reference)
-    cv2.imwrite(str(output / "midpoint_generated.jpg"), observed)
-    cv2.imwrite(str(output / "midpoint_difference.jpg"),
+    if is_b:
+        (output / "experiment_midA.json").write_text(
+            json.dumps({
+                "experiment": "B", "trajectory": "B->A->B",
+                "control_video": str(output / "control.mp4"),
+                "output_video": str(output / generated_name),
+                "fixed_keyframes": {"0": str(b), str(middle): str(a),
+                                    str(args.frames - 1): str(b)},
+                "reference_image": str(a),
+                "note": "Middle A provided as sparse inpaint condition; VAE conditioning "
+                        "does not guarantee pixel-exact reproduction in decoded output.",
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
+    suffix = "_midA" if is_b else ""
+    cv2.imwrite(str(output / f"midpoint_A_reference{suffix}.jpg"), reference)
+    cv2.imwrite(str(output / f"midpoint_generated{suffix}.jpg"), observed)
+    cv2.imwrite(str(output / f"midpoint_difference{suffix}.jpg"),
                 np.clip(np.abs(diff) * 3, 0, 255).astype(np.uint8))
-    print(f"[ABLATION A] midpoint PSNR to real A={psnr:.3f}dB; "
+    print(f"[ABLATION {'B' if is_b else 'A'}] midpoint PSNR to real A={psnr:.3f}dB; "
           f"generated={generated_mid}", flush=True)
-    print(f"[ABLATION A] complete; timing={generator.last_timing}", flush=True)
+    print(f"[ABLATION {'B' if is_b else 'A'}] complete; timing={generator.last_timing}", flush=True)
 
 
 def main():
@@ -686,6 +711,8 @@ def main():
     p.add_argument("--merged-transformer", default=str(HERE / "Cloud_Models/transformer_w_skybox_sla/transformer_lora_merge_weight_sla_quant.pt"))
     p.add_argument("--lightvae", default=str(HERE / "Cloud_Models/transformer_w_skybox_sla/MG-LightVAE.pth"))
     p.add_argument("--teacher-vae", default=str(HERE / "Cloud_Models/Wan2.2-TI2V-5B/Wan2.2_VAE.pth"))
+    p.add_argument("--midpoint-keyframe", action="store_true",
+                   help="B ablation: constrain true A at frame midpoint; reuse existing control.mp4")
     p.add_argument("--rerender", action="store_true")
     p.add_argument("--control-codec", choices=("h264", "mp4v"), default="h264",
                    help="Final control.mp4 encoding; H.264/yuv420p plays in VS Code")
