@@ -153,6 +153,7 @@ class WanControl5B:
             raise ValueError("Precomputed text embedding ablation requires CFG <= 1 (no negative branch)")
         self.prompt_embeds = None
         self.prompt_embed_load_seconds = 0.0
+        self._last_text_encode_seconds = 0.0
         self.seed = int(os.environ.get("SINGLERECON_CONTROL_SEED", "42"))
         self.use_lightvae = os.environ.get("SINGLERECON_CONTROL_USE_LIGHTVAE", "1") == "1"
         self.lightvae_path = Path(os.environ.get(
@@ -361,6 +362,16 @@ class WanControl5B:
             print(f"[MULTI CONTROL] LoRA={lora} weight={self.lora_weight}", flush=True)
         else:
             print("[MULTI CONTROL] LoRA disabled (set SINGLERECON_CONTROL_LORA_PATH to enable)", flush=True)
+        # Time the *actual* pipeline encode_prompt call, including T5 when enabled.
+        real_encode_prompt = pipeline.encode_prompt
+        def timed_encode_prompt(*args, **kwargs):
+            started = time.perf_counter()
+            result = real_encode_prompt(*args, **kwargs)
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(self.device)
+            self._last_text_encode_seconds = time.perf_counter() - started
+            return result
+        pipeline.encode_prompt = timed_encode_prompt
         self.pipeline = pipeline
         torch.cuda.synchronize(self.device)
         self.load_seconds = round(time.perf_counter() - load_started, 3)
@@ -423,6 +434,7 @@ class WanControl5B:
                          if self.prompt_embeds_path else
                          {"prompt": str(prompt), "negative_prompt": NEGATIVE_PROMPT})
         text_condition_seconds = time.perf_counter() - text_started
+        self._last_text_encode_seconds = 0.0
         video = self.pipeline(
             num_frames=num_frames, **prompt_kwargs,
             height=height, width=width,
@@ -468,6 +480,7 @@ class WanControl5B:
             "preprocess": round(preprocess_seconds, 3),
             "inference": round(inference_seconds, 3),
             "text_condition_prepare": round(text_condition_seconds, 6),
+            "text_encode": round(self._last_text_encode_seconds, 6),
             "text_embed_load_once": self.prompt_embed_load_seconds,
             "save": round(save_seconds, 3),
             "save_jpg": round(jpg_seconds, 3),
