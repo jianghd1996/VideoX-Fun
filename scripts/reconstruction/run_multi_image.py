@@ -34,7 +34,7 @@ CONFIG = {
     "roundtrip_center_index": 0,
     "roundtrip_target_indices": [1, 2],
     "roundtrip_pitch_deg": 10.0,
-    "roundtrip_elevation_profile": "plateau",  # corner coverage; use sine for legacy
+    "roundtrip_elevation_profile": "broad_sine",  # continuously moving wide arc
     "roundtrip_edge_ramp": 0.2,  # fraction of B->A/B->C travel used for each smooth ramp
     "trajectory_interpolation": "bezier",  # Keep fixed until E2E pipeline works
     "run_gen_video": True,
@@ -84,8 +84,8 @@ def main() -> None:
     parser.add_argument("--roundtrip-target-indices", type=str, default="1,2",
                         help="A and C indices in sorted normalized input images")
     parser.add_argument("--roundtrip-pitch-deg", type=float, default=10.0)
-    parser.add_argument("--roundtrip-elevation-profile", choices=("plateau", "sine"),
-                        default="plateau", help="Plateau covers elevated corner views; sine is legacy")
+    parser.add_argument("--roundtrip-elevation-profile", choices=("broad_sine", "plateau", "sine"),
+                        default="broad_sine", help="Smooth wide elevated arc; plateau may look jerky, sine is legacy")
     parser.add_argument("--roundtrip-edge-ramp", type=float, default=0.2,
                         help="Fraction of each leg used to ease into/out of elevation [0.05, 0.5]")
     parser.add_argument("--resume", action="store_true")
