@@ -57,6 +57,7 @@ CONFIG = {
     "video_gpu_ids": [6, 7],
     "video_cpu_threads": 16,  # per Wan worker; compare with 32
     "video_positive_prompt": "",  # do not load prompt.txt
+    "video_prompt_embeds_path": None,  # optional: precomputed prompt.pt (skip T5 entirely)
     "video_save_mp4": True,  # also archive complete MP4; selected JPGs always saved from tensor
     "video_resume": False,  # full E2E benchmark: regenerate all videos
     "video_preload_workers": True,  # preload Wan on GPU 6,7 at pipeline startup
@@ -74,6 +75,8 @@ def main() -> None:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--no-save-mp4", action="store_true",
                         help="Skip full generated MP4; still save pose-selected JPGs from Wan tensor")
+    parser.add_argument("--video-prompt-embeds", type=Path,
+                        help="Use a precomputed Wan prompt.pt and skip loading T5 text encoder")
     parser.add_argument("--video-cpu-threads", type=int, choices=(8, 16, 32),
                         help="CPU threads per Wan worker; default 16, try 32 as A/B")
     parser.add_argument("--video-gpus", type=str,
@@ -90,6 +93,8 @@ def main() -> None:
         opts["trajectory_view_num"] = args.trajectory_frames
     if opts["trajectory_view_num"] < 5 or (opts["trajectory_view_num"] - 1) % 4:
         parser.error("--trajectory-frames must be >= 5 and equal to 4n+1 (e.g. 49 or 81)")
+    if args.video_prompt_embeds is not None:
+        opts["video_prompt_embeds_path"] = str(args.video_prompt_embeds.expanduser().resolve())
     if args.no_save_mp4:
         opts["video_save_mp4"] = False
     if args.video_cpu_threads is not None:
@@ -130,6 +135,7 @@ def main() -> None:
           f"gpus={opts['video_gpu_ids']} "
           f"worker_cpu_threads={opts['video_cpu_threads']} "
           f"captioner={opts['run_captioner']} positive_prompt={opts['video_positive_prompt']!r} "
+          f"prompt_embeds={opts['video_prompt_embeds_path'] or 'T5'} "
           f"save_mp4={opts['video_save_mp4']} "
           f"fresh={args.benchmark_fresh} "
           f"video_resume={opts['video_resume']} resume_stages={opts['resume_stages']}", flush=True)
@@ -153,7 +159,8 @@ def main() -> None:
         pipeline.close()
     print("\n[MULTI END-TO-END TIMING SUMMARY] (seconds)", flush=True)
     keys = ("image_preprocess", "caption", "da3", "video_model_load",
-            "video_generation", "video_inference", "trajectory_video",
+            "video_generation", "video_inference", "video_text_condition_prepare_sum",
+            "video_text_embed_load_per_worker", "trajectory_video",
             "dense_prepare", "dense", "video_save_jpg_sum",
             "video_save_mp4_sum", "video_wall_no_mp4_estimate",
             "total_no_mp4_estimate", "total")
