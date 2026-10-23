@@ -507,13 +507,23 @@ def render(args, output):
     control_mp4 = output / "control.mp4"
     if args.gs_writer == "opencv" and control_mp4.exists():
         control_mp4.unlink()  # never reuse an incomplete file from an earlier run
+    import inspect
+    export_signature = inspect.signature(export_to_gs_video)
+    required = ("prediction", "export_dir", "extrinsics", "intrinsics",
+                "trj_mode", "vis_depth", "output_name", "chunk_size")
+    missing = [key for key in required if key not in export_signature.parameters]
+    if missing and not any(p.kind == inspect.Parameter.VAR_KEYWORD
+                           for p in export_signature.parameters.values()):
+        raise RuntimeError(
+            f"Local DA3 export_to_gs_video lacks required arguments {missing}: "
+            f"{export_signature}")
+    print(f"[BAB DA3 SOURCE] export_to_gs_video signature={export_signature}", flush=True)
     with _gs_writer_mode(args.gs_writer, control_mp4, args.frames):
         export_to_gs_video(
             prediction=prediction, export_dir=str(render_dir),
             extrinsics=torch.from_numpy(poses).to(prediction.gaussians.means).unsqueeze(0),
             intrinsics=torch.from_numpy(Ks).to(prediction.gaussians.means).unsqueeze(0),
             trj_mode="original", vis_depth=None, output_name="ablation_A_BAB",
-            crop_ratio=1.0, view_num=args.frames, extra_view=[False, False],
             chunk_size=4)
     if args.gs_writer == "moviepy":
         src = render_dir / "gs_video" / "ablation_A_BAB.mp4"
