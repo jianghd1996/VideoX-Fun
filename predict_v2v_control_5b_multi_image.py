@@ -383,7 +383,7 @@ class WanControl5B:
     def __call__(self, *, control_video, start_image, end_image, output_video,
                  prompt, num_frames, fps=30, sampled_frame_indices=None,
                  sampled_frames_dir=None, save_mp4=True,
-                 reference_image=None):
+                 reference_image=None, keyframe_images=None):
         if self.pipeline is None:
             self.load()
         num_frames = int(num_frames)
@@ -407,6 +407,25 @@ class WanControl5B:
         # Constrain BOTH actual DA3 input endpoint images, not GS-rendered endpoints.
         inpaint_video, inpaint_mask, _ = get_image_to_video_latent(
             [first], [last], video_length=num_frames, sample_size=[height, width])
+        # Optional sparse known frames for midpoint-keyframe ablations.
+        # Preserve upstream's video/mask preprocessing and its temporal
+        # first-frame replication semantics. video is [0,1] float, mask 0/255:
+        # 0 = known/fixed condition, 255 = unknown/to-generate.
+        if keyframe_images:
+            for frame_idx, image_path in sorted(keyframe_images.items()):
+                frame_idx = int(frame_idx)
+                if not 0 <= frame_idx < num_frames:
+                    raise ValueError(f"Keyframe index {frame_idx} outside [0,{num_frames})")
+                with Image.open(image_path) as image:
+                    rgb = np.array(image.convert("RGB").resize((width, height)),
+                                   dtype=np.uint8, copy=True)
+                tensor = torch.from_numpy(rgb).permute(2, 0, 1).to(
+                    device=inpaint_video.device, dtype=inpaint_video.dtype) / 255.0
+                inpaint_video[0, :, frame_idx] = tensor
+                inpaint_mask[0, :, frame_idx] = 0
+            print(f"[MULTI CONTROL] sparse known frames="
+                  f"{sorted(int(k) for k in keyframe_images)} "
+                  f"(mask=0 known, mask=255 generate)", flush=True)
         # Optional independent reference for random-reference-frame experiments.
         # Only affects add_ref_conv; does NOT create an inpaint keyframe.
         if reference_image is not None:
