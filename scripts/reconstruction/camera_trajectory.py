@@ -223,7 +223,8 @@ def plan_trajectories(extrinsics, *, extra=False, extra_pitch_deg=5.0,
 
 def plan_roundtrip_trajectories(extrinsics, *, center_index=0,
                                 target_indices=(1, 2), view_num=81,
-                                pitch_deg=10.0):
+                                pitch_deg=10.0, elevation_profile="plateau",
+                                edge_ramp=0.2):
     """Two closed 81-frame trajectories B->A->B and B->C->B.
 
     Exact DA3 input W2C at frames (0, midpoint, end). Use spherical
@@ -237,6 +238,10 @@ def plan_roundtrip_trajectories(extrinsics, *, center_index=0,
         raise ValueError("Roundtrip mode requires distinct B/A/C indices spanning exactly 3 input views")
     if view_num < 5 or (view_num - 1) % 4:
         raise ValueError("Roundtrip Wan frame count must be 4n+1")
+    if elevation_profile not in ("plateau", "sine"):
+        raise ValueError(f"Invalid elevation profile: {elevation_profile}")
+    if not 0.05 <= edge_ramp <= 0.5:
+        raise ValueError("edge_ramp must lie in [0.05,0.5]")
     origin = _estimate_center(_centers(poses), poses[:, 2, :3])
     up = _estimate_scene_up(poses)
     centers = _centers(poses)
@@ -247,6 +252,14 @@ def plan_roundtrip_trajectories(extrinsics, *, center_index=0,
 
     def smooth(t):
         return t*t*(3-2*t)
+
+    def elevation_envelope(u):
+        if elevation_profile == "sine":
+            return float(np.sin(np.pi*u)**2)  # previous behavior
+        # C1-continuous ramps; near each target-side corner hold nearly
+        # full height until the final edge_ramp fraction of a segment.
+        return smooth(min(u / edge_ramp, 1.0)) * smooth(
+            min((1.0-u) / edge_ramp, 1.0))
 
     def slerp_unit(x, y, t):
         dot = float(np.clip(np.dot(x, y), -1, 1))
@@ -274,7 +287,7 @@ def plan_roundtrip_trajectories(extrinsics, *, center_index=0,
             t = smooth(u)
             d = slerp_unit(src, dst, t)
             d = unit(d + sign*np.tan(np.deg2rad(pitch_deg)) *
-                     np.sin(np.pi*u)**2 * up)
+                     elevation_envelope(u) * up)
             c = origin + ((1-t)*r0 + t*r1)*d
             out[i] = _look_at(c, origin, up)
         anchors = (0, mid, view_num-1)
@@ -304,6 +317,8 @@ def plan_roundtrip_trajectories(extrinsics, *, center_index=0,
         "center_index": int(center_index),
         "target_indices": list(map(int, target_indices)),
         "pitch_deg": float(pitch_deg),
+        "elevation_profile": elevation_profile,
+        "edge_ramp": float(edge_ramp),
         "trajectory_count": 2,
     }
 
