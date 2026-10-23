@@ -89,6 +89,9 @@ def run_trajectory_videos(*, reconstruction_dir, source_images, generator,
         if not control_video.is_file():
             raise FileNotFoundError(f"Missing per-trajectory GS control video: {control_video}")
         start_index, end_index = int(item["start_index"]), int(item["end_index"])
+        reference_index = int(item.get("reference_index", end_index))
+        if not 0 <= reference_index < len(sources):
+            raise IndexError(f"Invalid reference view for {stem}: {reference_index}")
         if not (0 <= start_index < len(sources) and 0 <= end_index < len(sources)):
             raise IndexError(f"Input image indices invalid for {stem}")
         target = generated_root / stem
@@ -112,6 +115,7 @@ def run_trajectory_videos(*, reconstruction_dir, source_images, generator,
                 control_video=str(control_video),
                 start_image=str(sources[start_index]),
                 end_image=str(sources[end_index]),
+                reference_image=str(sources[reference_index]),
                 output_video=str(output_video),
                 prompt=str(prompt),
                 num_frames=int(len(poses)),
@@ -133,6 +137,7 @@ def run_trajectory_videos(*, reconstruction_dir, source_images, generator,
             "save_mp4": bool(save_mp4),
             "pose_file": str(poses_path),
             "start_image": str(sources[start_index]), "end_image": str(sources[end_index]),
+            "reference_image": str(sources[reference_index]),
             "control_video": str(control_video),
         })
         (generated_root / "manifest.json").write_text(
