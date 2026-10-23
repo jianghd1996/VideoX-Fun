@@ -471,8 +471,13 @@ def render(args, output):
     # Order is important: local DA3 is resolved before multistage_pipeline
     # can import and cache the wrong package.
     from depth_anything_3.utils.export.gs import export_to_gs_video
+    import depth_anything_3.utils.export.gs as local_gs
     from multistage_pipeline import create_da3
     from camera_trajectory import _w2c44
+    gs_path = Path(local_gs.__file__).resolve()
+    if not gs_path.is_relative_to(root):
+        raise RuntimeError(f"GS renderer imported outside DA3_custom: {gs_path}")
+    print(f"[BAB DA3 SOURCE] export_to_gs_video={gs_path}", flush=True)
 
     images = sorted((args.case / "reconstruction" / "da3_input").glob("*.jpg"))
     if len(images) != 3:
