@@ -196,9 +196,36 @@ class MultiImagePipeline:
         self.mode = mode
         self.circle = bool(circle)
         self.max_frames = int(max_frames)
-        for import_root in (root / "src", root):
-            if str(import_root) not in sys.path:
-                __import__("sys").path.insert(0, str(import_root))
+        # DA3_custom must always win over an unrelated pip/SingleRecon
+        # installation. Namespace packages otherwise silently merge paths.
+        local_gs = root / "src" / "depth_anything_3" / "utils" / "export" / "gs.py"
+        local_wrapper = root / "DA3" / "run_da3_full_crop_dev.py"
+        if not local_gs.is_file() or not local_wrapper.is_file():
+            raise FileNotFoundError(
+                f"Required DA3_custom local sources missing: {local_gs}, {local_wrapper}")
+        for import_root in (root, root / "src"):
+            if str(import_root) in sys.path:
+                sys.path.remove(str(import_root))
+            sys.path.insert(0, str(import_root))
+        import importlib
+        importlib.invalidate_caches()
+        for name, module in tuple(sys.modules.items()):
+            if name == "depth_anything_3" or name.startswith("depth_anything_3."):
+                mod_file = getattr(module, "__file__", None)
+                if mod_file and not Path(mod_file).resolve().is_relative_to(root):
+                    raise RuntimeError(f"Nonlocal DA3 module already loaded: {name}={mod_file}")
+        import depth_anything_3
+        package_root = (root / "src" / "depth_anything_3").resolve()
+        if getattr(depth_anything_3, "__file__", None) is None:
+            depth_anything_3.__path__ = [str(package_root)]
+            depth_anything_3.__spec__.submodule_search_locations = [str(package_root)]
+        if list(Path(p).resolve() for p in depth_anything_3.__path__) != [package_root]:
+            raise RuntimeError(
+                f"Refusing nonlocal DA3 package paths: {list(depth_anything_3.__path__)}")
+        import depth_anything_3.utils.export.gs as actual_gs
+        if Path(actual_gs.__file__).resolve() != local_gs.resolve():
+            raise RuntimeError(f"Wrong GS renderer: {actual_gs.__file__}")
+        print(f"[MULTI DA3 SOURCE] {actual_gs.__file__}", flush=True)
         start = time.perf_counter()
         self.da3 = da3_instance if da3_instance is not None else create_da3(
             root, Path(da3_model_path) if da3_model_path else None)
