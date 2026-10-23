@@ -68,7 +68,7 @@ class MultiImagePipeline:
                  roundtrip_center_index: int = 0,
                  roundtrip_target_indices: tuple[int, int] = (1, 2),
                  roundtrip_pitch_deg: float = 10.0,
-                 roundtrip_elevation_profile: str = "plateau",
+                 roundtrip_elevation_profile: str = "broad_sine",
                  roundtrip_edge_ramp: float = 0.2,
                  run_gen_video: bool = False,
                  video_adapter: str | None = None,
