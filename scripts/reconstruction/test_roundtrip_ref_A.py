@@ -216,12 +216,41 @@ def diagnose_da3_gaussians(prediction, poses, images, output):
     extr = torch.from_numpy(poses).to(means).unsqueeze(0)
     intr = torch.from_numpy(Ks).to(means).unsqueeze(0)
     with torch.inference_mode():
-        color, depth = run_renderer_in_chunk_w_trj_mode(
+        rendered = run_renderer_in_chunk_w_trj_mode(
             gaussians=gs, extrinsics=extr, intrinsics=intr,
             image_shape=tuple(np.asarray(prediction.depth).shape[-2:]),
             chunk_size=3, trj_mode="original",
             use_sh=True, color_mode="RGB+ED", enable_tqdm=False,
         )
+    # Different DA3 forks return (color, depth), (color, depth, extras),
+    # or a mapping. Inspect without unpacking away additional values.
+    if isinstance(rendered, (tuple, list)):
+        if len(rendered) < 2:
+            raise RuntimeError(f"GS renderer returned only {len(rendered)} outputs")
+        color, depth = rendered[:2]
+        extra_desc = [tuple(x.shape) if isinstance(x, torch.Tensor) else type(x).__name__
+                      for x in rendered[2:]]
+        print(f"[BAB GS DIAG] renderer returned {len(rendered)} items; "
+              f"extras={extra_desc}", flush=True)
+    elif isinstance(rendered, dict):
+        color = rendered.get("color", rendered.get("colors"))
+        depth = rendered.get("depth", rendered.get("depths"))
+        print(f"[BAB GS DIAG] renderer dictionary keys={list(rendered)}", flush=True)
+    else:
+        raise TypeError(f"Unexpected GS renderer return type: {type(rendered).__name__}")
+    if not isinstance(color, torch.Tensor) or not isinstance(depth, torch.Tensor):
+        raise TypeError(f"Renderer color/depth must be tensors; "
+                        f"got {type(color).__name__}/{type(depth).__name__}")
+    print(f"[BAB GS DIAG] renderer color={tuple(color.shape)} "
+          f"depth={tuple(depth.shape)}", flush=True)
+    if color.ndim != 5 or color.shape[:3] != (1, len(images), 3):
+        raise ValueError(f"Expected renderer color [1,{len(images)},3,H,W], "
+                         f"got {tuple(color.shape)}")
+    if depth.ndim == 5 and depth.shape[2] == 1:
+        depth = depth[:, :, 0]
+    if depth.ndim != 4 or depth.shape[:2] != (1, len(images)):
+        raise ValueError(f"Expected depth [1,{len(images)},H,W], "
+                         f"got {tuple(depth.shape)}")
     rgb_batch = color[0].detach().clamp(0, 1).mul(255).byte().cpu().numpy()
     depth_batch = depth[0].detach().float().cpu().numpy()
     records = []
