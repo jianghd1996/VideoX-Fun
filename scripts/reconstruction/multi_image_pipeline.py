@@ -611,6 +611,9 @@ class MultiImagePipeline:
                         timings["video_inference"] = round(sum(
                             float(item.get("inference_timing", {}).get("inference", 0))
                             for item in value), 3)
+                        timings["video_text_encode_sum"] = round(sum(
+                            float(item.get("inference_timing", {}).get("text_encode", 0))
+                            for item in value), 6)
                         timings["video_text_condition_prepare_sum"] = round(sum(
                             float(item.get("inference_timing", {}).get("text_condition_prepare", 0))
                             for item in value), 6)
