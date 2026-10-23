@@ -182,6 +182,110 @@ def _gs_writer_mode(mode, output_path, expected_frames):
         VideoClip.write_videofile = original
 
 
+
+def diagnose_da3_gaussians(prediction, poses, images, output):
+    """Render ALL original DA3 input cameras directly, independent of BAB video.
+
+    Detect whether Gaussian geometry lacks an input viewpoint before debugging
+    camera interpolation or Wan. Same renderer and same metric-scale convention
+    as export_to_gs_video. Saves images and a compact JSON summary.
+    """
+    import cv2
+    import torch
+    from depth_anything_3.model.utils.gs_renderer import run_renderer_in_chunk_w_trj_mode
+
+    folder = output / "gs_diagnostics"
+    folder.mkdir(parents=True, exist_ok=True)
+    gs = prediction.gaussians
+    shapes = {}
+    for name in ("means", "scales", "rotations", "opacities", "harmonics"):
+        x = getattr(gs, name, None)
+        shapes[name] = list(x.shape) if x is not None else None
+    depth_shape = list(np.asarray(prediction.depth).shape)
+    print(f"[BAB GS DIAG] inputs={len(images)} depth={depth_shape} "
+          f"gaussians={shapes} is_metric={prediction.is_metric} "
+          f"scale_factor={prediction.scale_factor}", flush=True)
+
+    poses = np.asarray(poses)
+    Ks = np.asarray(prediction.intrinsics)
+    means = gs.means
+    # render input viewpoints in one scene, not 3 scene batches
+    if means.shape[0] != 1:
+        print(f"[BAB GS DIAG WARNING] Gaussian scene batch={means.shape[0]} (expected 1); "
+              "renderer treats each batch element as a separate scene", flush=True)
+    extr = torch.from_numpy(poses).to(means).unsqueeze(0)
+    intr = torch.from_numpy(Ks).to(means).unsqueeze(0)
+    with torch.inference_mode():
+        color, depth = run_renderer_in_chunk_w_trj_mode(
+            gaussians=gs, extrinsics=extr, intrinsics=intr,
+            image_shape=tuple(np.asarray(prediction.depth).shape[-2:]),
+            chunk_size=3, trj_mode="original",
+            use_sh=True, color_mode="RGB+ED", enable_tqdm=False,
+        )
+    rgb_batch = color[0].detach().clamp(0, 1).mul(255).byte().cpu().numpy()
+    depth_batch = depth[0].detach().float().cpu().numpy()
+    records = []
+    panels = []
+    for i, source in enumerate(images):
+        # Render tensor format [V,3,H,W], save with the same color orientation
+        # as export_to_gs_video.
+        render_rgb = np.transpose(rgb_batch[i], (1, 2, 0))
+        render_bgr = cv2.cvtColor(render_rgb, cv2.COLOR_RGB2BGR)
+        render_path = folder / f"view_{i}_gs.png"
+        cv2.imwrite(str(render_path), render_bgr)
+
+        gt_bgr = cv2.imread(str(source))
+        if gt_bgr is None:
+            raise RuntimeError(f"Cannot read source image {source}")
+        h, w = render_bgr.shape[:2]
+        gt_bgr = cv2.resize(gt_bgr, (w, h), interpolation=cv2.INTER_LINEAR)
+        cv2.imwrite(str(folder / f"view_{i}_input.png"), gt_bgr)
+        absdiff = cv2.absdiff(gt_bgr, render_bgr)
+        cv2.imwrite(str(folder / f"view_{i}_diff_x3.png"),
+                    np.minimum(absdiff.astype(np.uint16) * 3, 255).astype(np.uint8))
+        mse = float(np.mean((gt_bgr.astype(np.float32) -
+                             render_bgr.astype(np.float32)) ** 2))
+        psnr = float(10 * np.log10(255.0**2 / max(mse, 1e-12)))
+        depth_i = np.asarray(depth_batch[i])
+        finite_depth = np.isfinite(depth_i)
+        positive_depth = finite_depth & (depth_i > 1e-5)
+        black = (np.max(render_rgb, axis=-1) <= 5)
+        metric = {
+            "view": i,
+            "source": str(source),
+            "psnr_db": round(psnr, 3),
+            "near_black_fraction": round(float(black.mean()), 5),
+            "positive_depth_fraction": round(float(positive_depth.mean()), 5),
+            "gs_file": str(render_path),
+        }
+        records.append(metric)
+        print(f"[BAB GS DIAG] view={i}: psnr={psnr:.2f}dB "
+              f"near_black={metric['near_black_fraction']:.1%} "
+              f"valid_depth={metric['positive_depth_fraction']:.1%}", flush=True)
+        scale = min(1, 480 / max(w, 1))
+        tile_size = (int(w * scale), int(h * scale))
+        pair = np.hstack([cv2.resize(gt_bgr, tile_size),
+                          cv2.resize(render_bgr, tile_size)])
+        cv2.putText(pair, f"View {i}: input | GS", (15, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        panels.append(pair)
+    if panels:
+        cv2.imwrite(str(folder / "comparison.jpg"), np.vstack(panels),
+                    [cv2.IMWRITE_JPEG_QUALITY, 95])
+    data = {
+        "input_count": len(images), "gaussian_shapes": shapes,
+        "depth_shape": depth_shape, "is_metric": bool(prediction.is_metric),
+        "scale_factor": (float(prediction.scale_factor)
+                         if prediction.scale_factor is not None else None),
+        "views": records,
+        "caution": "Near-black fraction includes genuinely black objects and is only a proxy for missing geometry.",
+    }
+    (folder / "diagnostics.json").write_text(
+        json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"[BAB GS DIAG] comparison={folder / 'comparison.jpg'}", flush=True)
+    return data
+
+
 def render(args, output):
     import torch
     from multistage_pipeline import create_da3
@@ -206,6 +310,10 @@ def render(args, output):
     camera_poses = _w2c44(np.asarray(prediction.extrinsics).copy())
     if prediction.is_metric and prediction.scale_factor is not None:
         camera_poses[:, :3, 3] /= float(prediction.scale_factor)
+    diagnose_da3_gaussians(prediction, camera_poses, images, output)
+    if args.phase == "diagnose":
+        print("[BAB GS DIAG] geometry-only diagnosis finished, skipping BAB video and Wan", flush=True)
+        return
     poses = plan_roundtrip(camera_poses, args.a_index, args.b_index,
                            args.pitch_deg, args.frames)
     np.save(output / "poses.npy", poses)
@@ -365,7 +473,8 @@ def main():
     p.add_argument("--rerender", action="store_true")
     p.add_argument("--gs-writer", choices=("opencv", "moviepy"), default="opencv",
                    help="Writer for DA3 GS control; OpenCV avoids ffmpeg subprocess BrokenPipe")
-    p.add_argument("--phase", choices=("all","render","wan"), default="all", help=argparse.SUPPRESS)
+    p.add_argument("--phase", choices=("all","render","wan","diagnose"), default="all",
+                   help="all/render/wan/diagnose; diagnose runs DA3 and renders 3 original GS views only")
     args = p.parse_args()
     args.case = args.case.expanduser().resolve()
     if args.frames < 5 or (args.frames - 1) % 4:
@@ -393,7 +502,7 @@ def main():
         # subprocess. Passing it through trips the direct-Wan safety check.
         wan_args = [arg for arg in provided if arg != "--rerender"]
         subprocess.run(base + wan_args + ["--phase", "wan"], env=env, check=True)
-    elif args.phase == "render":
+    elif args.phase in ("render", "diagnose"):
         render(args, output)
     else:
         if not (output / "control.mp4").is_file():
