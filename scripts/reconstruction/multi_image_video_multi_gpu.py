@@ -58,6 +58,7 @@ def _worker(gpu_id, video_code_root, adapter_spec, environment, tasks, events):
                     control_video=item["control_video"],
                     start_image=item["start_image"],
                     end_image=item["end_image"],
+                    reference_image=item["reference_image"],
                     output_video=item["video"],
                     prompt=item["prompt"], num_frames=item["frames"], fps=item["fps"],
                     sampled_frame_indices=item["sampled_frame_indices"],
@@ -219,6 +220,9 @@ def run_trajectory_videos_multi_gpu(*, reconstruction_dir, source_images,
         if poses.shape != (n, 4, 4):
             raise ValueError(f"Trajectory {name} poses {poses.shape}, expected {(n, 4, 4)}")
         a, b = int(item["start_index"]), int(item["end_index"])
+        ref = int(item.get("reference_index", b))
+        if not 0 <= ref < len(sources):
+            raise IndexError(f"Invalid reference view for {name}: {ref}")
         if not 0 <= a < len(sources) or not 0 <= b < len(sources):
             raise IndexError(f"Invalid input view indexes for {name}: {a}->{b}")
         control = root / "trajectories" / "gs_video" / f"{name}.mp4"
@@ -232,6 +236,7 @@ def run_trajectory_videos_multi_gpu(*, reconstruction_dir, source_images,
             "name": name, "video": str(dest), "frames": n,
             "start_index": a, "end_index": b,
             "start_image": str(sources[a]), "end_image": str(sources[b]),
+            "reference_image": str(sources[ref]),
             "control_video": str(control), "pose_file": str(pose_file),
             "sampled_frame_indices": selected, "sampled_frames_dir": str(frame_dir),
             "save_mp4": bool(save_mp4),
