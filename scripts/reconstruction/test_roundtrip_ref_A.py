@@ -76,6 +76,31 @@ def plan_roundtrip(extrinsics, a_index, b_index, pitch_deg, frame_count=81):
         radius = (1 - t) * r0 + t * r1
         camera_center = center + radius * direction
         out[i] = _look_at(camera_center, center, up)
+    # The raw look-at orientation differs slightly from DA3's true camera
+    # orientation. Simply overwriting frames 0/mid/last creates an abrupt
+    # rotation at 0->1, mid-1->mid->mid+1 and last-1->last. Correct the
+    # ENTIRE path's rotations, interpolating SO(3) anchor residuals with
+    # zero velocity at anchors. Keep spherical positions unchanged.
+    from scipy.spatial.transform import Rotation
+    anchors = (0, mid, frame_count - 1)
+    source_indices = (b_index, a_index, b_index)
+    residual = [
+        Rotation.from_matrix(poses[src, :3, :3] @ out[frame, :3, :3].T)
+        for frame, src in zip(anchors, source_indices)
+    ]
+    for seg in range(2):
+        lo, hi = anchors[seg], anchors[seg + 1]
+        start, end = residual[seg], residual[seg + 1]
+        # Lie-group interpolation. End-to-end relative rotation is smooth
+        # because the derivative of smoothstep is zero at each anchor.
+        relative = start.inv() * end
+        rotvec = relative.as_rotvec()
+        for i in range(lo, hi + 1):
+            u = (i - lo) / (hi - lo)
+            corr = start * Rotation.from_rotvec(_smoothstep(u) * rotvec)
+            out[i, :3, :3] = corr.as_matrix() @ out[i, :3, :3]
+    # Force exact poses for camera intrinsic/pose alignment at real frames.
+    # They now agree with the interpolation up to floating point precision.
     out[0] = poses[b_index]
     out[mid] = poses[a_index]
     out[-1] = poses[b_index]
@@ -494,6 +519,18 @@ def render(args, output):
     poses = plan_roundtrip(camera_poses, args.a_index, args.b_index,
                            args.pitch_deg, args.frames)
     np.save(output / "poses.npy", poses)
+    # Report W2C per-frame angular changes and position steps. Large spikes at
+    # A/B anchors indicate remaining discontinuities rather than GS holes.
+    from scipy.spatial.transform import Rotation
+    rotations = Rotation.from_matrix(poses[:, :3, :3])
+    angular = (rotations[:-1].inv() * rotations[1:]).magnitude() * (180 / np.pi)
+    camera_centers = -np.einsum("nji,nj->ni", poses[:, :3, :3], poses[:, :3, 3])
+    distances = np.linalg.norm(np.diff(camera_centers, axis=0), axis=1)
+    print(f"[BAB POSE] angular max={angular.max():.3f}deg "
+          f"p95={np.percentile(angular,95):.3f}deg, "
+          f"max_step={int(np.argmax(angular))}->{int(np.argmax(angular))+1}; "
+          f"translation max={distances.max():.6f} "
+          f"p95={np.percentile(distances,95):.6f}", flush=True)
     mid = (args.frames - 1) // 2
     Ka = np.asarray(prediction.intrinsics[args.a_index], dtype=np.float32)
     Kb = np.asarray(prediction.intrinsics[args.b_index], dtype=np.float32)
