@@ -459,6 +459,9 @@ def prepare_dense_input(*, reconstruction_dir, sample_count=80, source_images=No
         start_index, end_index = int(item["start_index"]), int(item["end_index"])
         a = _camera_fx_fy_cx_cy(cameras[name_to_camera[normalized[start_index].name]])
         b = _camera_fx_fy_cx_cy(cameras[name_to_camera[normalized[end_index].name]])
+        ref = (_camera_fx_fy_cx_cy(
+            cameras[name_to_camera[normalized[int(item["reference_index"])].name]])
+               if "reference_index" in item else None)
         selected_files = [Path(item.get("sampled_frames_dir", video.parent / "sampled_frames")) /
                           f"f{int(frame):04d}.jpg" for frame in selected]
         direct_available = all(p.is_file() and p.stat().st_size > 0 for p in selected_files)
@@ -501,9 +504,13 @@ def prepare_dense_input(*, reconstruction_dir, sample_count=80, source_images=No
             frame_index = int(frame_index)
             frame = selected_frames[frame_index]
             h, w = frame.shape[:2]
-            alpha = frame_index / (len(poses) - 1)
+            alpha = (min(frame_index, len(poses)-1-frame_index) /
+                     ((len(poses)-1)//2) if ref is not None
+                     else frame_index / (len(poses)-1))
             ka = np.array([a[0]*w/a[4], a[1]*h/a[5], a[2]*w/a[4], a[3]*h/a[5]])
-            kb = np.array([b[0]*w/b[4], b[1]*h/b[5], b[2]*w/b[4], b[3]*h/b[5]])
+            dst = ref if ref is not None else b
+            kb = np.array([dst[0]*w/dst[4], dst[1]*h/dst[5],
+                           dst[2]*w/dst[4], dst[3]*h/dst[5]])
             fx, fy, cx, cy = (1-alpha)*ka + alpha*kb
             last_camera_id += 1
             cameras[last_camera_id] = (1, w, h, (float(fx), float(fy), float(cx), float(cy)))
