@@ -315,6 +315,62 @@ def diagnose_da3_gaussians(prediction, poses, images, output):
     return data
 
 
+def _count_decoded_frames(video_path):
+    import cv2
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open control video: {video_path}")
+    count = 0
+    try:
+        while True:
+            ok, _ = cap.read()
+            if not ok:
+                break
+            count += 1
+    finally:
+        cap.release()
+    return count
+
+
+def _encode_vscode_compatible_control(control_mp4, expected_frames, codec="h264"):
+    """Re-encode OpenCV mp4v to browser/VS Code-compatible H.264 yuv420p.
+
+    Encode to a sibling temporary MP4 and replace the source ONLY after all
+    frames can be decoded. Does not rerender GS or alter camera-frame indexing.
+    """
+    if codec == "mp4v":
+        return
+    if codec != "h264":
+        raise ValueError(f"Unknown control codec: {codec}")
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise RuntimeError("ffmpeg not found. Install ffmpeg or use --control-codec mp4v")
+    source = Path(control_mp4)
+    if not source.is_file():
+        raise FileNotFoundError(source)
+    temporary = source.with_name(source.stem + ".h264_tmp.mp4")
+    if temporary.exists():
+        temporary.unlink()
+    cmd = [
+        ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+        "-i", str(source), "-map", "0:v:0", "-an", "-sn",
+        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+        "-pix_fmt", "yuv420p", "-frames:v", str(expected_frames),
+        "-movflags", "+faststart", str(temporary),
+    ]
+    print("[ABLATION A] encoding control.mp4 as H.264/yuv420p for VS Code", flush=True)
+    try:
+        subprocess.run(cmd, check=True)
+        actual = _count_decoded_frames(temporary)
+        if actual != expected_frames:
+            raise RuntimeError(f"H.264 encoded control has {actual} frames, expected {expected_frames}")
+        temporary.replace(source)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    print(f"[ABLATION A] H.264 control ready ({expected_frames} frames): {source}", flush=True)
+
+
 def render(args, output):
     import torch
     from multistage_pipeline import create_da3
@@ -374,20 +430,11 @@ def render(args, output):
         shutil.copy2(src, control_mp4)
     if not control_mp4.is_file() or control_mp4.stat().st_size == 0:
         raise RuntimeError(f"Control video was not created: {control_mp4}")
-    import cv2
-    reader = cv2.VideoCapture(str(control_mp4))
-    actual = 0
-    try:
-        while True:
-            ok, _ = reader.read()
-            if not ok:
-                break
-            actual += 1
-    finally:
-        reader.release()
+    actual = _count_decoded_frames(control_mp4)
     if actual != args.frames:
         raise RuntimeError(f"Control must have exactly {args.frames} decoded frames, got {actual}; "
                            "rerun with --gs-writer opencv --rerender")
+    _encode_vscode_compatible_control(control_mp4, args.frames, args.control_codec)
     (output / "experiment.json").write_text(json.dumps({
         "experiment": "A", "trajectory": "B->A->B",
         "input_images": [str(x) for x in images],
@@ -395,6 +442,7 @@ def render(args, output):
         "fixed_frames": {"0": "B", str(mid): "NOT_FIXED", str(args.frames-1): "B"},
         "reference_image": "A", "pitch_deg": args.pitch_deg,
         "frames": args.frames, "gs_writer": args.gs_writer,
+        "control_codec": args.control_codec,
         "render_seconds": round(time.perf_counter()-started, 3),
         "note": "Frame mid pose is precisely A but its pixels are NOT in the condition.",
     }, ensure_ascii=False, indent=2))
@@ -500,10 +548,12 @@ def main():
     p.add_argument("--lightvae", default=str(HERE / "Cloud_Models/transformer_w_skybox_sla/MG-LightVAE.pth"))
     p.add_argument("--teacher-vae", default=str(HERE / "Cloud_Models/Wan2.2-TI2V-5B/Wan2.2_VAE.pth"))
     p.add_argument("--rerender", action="store_true")
+    p.add_argument("--control-codec", choices=("h264", "mp4v"), default="h264",
+                   help="Final control.mp4 encoding; H.264/yuv420p plays in VS Code")
     p.add_argument("--gs-writer", choices=("opencv", "moviepy"), default="opencv",
                    help="Writer for DA3 GS control; OpenCV avoids ffmpeg subprocess BrokenPipe")
-    p.add_argument("--phase", choices=("all","render","wan","diagnose"), default="all",
-                   help="all/render/wan/diagnose; diagnose runs DA3 and renders 3 original GS views only")
+    p.add_argument("--phase", choices=("all","render","wan","diagnose","transcode"), default="all",
+                   help="all/render/wan/diagnose/transcode; transcode only converts existing control.mp4")
     args = p.parse_args()
     args.case = args.case.expanduser().resolve()
     if args.frames < 5 or (args.frames - 1) % 4:
@@ -533,6 +583,8 @@ def main():
         subprocess.run(base + wan_args + ["--phase", "wan"], env=env, check=True)
     elif args.phase in ("render", "diagnose"):
         render(args, output)
+    elif args.phase == "transcode":
+        _encode_vscode_compatible_control(output / "control.mp4", args.frames, args.control_codec)
     else:
         if not (output / "control.mp4").is_file():
             raise FileNotFoundError(output / "control.mp4")
