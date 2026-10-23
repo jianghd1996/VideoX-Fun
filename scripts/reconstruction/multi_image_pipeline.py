@@ -83,6 +83,7 @@ class MultiImagePipeline:
                  video_preload_workers: bool = True,
                  video_cpu_threads: int = 16,
                  video_positive_prompt: str = "",
+                 video_prompt_embeds_path: str | Path | None = None,
                  video_save_mp4: bool = True,
                  run_captioner: bool = True,
                  captioner_code_root: str | Path | None = None,
@@ -103,6 +104,12 @@ class MultiImagePipeline:
         self.run_gen_video = bool(run_gen_video)
         self.video_fps = int(video_fps)
         self.video_positive_prompt = str(video_positive_prompt)
+        self.video_prompt_embeds_path = (str(Path(video_prompt_embeds_path).expanduser().resolve())
+                                         if video_prompt_embeds_path else None)
+        if self.video_prompt_embeds_path and not Path(self.video_prompt_embeds_path).is_file():
+            raise FileNotFoundError(f"Precomputed Wan text embedding not found: {self.video_prompt_embeds_path}")
+        if self.video_prompt_embeds_path and video_positive_prompt:
+            raise ValueError("Precomputed prompt embeds cannot be combined with video_positive_prompt")
         self.video_save_mp4 = bool(video_save_mp4)
         self.video_cpu_threads = int(video_cpu_threads)
         if self.video_cpu_threads < 1:
@@ -130,6 +137,7 @@ class MultiImagePipeline:
             "SINGLERECON_CONTROL_LORA_PATH": str(Path(video_lora_path).expanduser().resolve()) if video_lora_path else "",
             "SINGLERECON_CONTROL_LORA_WEIGHT": str(float(video_lora_weight)),
             "SINGLERECON_CONTROL_CFG": str(float(video_cfg)),
+            "SINGLERECON_CONTROL_PROMPT_EMBEDS_PATH": self.video_prompt_embeds_path or "",
             "SINGLERECON_CONTROL_SHORT_EDGE": str(int(video_short_edge)),
             "SINGLERECON_CONTROL_USE_LIGHTVAE": "1" if video_use_lightvae else "0",
             "SINGLERECON_CONTROL_LIGHTVAE_PATH": str(
@@ -603,6 +611,12 @@ class MultiImagePipeline:
                         timings["video_inference"] = round(sum(
                             float(item.get("inference_timing", {}).get("inference", 0))
                             for item in value), 3)
+                        timings["video_text_condition_prepare_sum"] = round(sum(
+                            float(item.get("inference_timing", {}).get("text_condition_prepare", 0))
+                            for item in value), 6)
+                        timings["video_text_embed_load_per_worker"] = max(
+                            (float(item.get("inference_timing", {}).get("text_embed_load_once", 0))
+                             for item in value), default=0.0)
                         timings["video_save_jpg_sum"] = round(sum(
                             float(item.get("inference_timing", {}).get("save_jpg", 0))
                             for item in value), 3)
