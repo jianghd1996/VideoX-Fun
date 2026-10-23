@@ -202,6 +202,26 @@ def diagnose_da3_gaussians(prediction, poses, images, output):
         x = getattr(gs, name, None)
         shapes[name] = list(x.shape) if x is not None else None
     depth_shape = list(np.asarray(prediction.depth).shape)
+    # DA3 variants may retain the full tensor shape after internally selecting
+    # a subset of views. Per-view Gaussian block stats help detect empty or
+    # repeated blocks that aggregate counts alone cannot expose.
+    pixels_per_view = int(np.prod(depth_shape[-2:]))
+    if gs.means.shape[1] == len(images) * pixels_per_view:
+        for view_idx in range(len(images)):
+            sl = slice(view_idx*pixels_per_view, (view_idx+1)*pixels_per_view)
+            v_means = gs.means[0, sl].detach().float()
+            v_opacity = gs.opacities[0, sl].detach().float()
+            finite = torch.isfinite(v_means).all(dim=-1)
+            print(f"[BAB GS BLOCK] view={view_idx} count={pixels_per_view} "
+                  f"finite_means={finite.float().mean().item():.3f} "
+                  f"mean_xyz={v_means.nan_to_num().mean(dim=0).tolist()} "
+                  f"xyz_std={v_means.nan_to_num().std(dim=0).tolist()} "
+                  f"opacity_mean={v_opacity.nan_to_num().mean().item():.6f} "
+                  f"opacity_range=({v_opacity.nan_to_num().min().item():.4f},"
+                  f"{v_opacity.nan_to_num().max().item():.4f})", flush=True)
+    else:
+        print(f"[BAB GS BLOCK] No contiguous per-view block assumption: "
+              f"N={gs.means.shape[1]} versus {len(images)}*{pixels_per_view}", flush=True)
     print(f"[BAB GS DIAG] inputs={len(images)} depth={depth_shape} "
           f"gaussians={shapes} is_metric={prediction.is_metric} "
           f"scale_factor={prediction.scale_factor}", flush=True)
