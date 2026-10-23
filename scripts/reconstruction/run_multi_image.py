@@ -30,6 +30,10 @@ CONFIG = {
     "render_trajectories": True,
     "trajectory_extra": False,
     "trajectory_view_num": 49,  # 49-frame speed/quality ablation; use --trajectory-frames 81 for baseline
+    "trajectory_mode": "four_paths",  # switch with --roundtrip-bab-bcb
+    "roundtrip_center_index": 0,
+    "roundtrip_target_indices": [1, 2],
+    "roundtrip_pitch_deg": 10.0,
     "trajectory_interpolation": "bezier",  # Keep fixed until E2E pipeline works
     "run_gen_video": True,
     "run_captioner": False,  # no caption model; positive prompt defaults to empty
@@ -72,6 +76,12 @@ def main() -> None:
     parser.add_argument("--da3-only", action="store_true")
     parser.add_argument("--trajectory-frames", type=int,
                         help="Frames per GS/Wan trajectory (4n+1), default 49 for this ablation")
+    parser.add_argument("--roundtrip-bab-bcb", action="store_true",
+                        help="Two smooth 81-frame BAB and BCB loops; B is center index")
+    parser.add_argument("--roundtrip-center-index", type=int, default=0)
+    parser.add_argument("--roundtrip-target-indices", type=str, default="1,2",
+                        help="A and C indices in sorted normalized input images")
+    parser.add_argument("--roundtrip-pitch-deg", type=float, default=10.0)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--no-save-mp4", action="store_true",
                         help="Skip full generated MP4; still save pose-selected JPGs from Wan tensor")
@@ -91,6 +101,18 @@ def main() -> None:
         opts.update(json.loads(args.config.read_text(encoding="utf-8")))
     if args.trajectory_frames is not None:
         opts["trajectory_view_num"] = args.trajectory_frames
+    if args.roundtrip_bab_bcb:
+        opts["trajectory_mode"] = "roundtrip_bab_bcb"
+        opts["trajectory_view_num"] = args.trajectory_frames or 81
+        opts["roundtrip_center_index"] = args.roundtrip_center_index
+        try:
+            opts["roundtrip_target_indices"] = tuple(
+                int(x.strip()) for x in args.roundtrip_target_indices.split(","))
+        except ValueError:
+            parser.error("--roundtrip-target-indices must be comma-separated integers")
+        opts["roundtrip_pitch_deg"] = args.roundtrip_pitch_deg
+        if sorted([opts["roundtrip_center_index"], *opts["roundtrip_target_indices"]]) != [0,1,2]:
+            parser.error("BAB/BCB requires distinct center and A/C indices [0,1,2]")
     if opts["trajectory_view_num"] < 5 or (opts["trajectory_view_num"] - 1) % 4:
         parser.error("--trajectory-frames must be >= 5 and equal to 4n+1 (e.g. 49 or 81)")
     if args.video_prompt_embeds is not None:
@@ -131,7 +153,8 @@ def main() -> None:
             raise FileExistsError(
                 "Fresh benchmark would reuse/overwrite existing reconstruction. "
                 "Create a separate test case containing only image/: " + ", ".join(collisions))
-    print(f"[BENCHMARK] trajectory_frames={opts['trajectory_view_num']} "
+    print(f"[BENCHMARK] trajectory_mode={opts['trajectory_mode']} "
+          f"trajectory_frames={opts['trajectory_view_num']} "
           f"gpus={opts['video_gpu_ids']} "
           f"worker_cpu_threads={opts['video_cpu_threads']} "
           f"captioner={opts['run_captioner']} positive_prompt={opts['video_positive_prompt']!r} "
