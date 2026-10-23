@@ -288,6 +288,7 @@ def wan(args, output):
     os.environ["SINGLERECON_CONTROL_INFER_STEPS"] = str(args.steps)
     os.environ["SINGLERECON_CONTROL_LORA_PATH"] = ""
     os.environ["SINGLERECON_CONTROL_CFG"] = "0.0"
+    os.environ["SINGLERECON_CONTROL_PROMPT_EMBEDS_PATH"] = ""  # explicitly restore T5 mode
     os.environ["SINGLERECON_CONTROL_SHORT_EDGE"] = str(args.short_edge)
     os.environ["SINGLERECON_CONTROL_USE_LIGHTVAE"] = "1"
     os.environ["SINGLERECON_CONTROL_LIGHTVAE_PATH"] = str(Path(args.lightvae))
