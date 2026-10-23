@@ -223,7 +223,7 @@ def plan_trajectories(extrinsics, *, extra=False, extra_pitch_deg=5.0,
 
 def plan_roundtrip_trajectories(extrinsics, *, center_index=0,
                                 target_indices=(1, 2), view_num=81,
-                                pitch_deg=10.0, elevation_profile="plateau",
+                                pitch_deg=10.0, elevation_profile="broad_sine",
                                 edge_ramp=0.2):
     """Two closed 81-frame trajectories B->A->B and B->C->B.
 
@@ -238,7 +238,7 @@ def plan_roundtrip_trajectories(extrinsics, *, center_index=0,
         raise ValueError("Roundtrip mode requires distinct B/A/C indices spanning exactly 3 input views")
     if view_num < 5 or (view_num - 1) % 4:
         raise ValueError("Roundtrip Wan frame count must be 4n+1")
-    if elevation_profile not in ("plateau", "sine"):
+    if elevation_profile not in ("broad_sine", "plateau", "sine"):
         raise ValueError(f"Invalid elevation profile: {elevation_profile}")
     if not 0.05 <= edge_ramp <= 0.5:
         raise ValueError("edge_ramp must lie in [0.05,0.5]")
@@ -255,7 +255,12 @@ def plan_roundtrip_trajectories(extrinsics, *, center_index=0,
 
     def elevation_envelope(u):
         if elevation_profile == "sine":
-            return float(np.sin(np.pi*u)**2)  # previous behavior
+            return float(np.sin(np.pi*u)**2)  # original narrow peak
+        if elevation_profile == "broad_sine":
+            # Widen elevated corner coverage without introducing a long
+            # constant-height plateau. Exponent > 1 ensures zero velocity
+            # in pitch at all three anchored DA3 input frames.
+            return float(max(0.0, np.sin(np.pi*u))**1.35)
         # C1-continuous ramps; near each target-side corner hold nearly
         # full height until the final edge_ramp fraction of a segment.
         return smooth(min(u / edge_ramp, 1.0)) * smooth(
