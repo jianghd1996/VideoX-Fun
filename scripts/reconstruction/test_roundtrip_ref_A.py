@@ -391,15 +391,52 @@ def _encode_vscode_compatible_control(control_mp4, expected_frames, codec="h264"
     print(f"[ABLATION A] H.264 control ready ({expected_frames} frames): {source}", flush=True)
 
 
+def _activate_local_da3(root):
+    """Require DA3_custom, never silently use pip-installed depth_anything_3."""
+    import importlib
+    root = Path(root).expanduser().resolve()
+    src = root / "src"
+    candidates = (src / "depth_anything_3" / "__init__.py",
+                  root / "depth_anything_3" / "__init__.py")
+    if not any(p.is_file() for p in candidates):
+        raise FileNotFoundError(
+            f"DA3_custom package missing under {root}; expected one of "
+            f"{[str(p) for p in candidates]}")
+    for folder in (root, src):
+        if folder.is_dir():
+            if str(folder) in sys.path:
+                sys.path.remove(str(folder))
+            sys.path.insert(0, str(folder))
+    # Never delete an existing pip module from sys.modules: fail instead,
+    # so we do not create a mixed environment with incompatible class objects.
+    cached_modules = [
+        (name, Path(getattr(mod, "__file__", "") or "/").resolve())
+        for name, mod in sys.modules.items()
+        if name == "depth_anything_3" or name.startswith("depth_anything_3.")
+    ]
+    wrong = [(name, str(location)) for name, location in cached_modules
+             if not location.is_relative_to(root)]
+    if wrong:
+        raise RuntimeError(
+            f"DA3 imported before local-path setup: {wrong[:6]}. "
+            "Refusing pip/local DA3 mixing. Launch a fresh Python process.")
+    importlib.invalidate_caches()
+    import depth_anything_3
+    resolved = Path(depth_anything_3.__file__).resolve()
+    if not resolved.is_relative_to(root):
+        raise RuntimeError(f"Refusing pip-installed DA3 at {resolved}; "
+                           f"required local DA3 under {root}")
+    print(f"[BAB DA3 SOURCE] package={resolved}; root={root}", flush=True)
+    return root
+
+
 def render(args, output):
     import torch
-    from multistage_pipeline import create_da3
+    root = _activate_local_da3(args.da3_root)
+    # Order is important: local DA3 is resolved before multistage_pipeline
+    # can import and cache the wrong package.
     from depth_anything_3.utils.export.gs import export_to_gs_video
-
-    root = Path(args.da3_root).expanduser().resolve()
-    for path in (root / "src", root):
-        if str(path) not in sys.path:
-            sys.path.insert(0, str(path))
+    from multistage_pipeline import create_da3
     from camera_trajectory import _w2c44
 
     images = sorted((args.case / "reconstruction" / "da3_input").glob("*.jpg"))
