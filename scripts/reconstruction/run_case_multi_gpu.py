@@ -15,6 +15,11 @@ import sys
 import time
 from pathlib import Path
 
+try:
+    from .multistage_pipeline import find_input_image
+except ImportError:
+    from multistage_pipeline import find_input_image
+
 
 WORK_DIR = Path("/home/z00566689/dev/mnt/jiang_test/00_1021_test")
 
@@ -70,10 +75,7 @@ def main():
             prompt_path = case / "prompt.txt"
             if not prompt_path.is_file() or not prompt_path.read_text(encoding="utf-8").strip():
                 raise FileNotFoundError(f"Provide a nonempty {prompt_path}")
-            images = sorted(p for p in (case / "image").iterdir()
-                            if p.suffix.lower() in (".jpg", ".jpeg"))
-            if len(images) != 1:
-                raise ValueError(f"Expected one JPG in {case / 'image'}, got {len(images)}")
+            image_path = find_input_image(case / "image")
 
             dist.barrier()
             output = case / "reconstruction" / "generated.mp4"
@@ -86,7 +88,7 @@ def main():
             torch.cuda.synchronize()
             start = time.perf_counter()
             model.infer(TI2VParams(
-                image_path=str(images[0]), output_path=str(output),
+                image_path=str(image_path), output_path=str(output),
                 view_num=args.frames, num_inference_steps=args.steps, fps=args.fps,
             ))
             torch.cuda.synchronize()
