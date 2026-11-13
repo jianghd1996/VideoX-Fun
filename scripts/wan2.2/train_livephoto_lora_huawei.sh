@@ -6,7 +6,7 @@ DATASET_NAME="${DATASET_NAME:-/cache/training_data}"
 DATASET_META_NAME="${DATASET_META_NAME:-/cache/training_data/theta30_phi5_self_render_1019_cloud.json}"
 VALIDATION_DATA_DIR="${VALIDATION_DATA_DIR:-/cache/testing_data/livephoto_test}"
 VALIDATION_PROMPT_JSON="${VALIDATION_PROMPT_JSON:-}"
-OUTPUT_DIR="${OUTPUT_DIR:-/cache/output/livephoto_frame_cat_lora_theta30_phi5}"
+OUTPUT_DIR="${OUTPUT_DIR:-/cache/output/livephoto_frame_cat_lora_theta30_phi5_self_render_1019}"
 
 GPU_IDS="${GPU_IDS:-0,1,2,3,4,5,6,7}"
 NUM_PROCESSES="${NUM_PROCESSES:-8}"

@@ -32,7 +32,7 @@ MODEL_DIR = MODEL_ROOT / "Wan2.2-TI2V-5B"
 OUTPUT_DIR = Path(
     os.getenv(
         "OUTPUT_DIR",
-        str(OUTPUT_ROOT / "livephoto_frame_cat_lora_theta30_phi5"),
+        str(OUTPUT_ROOT / "livephoto_frame_cat_lora_theta30_phi5_self_render_1019"),
     )
 )
 
@@ -69,7 +69,7 @@ MODEL_OBS_URI = os.getenv(
 OUTPUT_OBS_URI = os.getenv(
     "OUTPUT_OBS_URI",
     "s3://bucket-si-wulan/jianghognda/03_output/"
-    "livephoto_frame_cat_lora_theta30_phi5/",
+    "livephoto_frame_cat_lora_theta30_phi5_self_render_1019/",
 )
 
 FORCE_COPY = os.getenv("FORCE_COPY", "0").lower() in {"1", "true", "yes"}
