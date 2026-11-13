@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Huawei Cloud/ModelArts bootstrap for VideoX-Fun trajectory LoRA training."""
+"""Huawei Cloud/ModelArts bootstrap for first-frame LivePhoto frame-cat LoRA training."""
 
 import importlib.util
 import json
@@ -27,7 +27,7 @@ MODEL_DIR = MODEL_ROOT / "Wan2.2-TI2V-5B"
 OUTPUT_DIR = Path(
     os.getenv(
         "OUTPUT_DIR",
-        str(OUTPUT_ROOT / "trajectory_lora_theta30_phi5_self_render_1019"),
+        str(OUTPUT_ROOT / "livephoto_frame_cat_lora_theta30_phi5"),
     )
 )
 
@@ -54,7 +54,7 @@ MODEL_OBS_URI = os.getenv(
 OUTPUT_OBS_URI = os.getenv(
     "OUTPUT_OBS_URI",
     "s3://bucket-si-wulan/jianghognda/03_output/"
-    "trajectory_lora_theta30_phi5_self_render_1019/",
+    "livephoto_frame_cat_lora_theta30_phi5/",
 )
 
 FORCE_COPY = os.getenv("FORCE_COPY", "0").lower() in {"1", "true", "yes"}
@@ -160,7 +160,7 @@ def build_training_metadata() -> Path:
 
 def patch_cloud_python39_compatibility() -> None:
     """Remove an unused datasets import that breaks with some cloud Python 3.9 images."""
-    train_script = REPO_DIR / "scripts/wan2.2/train_lora.py"
+    train_script = REPO_DIR / "scripts/wan2.2/train_livephoto_lora.py"
     if not train_script.is_file():
         raise FileNotFoundError(f"Training script does not exist: {train_script}")
 
@@ -388,7 +388,7 @@ def main() -> None:
     ensure_python_package("accelerate", "accelerate")
     ensure_python_package("tensorboard", "tensorboard")
 
-    launcher = REPO_DIR / "scripts/wan2.2/train_lora_huawei.sh"
+    launcher = REPO_DIR / "scripts/wan2.2/train_livephoto_lora_huawei.sh"
     if not launcher.is_file():
         raise FileNotFoundError(
             f"Cloud launcher is missing: {launcher}. "
