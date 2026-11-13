@@ -22,7 +22,12 @@ OUTPUT_ROOT = CACHE_ROOT / "output"
 REPO_DIR = CODE_ROOT / "VideoX-Fun-Single8"
 TOOLS_DIR = CODE_ROOT / "tools"
 DATASET_DIR = DATA_ROOT / "theta30_phi5_self_render_1019"
-VALIDATION_DATA_DIR = TEST_DATA_ROOT / "livephoto_test"
+VALIDATION_DATA_DIR = TEST_DATA_ROOT
+VALIDATION_DATASETS = {
+    "livephoto_test": TEST_DATA_ROOT / "livephoto_test",
+    "B007_物": TEST_DATA_ROOT / "B007_物",
+    "B007_人": TEST_DATA_ROOT / "B007_人",
+}
 MODEL_DIR = MODEL_ROOT / "Wan2.2-TI2V-5B"
 OUTPUT_DIR = Path(
     os.getenv(
@@ -43,9 +48,19 @@ DATA_OBS_URI = os.getenv(
     "DATA_OBS_URI",
     "s3://bucket-si-wulan/jianghognda/00_data/theta30_phi5_self_render_1019/",
 )
-TEST_DATA_OBS_URI = os.getenv(
-    "TEST_DATA_OBS_URI",
+LIVEPHOTO_TEST_OBS_URI = os.getenv(
+    "LIVEPHOTO_TEST_OBS_URI",
+    os.getenv("TEST_DATA_OBS_URI",
     "s3://bucket-si-wulan/jianghognda/00_data_test/livephoto_test/",
+    ),
+)
+B007_OBJECT_TEST_OBS_URI = os.getenv(
+    "B007_OBJECT_TEST_OBS_URI",
+    "s3://bucket-si-wulan/jianghognda/00_data_test/B007_物/",
+)
+B007_PERSON_TEST_OBS_URI = os.getenv(
+    "B007_PERSON_TEST_OBS_URI",
+    "s3://bucket-si-wulan/jianghognda/00_data_test/B007_人/",
 )
 MODEL_OBS_URI = os.getenv(
     "MODEL_OBS_URI",
@@ -156,6 +171,57 @@ def build_training_metadata() -> Path:
         f"skipped {len(errors)} missing samples",
         flush=True,
     )
+    return target_json
+
+
+def build_validation_metadata() -> Path:
+    """Merge the three image/caption test sets into one relative-path index."""
+    combined: Dict[str, str] = {}
+    for dataset_name, dataset_dir in VALIDATION_DATASETS.items():
+        preferred = dataset_dir / "caption.json"
+        if preferred.is_file():
+            prompt_json = preferred
+        else:
+            json_files = sorted(dataset_dir.glob("*.json"))
+            if len(json_files) != 1:
+                raise RuntimeError(
+                    f"Expected caption.json or exactly one JSON in {dataset_dir}; "
+                    f"found {[p.name for p in json_files]}"
+                )
+            prompt_json = json_files[0]
+
+        with prompt_json.open("r", encoding="utf-8") as handle:
+            prompt_map = json.load(handle)
+        if not isinstance(prompt_map, dict) or not prompt_map:
+            raise RuntimeError(f"Validation captions must be a non-empty object: {prompt_json}")
+
+        loaded = 0
+        for image_name, caption in prompt_map.items():
+            if not isinstance(caption, str) or not caption.strip():
+                continue
+            raw_path = Path(str(image_name))
+            candidates = [dataset_dir / str(image_name), dataset_dir / raw_path.name]
+            image_path = next((path for path in candidates if path.is_file()), None)
+            if image_path is None:
+                print(
+                    f"[validation] WARNING: missing image for {dataset_name}: {image_name}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                continue
+            relative_path = image_path.relative_to(TEST_DATA_ROOT).as_posix()
+            combined[relative_path] = caption.strip()
+            loaded += 1
+        print(f"[validation] {dataset_name}: loaded {loaded} cases", flush=True)
+
+    if len(combined) < 5:
+        raise RuntimeError(f"Need at least 5 validation cases, found {len(combined)}")
+    target_json = TEST_DATA_ROOT / "validation_prompts_combined.json"
+    temporary = target_json.with_suffix(".json.tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(combined, handle, ensure_ascii=False, indent=2)
+    os.replace(temporary, target_json)
+    print(f"[validation] Wrote {len(combined)} combined cases to {target_json}", flush=True)
     return target_json
 
 
@@ -383,10 +449,13 @@ def main() -> None:
     copy_once(CODE_OBS_URI, REPO_DIR, force=FORCE_CODE_COPY)
     copy_once(TOOLS_OBS_URI, TOOLS_DIR)
     copy_once(DATA_OBS_URI, DATASET_DIR)
-    copy_once(TEST_DATA_OBS_URI, VALIDATION_DATA_DIR)
+    copy_once(LIVEPHOTO_TEST_OBS_URI, VALIDATION_DATASETS["livephoto_test"])
+    copy_once(B007_OBJECT_TEST_OBS_URI, VALIDATION_DATASETS["B007_物"])
+    copy_once(B007_PERSON_TEST_OBS_URI, VALIDATION_DATASETS["B007_人"])
     copy_once(MODEL_OBS_URI, MODEL_DIR)
 
     metadata_path = build_training_metadata()
+    validation_prompt_json = build_validation_metadata()
     install_training_environment()
     patch_cloud_python39_compatibility()
     ensure_python_package("accelerate", "accelerate")
@@ -407,6 +476,7 @@ def main() -> None:
             "DATASET_NAME": str(DATA_ROOT),
             "DATASET_META_NAME": str(metadata_path),
             "VALIDATION_DATA_DIR": str(VALIDATION_DATA_DIR),
+            "VALIDATION_PROMPT_JSON": str(validation_prompt_json),
             "OUTPUT_DIR": str(OUTPUT_DIR),
             "PYTHONUNBUFFERED": "1",
         }

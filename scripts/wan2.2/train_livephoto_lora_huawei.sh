@@ -5,6 +5,7 @@ MODEL_NAME="${MODEL_NAME:-/cache/models/Wan2.2-TI2V-5B}"
 DATASET_NAME="${DATASET_NAME:-/cache/training_data}"
 DATASET_META_NAME="${DATASET_META_NAME:-/cache/training_data/theta30_phi5_self_render_1019_cloud.json}"
 VALIDATION_DATA_DIR="${VALIDATION_DATA_DIR:-/cache/testing_data/livephoto_test}"
+VALIDATION_PROMPT_JSON="${VALIDATION_PROMPT_JSON:-}"
 OUTPUT_DIR="${OUTPUT_DIR:-/cache/output/livephoto_frame_cat_lora_theta30_phi5}"
 
 GPU_IDS="${GPU_IDS:-0,1,2,3,4,5,6,7}"
@@ -17,6 +18,9 @@ CONDITION_TOKEN_COUNT="${CONDITION_TOKEN_COUNT:-1}"
 mkdir -p "${OUTPUT_DIR}"
 
 EXTRA_ARGS=(--initial_global_step="${INITIAL_GLOBAL_STEP:-0}")
+if [[ -n "${VALIDATION_PROMPT_JSON}" ]]; then
+  EXTRA_ARGS+=(--validation_prompt_json="${VALIDATION_PROMPT_JSON}")
+fi
 if [[ -n "${PRETRAIN_LORA:-}" ]]; then
   EXTRA_ARGS+=(--transformer_path="${PRETRAIN_LORA}")
 fi
@@ -31,6 +35,7 @@ echo "Model:            ${MODEL_NAME}"
 echo "Dataset:          ${DATASET_NAME}"
 echo "Metadata:         ${DATASET_META_NAME}"
 echo "Validation:       ${VALIDATION_DATA_DIR}"
+echo "Validation JSON:  ${VALIDATION_PROMPT_JSON:-auto-detect}"
 echo "Output:           ${OUTPUT_DIR}"
 echo "Condition tokens: ${CONDITION_TOKEN_COUNT} (first frame only)"
 echo "GPU IDs:          ${GPU_IDS}"
@@ -90,6 +95,7 @@ accelerate launch \
   --validation_steps=200 \
   --validation_epochs=0 \
   --validation_cases_per_process=1 \
+  --validation_random_cases=5 \
   --validation_test_case_index=0 \
   --validation_sample_size=720 \
   --validation_num_inference_steps=8 \
