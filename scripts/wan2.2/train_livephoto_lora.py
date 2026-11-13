@@ -418,9 +418,21 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, args, c
             if args.train_mode != "normal":
                 with Image.open(image_path) as start_image:
                     width, height = start_image.size
-                width, height = calculate_dimensions(
-                    args.validation_sample_size * args.validation_sample_size,
-                    width / height,
+                scale = min(
+                    1088 / min(width, height),
+                    1664 / max(width, height),
+                )
+                # Match the production LivePhoto inference rule. The pipeline
+                # receives height/width and Wan VAE spatial sizes stay on a
+                # 32-pixel grid while preserving the input aspect ratio.
+                sample_size = [
+                    max(32, round(edge * scale / 32) * 32)
+                    for edge in (height, width)
+                ]
+                height, width = sample_size
+                logger.info(
+                    "Validation sample size for %s: height=%d width=%d",
+                    image_path, height, width,
                 )
                 video_length = (
                     (args.video_sample_n_frames - 1)
