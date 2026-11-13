@@ -340,6 +340,9 @@ def install_training_environment() -> None:
         ("av", "av", "15.1.0"),
         ("ftfy", "ftfy", "6.3.1"),
         ("tensorboard", "tensorboard", "2.20.0"),
+        # torch 2.6.x pairs with torchvision 0.21.x. Install without
+        # dependencies so pip cannot replace the cloud CUDA torch wheel.
+        ("torchvision", "torchvision", "0.21.0"),
         ("timm", "timm", "1.0.22"),
         ("tomesd", "tomesd", None),
         ("torchdiffeq", "torchdiffeq", None),
@@ -364,9 +367,15 @@ def install_training_environment() -> None:
             installed = metadata.version(package)
         except metadata.PackageNotFoundError:
             installed = None
-        if installed is not None:
+        enforce_exact = package == "torchvision"
+        if installed is not None and (not enforce_exact or installed == version):
             print(f"[env] Keeping {package}=={installed}", flush=True)
             continue
+        if installed is not None:
+            print(
+                f"[env] Replacing incompatible {package}=={installed} with {version}",
+                flush=True,
+            )
         spec = f"{package}=={version}" if version else package
         print(f"[env] Installing missing {spec}", flush=True)
         command = [
@@ -377,10 +386,15 @@ def install_training_environment() -> None:
         # The Huawei mirror may not expose the already installed CUDA torch
         # wheel to pip's resolver. PEFT's torch>=1.13 requirement is satisfied
         # by our checked torch 2.6; do not make pip resolve it again.
-        if package in {"peft", "timm", "tomesd", "torchdiffeq", "torchsde"}:
+        if package in {"torchvision", "peft", "timm", "tomesd", "torchdiffeq", "torchsde"}:
             command.append("--no-deps")
         command.append(spec)
         subprocess.run(command, check=True)
+    import torchvision
+    print(
+        f"[env] torchvision {torchvision.__version__} imports successfully",
+        flush=True,
+    )
     remove_broken_optional_datasets()
 
 
