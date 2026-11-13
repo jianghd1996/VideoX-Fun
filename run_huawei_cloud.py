@@ -58,16 +58,17 @@ OUTPUT_OBS_URI = os.getenv(
 )
 
 FORCE_COPY = os.getenv("FORCE_COPY", "0").lower() in {"1", "true", "yes"}
+FORCE_CODE_COPY = os.getenv("FORCE_CODE_COPY", "1").lower() in {"1", "true", "yes"}
 STRICT_DATASET = os.getenv("STRICT_DATASET", "0").lower() in {"1", "true", "yes"}
 SYNC_INTERVAL_SECONDS = max(60, int(os.getenv("SYNC_INTERVAL_SECONDS", "300")))
 
 
-def copy_once(source: str, destination: Path) -> None:
+def copy_once(source: str, destination: Path, force: bool = False) -> None:
     """Copy an OBS directory once and mark only completed copies."""
     destination.mkdir(parents=True, exist_ok=True)
     marker = destination / ".mox_copy_complete"
 
-    if marker.exists() and not FORCE_COPY:
+    if marker.exists() and not FORCE_COPY and not force:
         print(f"[cache] Skip existing completed copy: {destination}", flush=True)
         return
 
@@ -376,7 +377,10 @@ def main() -> None:
         directory.mkdir(parents=True, exist_ok=True)
     os.chdir(CACHE_ROOT)
 
-    copy_once(CODE_OBS_URI, REPO_DIR)
+    # Code is small and should follow the newly uploaded branch even when a
+    # persistent /cache contains an old completion marker. Large data/model
+    # directories keep their normal copy-once behavior.
+    copy_once(CODE_OBS_URI, REPO_DIR, force=FORCE_CODE_COPY)
     copy_once(TOOLS_OBS_URI, TOOLS_DIR)
     copy_once(DATA_OBS_URI, DATASET_DIR)
     copy_once(TEST_DATA_OBS_URI, VALIDATION_DATA_DIR)
